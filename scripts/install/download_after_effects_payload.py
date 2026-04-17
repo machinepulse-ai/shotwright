@@ -5,15 +5,19 @@ import asyncio
 from pathlib import Path
 
 from download_utils import AdobeDownloadManager, DownloadTask
+from setup_versions import parse_setup_versions
+
+
+DEFAULT_SETUP = parse_setup_versions(Path(__file__).resolve().parents[2] / "setup-versions.yml")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download an After Effects payload layout for container installs.")
     parser.add_argument("--payload-root", type=Path, default=Path(r"C:\ae-container-lab\payload"))
-    parser.add_argument("--product-id", default="AEFT")
-    parser.add_argument("--version", default="26.2")
+    parser.add_argument("--product-id", default=DEFAULT_SETUP["product_id"])
+    parser.add_argument("--version", default=DEFAULT_SETUP["current"])
     parser.add_argument("--language", default="ALL")
-    parser.add_argument("--platform", default="win64")
+    parser.add_argument("--platform", default=DEFAULT_SETUP["platform"])
     parser.add_argument("--proxy-url", default=None)
     parser.add_argument("--skip-helper", action="store_true")
     return parser.parse_args()

@@ -17,8 +17,8 @@ This repository should stay:
 - The Docker image includes Node.js, Python 3.13, ffmpeg, Git, and the runtime dependencies required by nexrender.
 - Adobe After Effects is intentionally not included in the image.
 - Two runtime modes are supported:
-  1. **Host mount** — mount `C:\Program Files\Adobe\Adobe After Effects 2026` from the host into the container.
-  2. **Installer-cache mode** — pull a pre-built installer payload image from GHCR (or mount a locally prepared cache) at `C:\lab\payload` and let the container install AE at startup through `scripts/runtime_entrypoint.ps1`.
+  1. **Host mount** — mount the host-side AE install resolved from `setup-versions.yml` into the container.
+  2. **Installer-cache mode** — pull a pre-built installer payload image from GHCR first, or build the cache locally with `scripts/install/download_after_effects_payload.py`, then mount it at `C:\data\payload` and let the container install AE at startup through `scripts/runtime_entrypoint.ps1`.
 - `AUTO_INSTALL_AFTER_EFFECTS=1` is enabled by default in the Dockerfile. If no installer cache is mounted, the install step is skipped.
 - Validation uses `scripts/validate/create_validation_animation_project.jsx` to generate the test project and `scripts/validate/validation_patch.jsx` to make composition-level edits only.
 - nexrender owns the final render execution and output handling. Do not move render-queue logic into the validation patch script.
@@ -32,7 +32,7 @@ scripts/
   install/                 installer and cache-related scripts
   validate/                validation render scripts
   runtime_entrypoint.ps1   container entrypoint
-  pull_mcr_image.py        MCR image helper
+  pull_container_image.py  OCI image helper for GHCR, MCR, and similar registries
 ```
 
 New scripts should go under `install/` or `validate/` unless they are true top-level runtime entrypoints. Keep `runtime_entrypoint.ps1` at the root of `scripts/` because the Dockerfile references it directly.
@@ -47,6 +47,7 @@ New scripts should go under `install/` or `validate/` unless they are true top-l
 ## Important Context
 
 - Proxy-aware builds are already wired through the Dockerfile via `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`.
+- `scripts/install/setup_versions.py` is the shared reader for `setup-versions.yml`. Prefer it over duplicating version parsing in docs or workflows.
 - `nvm.install` is optional because GitHub release downloads can fail behind restrictive enterprise proxies.
 - The validation flow deliberately uses `outputExt: mp4` and `@nexrender/action-copy` to copy `result.mp4` into the final output path.
 - A previous validation design mixed render control into the patch script and caused duplicate outputs plus confusing failures. Keep the patch script render-free.
@@ -86,8 +87,8 @@ Last validated on **2026-04-17**:
 - Documentation examples should use `C:\data\...` as the canonical host-side path.
 - The repository mount inside the container is `C:\workspace`.
 - Validation data inside the container is mounted at `C:\data`.
-- Installer cache data is mounted at `C:\lab\payload`.
-- The fixed AE install target is `C:\Program Files\Adobe\Adobe After Effects 2026`.
+- Installer cache data is mounted at `C:\data\payload`.
+- The AE install target should be resolved from `setup-versions.yml` through `scripts/install/setup_versions.py`, typically `C:\Program Files\Adobe\Adobe After Effects <year>`.
 
 ## CI Workflow
 

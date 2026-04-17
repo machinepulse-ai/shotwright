@@ -3,6 +3,9 @@ param(
     [string]$ContainerName = 'shotwright-validation',
     [string]$AfterEffectsPayloadRoot = '',
     [string]$CreativeCloudHelperRoot = '',
+    [string]$HostAeRoot = '',
+    [string]$ContainerAeRoot = '',
+    [string]$PythonBinary = 'python',
     [int]$InstallTimeoutSeconds = 1800
 )
 
@@ -12,11 +15,91 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $DataRoot = Join-Path $ProjectRoot 'validation-data'
 $OutputMp4 = Join-Path $DataRoot 'output\validation.mp4'
 $WorkRoot = Join-Path $DataRoot 'work'
-$ContainerPayloadRoot = 'C:\lab\payload'
-$ContainerAeRoot = 'C:\Program Files\Adobe\Adobe After Effects 2026'
-$AeBinary = Join-Path $ContainerAeRoot 'Support Files\AfterFX.exe'
-$AeRenderBinary = Join-Path $ContainerAeRoot 'Support Files\aerender.exe'
+$ContainerPayloadRoot = 'C:\data\payload'
 $UseInstallerPayload = -not [string]::IsNullOrWhiteSpace($AfterEffectsPayloadRoot) -or -not [string]::IsNullOrWhiteSpace($CreativeCloudHelperRoot)
+$ContainerAfterEffectsPayloadDirName = ''
+$ContainerCreativeCloudHelperDirName = ''
+$SetupVersionsScriptPath = Join-Path $ProjectRoot 'scripts\install\setup_versions.py'
+$SetupVersionsConfigPath = Join-Path $ProjectRoot 'setup-versions.yml'
+
+function Get-SetupVersionsField {
+    param([string]$Field)
+
+    if (-not (Test-Path $SetupVersionsScriptPath) -or -not (Test-Path $SetupVersionsConfigPath)) {
+        return ''
+    }
+
+    try {
+        $value = & $PythonBinary $SetupVersionsScriptPath --config $SetupVersionsConfigPath --field $Field 2>$null
+        if ($LASTEXITCODE -ne 0 -or $null -eq $value) {
+            return ''
+        }
+
+        return $value.ToString().Trim()
+    }
+    catch {
+        return ''
+    }
+}
+
+function Get-AfterEffectsVersionFromPayloadDirName {
+    param([string]$DirectoryName)
+
+    if ([string]::IsNullOrWhiteSpace($DirectoryName)) {
+        return ''
+    }
+
+    $match = [regex]::Match($DirectoryName, '^[^_]+_(?<version>\d+(?:\.\d+)*)_[^_]+$')
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return $match.Groups['version'].Value
+}
+
+function Resolve-AfterEffectsInstallRoot {
+    param(
+        [string]$Version,
+        [string]$InstallDirectoryName
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($InstallDirectoryName)) {
+        return (Join-Path 'C:\Program Files\Adobe' $InstallDirectoryName)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return ''
+    }
+
+    $majorText = $Version.Split('.', 2)[0]
+    $majorVersion = 0
+    if (-not [int]::TryParse($majorText, [ref]$majorVersion)) {
+        return ''
+    }
+
+    if ($majorVersion -lt 10) {
+        return ''
+    }
+
+    return "C:\Program Files\Adobe\Adobe After Effects $(2000 + $majorVersion)"
+}
+
+function Find-LatestInstalledAfterEffectsRoot {
+    $adobeRoot = 'C:\Program Files\Adobe'
+    if (-not (Test-Path $adobeRoot)) {
+        return ''
+    }
+
+    $candidate = Get-ChildItem -Path $adobeRoot -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+
+    if ($null -eq $candidate) {
+        return ''
+    }
+
+    return $candidate.FullName
+}
 
 if ($UseInstallerPayload -and (
     [string]::IsNullOrWhiteSpace($AfterEffectsPayloadRoot) -or
@@ -25,8 +108,50 @@ if ($UseInstallerPayload -and (
     throw 'When using installer payload mode, both -AfterEffectsPayloadRoot and -CreativeCloudHelperRoot are required.'
 }
 
+if ($UseInstallerPayload) {
+    $ContainerAfterEffectsPayloadDirName = Split-Path -Leaf $AfterEffectsPayloadRoot
+    $ContainerCreativeCloudHelperDirName = Split-Path -Leaf $CreativeCloudHelperRoot
+    if ([string]::IsNullOrWhiteSpace($ContainerAfterEffectsPayloadDirName)) {
+        throw 'Unable to determine the After Effects payload directory name from -AfterEffectsPayloadRoot.'
+    }
+    if ([string]::IsNullOrWhiteSpace($ContainerCreativeCloudHelperDirName)) {
+        throw 'Unable to determine the Creative Cloud helper directory name from -CreativeCloudHelperRoot.'
+    }
+}
+
+$ResolvedInstallRoot = ''
+if (-not [string]::IsNullOrWhiteSpace($ContainerAeRoot)) {
+    $ResolvedInstallRoot = $ContainerAeRoot
+}
+else {
+    $ResolvedInstallRoot = Get-SetupVersionsField -Field 'install_root'
+}
+
+if ([string]::IsNullOrWhiteSpace($ResolvedInstallRoot)) {
+    $payloadVersion = Get-AfterEffectsVersionFromPayloadDirName -DirectoryName $ContainerAfterEffectsPayloadDirName
+    $installDirName = Get-SetupVersionsField -Field 'install_dir_name'
+    $ResolvedInstallRoot = Resolve-AfterEffectsInstallRoot -Version $payloadVersion -InstallDirectoryName $installDirName
+}
+
+if ([string]::IsNullOrWhiteSpace($ResolvedInstallRoot)) {
+    $ResolvedInstallRoot = Find-LatestInstalledAfterEffectsRoot
+}
+
+if ([string]::IsNullOrWhiteSpace($ResolvedInstallRoot)) {
+    throw 'Unable to determine the After Effects install root from setup-versions.yml, the payload directory name, or an explicit -HostAeRoot/-ContainerAeRoot override.'
+}
+
+if ([string]::IsNullOrWhiteSpace($ContainerAeRoot)) {
+    $ContainerAeRoot = $ResolvedInstallRoot
+}
+if ([string]::IsNullOrWhiteSpace($HostAeRoot)) {
+    $HostAeRoot = $ResolvedInstallRoot
+}
+
+$AeBinary = Join-Path $ContainerAeRoot 'Support Files\AfterFX.exe'
+$AeRenderBinary = Join-Path $ContainerAeRoot 'Support Files\aerender.exe'
+
 if (-not $UseInstallerPayload) {
-    $HostAeRoot = 'C:\Program Files\Adobe\Adobe After Effects 2026'
     $HostAeBinary = Join-Path $HostAeRoot 'Support Files\AfterFX.exe'
     $HostAeRenderBinary = Join-Path $HostAeRoot 'Support Files\aerender.exe'
     if (-not (Test-Path $HostAeBinary)) {
@@ -110,8 +235,11 @@ if ($UseInstallerPayload) {
         throw "Creative Cloud helper root not found at $CreativeCloudHelperRoot"
     }
 
-    $dockerArgs += @('-v', "${AfterEffectsPayloadRoot}:${ContainerPayloadRoot}\AEFT_26.2_win64")
-    $dockerArgs += @('-v', "${CreativeCloudHelperRoot}:${ContainerPayloadRoot}\CreativeCloudHelper_win64")
+    $dockerArgs += @('-e', "SHOTWRIGHT_AFTER_EFFECTS_PAYLOAD_DIR_NAME=$ContainerAfterEffectsPayloadDirName")
+    $dockerArgs += @('-e', "SHOTWRIGHT_CREATIVE_CLOUD_HELPER_DIR_NAME=$ContainerCreativeCloudHelperDirName")
+    $dockerArgs += @('-e', "SHOTWRIGHT_INSTALL_ROOT=$ContainerAeRoot")
+    $dockerArgs += @('-v', "${AfterEffectsPayloadRoot}:${ContainerPayloadRoot}\$ContainerAfterEffectsPayloadDirName")
+    $dockerArgs += @('-v', "${CreativeCloudHelperRoot}:${ContainerPayloadRoot}\$ContainerCreativeCloudHelperDirName")
 } else {
     $dockerArgs += @('-v', "${HostAeRoot}:${ContainerAeRoot}")
 }

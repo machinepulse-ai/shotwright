@@ -46,24 +46,13 @@ jobs:
         id: versions
         shell: pwsh
         run: |
-          pip install pyyaml --quiet 2>&1 | Out-Null
-          @'
-          import yaml, json
-          with open("setup-versions.yml") as f:
-              data = yaml.safe_load(f)
-          current = data["current"]
-          ver = data["versions"][current]
-          print(json.dumps({
-              "current": current,
-              "product_id": ver.get("product-id", "AEFT"),
-              "platform": ver.get("platform", "win64")
-          }))
-          '@ | Set-Content -Path _parse_versions.py -Encoding utf8
-          $json = python _parse_versions.py
-          Remove-Item _parse_versions.py
+          $json = python scripts/install/setup_versions.py
           $parsed = $json | ConvertFrom-Json
           "current=$($parsed.current)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "platform=$($parsed.platform)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "payload_dir_name=$($parsed.payload_dir_name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "helper_dir_name=$($parsed.helper_dir_name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "ghcr_image=$($parsed.ghcr_image)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Login to GHCR
         shell: pwsh
@@ -73,9 +62,7 @@ jobs:
       - name: Pull setup image from GHCR
         shell: pwsh
         run: |
-          $repo = '${{ github.repository }}'.ToLower()
-          $ver = '${{ steps.versions.outputs.current }}'
-          $imageTag = "ghcr.io/${repo}/after-effects-setup:${ver}"
+          $imageTag = '${{ steps.versions.outputs.ghcr_image }}'
           docker pull $imageTag
           "SETUP_IMAGE=$imageTag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -96,12 +83,10 @@ jobs:
       - name: Install After Effects and render validation mp4
         shell: pwsh
         run: |
-          $ver = '${{ steps.versions.outputs.current }}'
-          $platform = '${{ steps.versions.outputs.platform }}'
           powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
             -ImageTag shotwright:ci `
-            -AfterEffectsPayloadRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT "AEFT_${ver}_${platform}") `
-            -CreativeCloudHelperRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT "CreativeCloudHelper_${platform}")
+            -AfterEffectsPayloadRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT '${{ steps.versions.outputs.payload_dir_name }}') `
+            -CreativeCloudHelperRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT '${{ steps.versions.outputs.helper_dir_name }}')
 
       - name: Validate mp4 with ffprobe
         shell: pwsh

@@ -1,10 +1,12 @@
 param(
-    [string]$InstallerPayloadRoot = 'C:\lab\payload',
+    [string]$InstallerPayloadRoot = 'C:\data\payload',
     [string]$AfterEffectsPayloadRoot = '',
     [string]$CreativeCloudHelperRoot = '',
-    [string]$AfterEffectsPayloadDirName = 'AEFT_26.2_win64',
-    [string]$CreativeCloudHelperDirName = 'CreativeCloudHelper_win64',
-    [string]$InstallRoot = 'C:\Program Files\Adobe\Adobe After Effects 2026',
+    [string]$AfterEffectsPayloadDirName = '',
+    [string]$CreativeCloudHelperDirName = '',
+    [string]$InstallRoot = '',
+    [string]$SetupVersionsConfigPath = 'C:\workspace\setup-versions.yml',
+    [string]$SetupVersionsScriptPath = 'C:\workspace\scripts\install\setup_versions.py',
     [string]$PatchScriptPath = 'C:\workspace\scripts\install\modify_setup_win.py',
     [string]$PythonBinary = 'python',
     [switch]$RequirePayload
@@ -12,11 +14,149 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if ([string]::IsNullOrWhiteSpace($AfterEffectsPayloadRoot)) {
+function Find-InstallerDirectoryName {
+    param(
+        [string]$Root,
+        [string]$Filter
+    )
+
+    if (-not (Test-Path $Root)) {
+        return ''
+    }
+
+    $candidate = Get-ChildItem -Path $Root -Directory -Filter $Filter -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+
+    if ($null -eq $candidate) {
+        return ''
+    }
+
+    return $candidate.Name
+}
+
+function Get-SetupVersionsField {
+    param([string]$Field)
+
+    if (-not (Test-Path $SetupVersionsScriptPath) -or -not (Test-Path $SetupVersionsConfigPath)) {
+        return ''
+    }
+
+    try {
+        $value = & $PythonBinary $SetupVersionsScriptPath --config $SetupVersionsConfigPath --field $Field 2>$null
+        if ($LASTEXITCODE -ne 0 -or $null -eq $value) {
+            return ''
+        }
+
+        return $value.ToString().Trim()
+    }
+    catch {
+        return ''
+    }
+}
+
+function Get-AfterEffectsVersionFromPayloadDirName {
+    param([string]$DirectoryName)
+
+    if ([string]::IsNullOrWhiteSpace($DirectoryName)) {
+        return ''
+    }
+
+    $match = [regex]::Match($DirectoryName, '^[^_]+_(?<version>\d+(?:\.\d+)*)_[^_]+$')
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return $match.Groups['version'].Value
+}
+
+function Resolve-AfterEffectsInstallRoot {
+    param(
+        [string]$Version,
+        [string]$InstallDirectoryName
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($InstallDirectoryName)) {
+        return (Join-Path 'C:\Program Files\Adobe' $InstallDirectoryName)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return ''
+    }
+
+    $majorText = $Version.Split('.', 2)[0]
+    $majorVersion = 0
+    if (-not [int]::TryParse($majorText, [ref]$majorVersion)) {
+        return ''
+    }
+
+    if ($majorVersion -lt 10) {
+        return ''
+    }
+
+    return "C:\Program Files\Adobe\Adobe After Effects $(2000 + $majorVersion)"
+}
+
+function Find-LatestInstalledAfterEffectsRoot {
+    $adobeRoot = 'C:\Program Files\Adobe'
+    if (-not (Test-Path $adobeRoot)) {
+        return ''
+    }
+
+    $candidate = Get-ChildItem -Path $adobeRoot -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+
+    if ($null -eq $candidate) {
+        return ''
+    }
+
+    return $candidate.FullName
+}
+
+if ([string]::IsNullOrWhiteSpace($AfterEffectsPayloadDirName)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:SHOTWRIGHT_AFTER_EFFECTS_PAYLOAD_DIR_NAME)) {
+        $AfterEffectsPayloadDirName = $env:SHOTWRIGHT_AFTER_EFFECTS_PAYLOAD_DIR_NAME
+    } elseif (-not [string]::IsNullOrWhiteSpace($AfterEffectsPayloadRoot)) {
+        $AfterEffectsPayloadDirName = Split-Path -Leaf $AfterEffectsPayloadRoot
+    } else {
+        $AfterEffectsPayloadDirName = Find-InstallerDirectoryName -Root $InstallerPayloadRoot -Filter 'AEFT_*'
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($CreativeCloudHelperDirName)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:SHOTWRIGHT_CREATIVE_CLOUD_HELPER_DIR_NAME)) {
+        $CreativeCloudHelperDirName = $env:SHOTWRIGHT_CREATIVE_CLOUD_HELPER_DIR_NAME
+    } elseif (-not [string]::IsNullOrWhiteSpace($CreativeCloudHelperRoot)) {
+        $CreativeCloudHelperDirName = Split-Path -Leaf $CreativeCloudHelperRoot
+    } else {
+        $CreativeCloudHelperDirName = Find-InstallerDirectoryName -Root $InstallerPayloadRoot -Filter 'CreativeCloudHelper_*'
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($AfterEffectsPayloadRoot) -and -not [string]::IsNullOrWhiteSpace($AfterEffectsPayloadDirName)) {
     $AfterEffectsPayloadRoot = Join-Path $InstallerPayloadRoot $AfterEffectsPayloadDirName
 }
-if ([string]::IsNullOrWhiteSpace($CreativeCloudHelperRoot)) {
+if ([string]::IsNullOrWhiteSpace($CreativeCloudHelperRoot) -and -not [string]::IsNullOrWhiteSpace($CreativeCloudHelperDirName)) {
     $CreativeCloudHelperRoot = Join-Path $InstallerPayloadRoot $CreativeCloudHelperDirName
+}
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:SHOTWRIGHT_INSTALL_ROOT)) {
+        $InstallRoot = $env:SHOTWRIGHT_INSTALL_ROOT
+    }
+    else {
+        $InstallRoot = Get-SetupVersionsField -Field 'install_root'
+        if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+            $payloadVersion = Get-AfterEffectsVersionFromPayloadDirName -DirectoryName $AfterEffectsPayloadDirName
+            $installDirName = Get-SetupVersionsField -Field 'install_dir_name'
+            $InstallRoot = Resolve-AfterEffectsInstallRoot -Version $payloadVersion -InstallDirectoryName $installDirName
+        }
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    $InstallRoot = Find-LatestInstalledAfterEffectsRoot
 }
 
 $driverXmlPath = Join-Path $AfterEffectsPayloadRoot 'driver.xml'
@@ -24,9 +164,13 @@ $helperSetupPath = Join-Path $CreativeCloudHelperRoot 'HDBox\Setup.exe'
 $helperIpcPath = Join-Path $CreativeCloudHelperRoot 'IPC'
 $targetRoot = 'C:\Program Files\Common Files\Adobe\Adobe Desktop Common'
 $targetSetupPath = Join-Path $targetRoot 'HDBox\Setup.exe'
-$aeRenderBinary = Join-Path $InstallRoot 'Support Files\aerender.exe'
+$aeRenderBinary = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    ''
+} else {
+    Join-Path $InstallRoot 'Support Files\aerender.exe'
+}
 
-if (Test-Path $aeRenderBinary) {
+if (-not [string]::IsNullOrWhiteSpace($aeRenderBinary) -and (Test-Path $aeRenderBinary)) {
     Write-Host 'After Effects already installed.'
     & $aeRenderBinary -version
     return
@@ -46,6 +190,10 @@ if ($missingPaths.Count -gt 0) {
 
     Write-Host 'Skipping After Effects auto-install because installer payload is not mounted.'
     return
+}
+
+if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    throw 'Unable to determine the After Effects install root from SHOTWRIGHT_INSTALL_ROOT, setup-versions.yml, or the payload directory name.'
 }
 
 & $PythonBinary $PatchScriptPath $helperSetupPath

@@ -25,7 +25,7 @@ if (Test-FlagEnabled $autoInstallValue) {
     $payloadRoot = if (-not [string]::IsNullOrWhiteSpace($env:SHOTWRIGHT_INSTALLER_PAYLOAD_ROOT)) {
         $env:SHOTWRIGHT_INSTALLER_PAYLOAD_ROOT
     } else {
-        'C:\lab\payload'
+        'C:\data\payload'
     }
 
     & 'C:\workspace\scripts\install\install_after_effects_in_container.ps1' -InstallerPayloadRoot $payloadRoot

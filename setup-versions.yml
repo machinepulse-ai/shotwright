@@ -3,9 +3,11 @@
 # the AE installer payload, patches the helper Setup.exe, and publishes
 # a container image to GHCR.
 
+image-repository: "ghcr.io/liuchangfreeman/shotwright/after-effects-setup"
 current: "26.2"
 
 versions:
   "26.2":
     product-id: AEFT
     platform: win64
+    install-dir-name: "Adobe After Effects 2026"

@@ -6,7 +6,7 @@
 
 ### 面向 AI 智能体的容器化 Adobe After Effects 运行时
 
-构建 Windows 渲染工作节点，既可以挂载真实的 After Effects 安装，也可以从许可的安装缓存自动安装；同时对 nexrender 输出做端到端验证，让设计师专注创意，而不是被基础设施拖住。
+构建 Windows 渲染工作节点，既可以挂载真实的 After Effects 安装，也可以从 GHCR 托管或本地准备的安装缓存自动安装；同时对 nexrender 输出做端到端验证，让设计师专注创意，而不是被基础设施拖住。
 
 <p>
 	<img src="https://img.shields.io/badge/windows%20containers-ltsc2025-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows Containers LTSC 2025" />
@@ -75,8 +75,8 @@
 | 能力 | 实际含义 |
 | --- | --- |
 | Windows 运行时镜像 | 构建包含 Node.js、Python 3.13、ffmpeg、Git 与 nexrender 依赖的容器 |
-| 宿主机挂载模式 | 直接使用宿主机上的 Adobe After Effects 2026，而不是把 AE 打包进镜像 |
-| 安装缓存模式 | 从 GHCR 托管或本地准备的安装缓存中安装 After Effects 26.2 |
+| 宿主机挂载模式 | 直接使用与 `setup-versions.yml` 当前版本匹配的宿主机 AE 安装目录，而不是把 AE 打包进镜像 |
+| 安装缓存模式 | 从 GHCR 托管或本地准备的安装缓存中安装 `setup-versions.yml` 当前选中的版本 |
 | 验证工程生成 | 通过 JSX 生成可复现的 AEP，方便重复执行冒烟测试 |
 | 仅补丁 JSX | 验证脚本只负责合成修改，渲染过程完全交由 nexrender |
 
@@ -84,7 +84,7 @@
 
 ```mermaid
 flowchart LR
-		H[宿主 Adobe After Effects 2026] -->|挂载进容器| C[Shotwright Windows 运行时]
+		H[与 setup-versions.yml 匹配的宿主 AE 安装] -->|挂载进容器| C[Shotwright Windows 运行时]
 		C --> P[create_validation_animation_project.jsx]
 		P --> A[validation_motion.aep]
 		A --> N[nexrender-cli]
@@ -98,8 +98,8 @@ flowchart LR
 - Windows 宿主机
 - 已启用 Windows 容器模式的 Docker
 - 满足以下任一条件：
-	- 宿主机已安装 Adobe After Effects 2026
-	- 从 GHCR 拉取安装载荷镜像（见第 3 步）
+	- 宿主机已安装与当前 `setup-versions.yml` 选择匹配的 Adobe After Effects
+	- 按照第 3 步的 GHCR 优先流程获取安装载荷
 
 > [!TIP]
 > 预构建的安装载荷镜像已发布到 GHCR。可用版本见 [setup-versions.yml](setup-versions.yml)。
@@ -144,7 +144,7 @@ docker build `
 
 ### 第 2 步 — 运行验证渲染（宿主机挂载模式）
 
-- 做什么：启动容器，将宿主机上的 After Effects 2026 挂载进去，生成测试 AEP，并通过 nexrender 完成渲染。
+- 做什么：启动容器，将 `setup-versions.yml` 当前版本对应的宿主机 AE 安装目录挂载进去，生成测试 AEP，并通过 nexrender 完成渲染。
 - 结果：得到 `validation-data/output/validation.mp4`，一个 4 秒的 H.264 mp4 文件。
 - 能跳过吗：如果你只关心安装缓存模式，可以直接跳到第 3 步。
 
@@ -154,19 +154,44 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -
 
 ### 第 3 步 — 运行验证渲染（安装缓存模式）
 
-- 做什么：从 GHCR 拉取预构建的安装载荷镜像，提取安装缓存，容器自动安装 After Effects 后执行验证渲染。
-- 结果：同样得到 `validation-data/output/validation.mp4`。
+- 做什么：先从 `setup-versions.yml` 解析当前启用的 setup 版本，再按 GHCR 优先、本地脚本兜底的顺序准备安装缓存。
+- 结果：得到与仓库当前 setup 选择一致的安装缓存目录，然后生成同样的 `validation-data/output/validation.mp4`。
 - 能跳过吗：如果第 2 步已经覆盖了你的验证场景，这一步可选。
 
-拉取安装载荷并提取到本地目录：
+先解析当前启用的 setup 信息。这个脚本会直接读取 `setup-versions.yml`，后面的命令不需要再手写版本号：
 
 ```powershell
-$ver = '26.2'
-$repo = 'ghcr.io/liuchangfreeman/shotwright/after-effects-setup'
-docker pull "${repo}:${ver}"
-docker create --name ae-setup "${repo}:${ver}" cmd /c exit
+$setup = python .\scripts\install\setup_versions.py | ConvertFrom-Json
+```
+
+同一个对象还会给出 `$setup.install_root`，也就是当前版本期望使用的 AE 安装目录。
+
+<p align="center">
+	<img src="./docs/assets/setup-source-comparison-cn.svg" alt="卡通对比图：从 GHCR 拉取 Shotwright 安装镜像，或在本地构建安装缓存" width="960" />
+</p>
+
+优先路径：从 GHCR 拉取安装载荷并提取到本地目录：
+
+```powershell
+docker pull $setup.ghcr_image
+docker create --name ae-setup $setup.ghcr_image cmd /c exit
 docker cp 'ae-setup:C:\payload' 'C:\data\payload'
 docker rm ae-setup
+```
+
+> [!IMPORTANT]
+> Windows 安装镜像体积很大。如果 `docker pull` 经常超时或卡住，优先改用 `scripts/pull_container_image.py`。它会走 `http_proxy` 或 `https_proxy` 下载镜像、保存为本地 docker 归档，并且可以直接 `docker load`：
+>
+> ```powershell
+> python .\scripts\pull_container_image.py --image $setup.ghcr_image --output-dir C:\data\images --load
+> ```
+
+兜底路径：在本地构建安装缓存：
+
+```powershell
+python .\scripts\install\download_after_effects_payload.py --payload-root C:\data\payload
+$helperSetup = Join-Path (Join-Path 'C:\data\payload' $setup.helper_dir_name) 'HDBox\Setup.exe'
+python .\scripts\install\modify_setup_win.py $helperSetup
 ```
 
 运行：
@@ -174,21 +199,9 @@ docker rm ae-setup
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
 	-ImageTag shotwright:dev `
-	-AfterEffectsPayloadRoot 'C:\data\payload\AEFT_26.2_win64' `
-	-CreativeCloudHelperRoot 'C:\data\payload\CreativeCloudHelper_win64'
+	-AfterEffectsPayloadRoot (Join-Path 'C:\data\payload' $setup.payload_dir_name) `
+	-CreativeCloudHelperRoot (Join-Path 'C:\data\payload' $setup.helper_dir_name)
 ```
-
-<details>
-<summary><strong>进阶：在本地从零构建安装缓存</strong></summary>
-
-如果需要自行从 Adobe 目录下载安装缓存而非通过 GHCR 获取：
-
-```powershell
-python scripts\install\download_after_effects_payload.py --payload-root C:\data\payload
-python scripts\install\modify_setup_win.py C:\data\payload\CreativeCloudHelper_win64\HDBox\Setup.exe
-```
-
-</details>
 
 ## 🧱 CI 与 GHCR 安装镜像
 
@@ -213,13 +226,14 @@ scripts/
 		download_utils.py                       Adobe 目录与下载辅助工具
 		install_after_effects_in_container.ps1  在容器内从安装缓存安装 AE
 		modify_setup_win.py                     给 Adobe 辅助安装器 Setup.exe 打补丁
+		setup_versions.py                       从 setup-versions.yml 读取当前 setup 版本和派生目录名
 	validate/
 		create_validation_animation_project.jsx  生成测试 AEP
 		run_validation.ps1                      手动冒烟测试入口
 		validation_nexrender_job.json           最小化 nexrender 任务定义
 		validation_patch.jsx                    仅做补丁的 JSX 脚本
 	runtime_entrypoint.ps1                    容器启动脚本
-	pull_mcr_image.py                         通过代理拉取 MCR 基础镜像的辅助脚本
+	pull_container_image.py                   面向 GHCR、MCR 等 OCI 镜像源的代理下载脚本
 
 validation-data/
 	output/                                   渲染输出产物
@@ -230,7 +244,7 @@ validation-data/
 ## 📝 设计说明
 
 - Docker 镜像本身不包含 Adobe After Effects。
-- 运行时既可以挂载宿主机上的 `C:\Program Files\Adobe\Adobe After Effects 2026`，也可以从 GHCR 安装镜像提取的安装缓存或挂载到 `C:\lab\payload` 的本地安装缓存中安装。
+- 运行时既可以挂载 `setup-versions.yml` 当前版本对应的宿主机 AE 安装目录，也可以把安装缓存中的同版本 AE 安装到容器内对应路径；安装缓存既可以来自 GHCR，也可以来自本地脚本构建结果，并统一挂载到 `C:\data\payload`。
 - 容器启动时会执行 `scripts/runtime_entrypoint.ps1`。当 `AUTO_INSTALL_AFTER_EFFECTS=1` 且检测到安装缓存目录时，会自动安装 AE；否则直接跳过。
 - 验证用 JSX 只负责补丁逻辑，渲染执行与输出管理由 nexrender 统一负责。
 - 验证任务通过 `outputExt: mp4` 和 `@nexrender/action-copy` 保证最终只留下一个稳定、可预期的视频产物。
