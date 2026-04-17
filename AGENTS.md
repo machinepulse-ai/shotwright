@@ -47,6 +47,7 @@ New scripts should go under `install/` or `validate/` unless they are true top-l
 ## Important Context
 
 - Proxy-aware builds are already wired through the Dockerfile via `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`.
+- `shotwright-config.json` is the shared source for host/runner/container paths, Docker base images, and tool version defaults. Prefer it over duplicating environment conventions in scripts or docs.
 - `scripts/install/setup_versions.py` is the shared reader for `setup-versions.yml`. Prefer it over duplicating version parsing in docs or workflows.
 - `nvm.install` is optional because GitHub release downloads can fail behind restrictive enterprise proxies.
 - The validation flow deliberately uses `outputExt: mp4` and `@nexrender/action-copy` to copy `result.mp4` into the final output path.
@@ -89,6 +90,7 @@ Last validated on **2026-04-17**:
 - Validation data inside the container is mounted at `C:\data`.
 - Installer cache data is mounted at `C:\data\payload`.
 - The AE install target should be resolved from `setup-versions.yml` through `scripts/install/setup_versions.py`, typically `C:\Program Files\Adobe\Adobe After Effects <year>`.
+- If these path conventions need to change, update `shotwright-config.json` first so scripts, workflows, and docs can stay aligned.
 
 ## CI Workflow
 

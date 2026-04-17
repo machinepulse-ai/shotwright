@@ -54,7 +54,10 @@ function addFadeAndSlide(layer, startTime, endTime, startPosition, endPosition) 
 app.beginSuppressDialogs();
 app.newProject();
 
-ensureFolder("C:/data/templates");
+var templatesRoot = $.getenv("SHOTWRIGHT_TEMPLATES_ROOT") || "C:/data/templates";
+var defaultYear = $.getenv("SHOTWRIGHT_VALIDATION_YEAR") || "2026";
+
+ensureFolder(templatesRoot);
 
 var project = app.project;
 var comp = project.items.addComp("main", 1920, 1080, 1, 4, 25);
@@ -100,11 +103,11 @@ accentRight.property("Rotation").setValueAtTime(4, -14);
 
 var textMain = addTextLayer(comp, "text_main", "Validation", [960, 360], 138);
 var textSub = addTextLayer(comp, "text_sub", "nexrender container test", [960, 560], 72);
-var textYear = addTextLayer(comp, "text", "2026", [960, 760], 96);
+var textYear = addTextLayer(comp, "text", defaultYear, [960, 760], 96);
 
 addFadeAndSlide(textMain, 0, 4, [960, 430], [960, 340]);
 addFadeAndSlide(textSub, 0.2, 4, [960, 620], [960, 540]);
 addFadeAndSlide(textYear, 0.4, 4, [960, 820], [960, 730]);
 
-project.save(new File("C:/data/templates/validation_motion.aep"));
+project.save(new File(templatesRoot + "/validation_motion.aep"));
 app.quit();

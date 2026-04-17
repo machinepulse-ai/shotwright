@@ -15,9 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load Shotwright config
+        id: config
+        shell: pwsh
+        run: |
+          $config = Get-Content -Raw .\shotwright-config.json | ConvertFrom-Json
+          "python_version=$($config.tooling.ci.pythonVersion)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "payload_temp_dir_name=$($config.paths.githubRunnerWindows.payloadTempDirName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "setup_build_context_dir_name=$($config.paths.githubRunnerWindows.setupBuildContextDirName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "setup_base_image=$($config.tooling.docker.setupBaseImage)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ steps.config.outputs.python_version }}
 
       - name: Parse setup versions
         id: versions
@@ -32,10 +42,30 @@ jobs:
           "helper_dir_name=$($parsed.helper_dir_name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "ghcr_image=$($parsed.ghcr_image)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Download After Effects payload
+      - name: Login to GHCR
         shell: pwsh
         run: |
-          $payloadRoot = Join-Path $env:RUNNER_TEMP 'ae-payload'
+          '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Check if image already exists
+        id: check_image
+        shell: pwsh
+        run: |
+          $imageTag = '${{ steps.versions.outputs.ghcr_image }}'
+          $manifest = docker manifest inspect $imageTag 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Image $imageTag already exists in GHCR — skipping build."
+            "exists=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            Write-Host "Image $imageTag not found — will build and publish."
+            "exists=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+
+      - name: Download After Effects payload
+        if: steps.check_image.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          $payloadRoot = Join-Path $env:RUNNER_TEMP '${{ steps.config.outputs.payload_temp_dir_name }}'
           python scripts/install/download_after_effects_payload.py `
             --payload-root $payloadRoot `
             --product-id '${{ steps.versions.outputs.product_id }}' `
@@ -44,6 +74,7 @@ jobs:
           "PAYLOAD_ROOT=$payloadRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Patch helper Setup.exe
+        if: steps.check_image.outputs.exists != 'true'
         shell: pwsh
         run: |
           $platform = '${{ steps.versions.outputs.platform }}'
@@ -51,9 +82,10 @@ jobs:
           python scripts/install/modify_setup_win.py $helperSetup
 
       - name: Build setup container image
+        if: steps.check_image.outputs.exists != 'true'
         shell: pwsh
         run: |
-          $buildContext = Join-Path $env:RUNNER_TEMP 'ae-setup-build'
+          $buildContext = Join-Path $env:RUNNER_TEMP '${{ steps.config.outputs.setup_build_context_dir_name }}'
           New-Item -ItemType Directory -Force -Path $buildContext | Out-Null
 
           $payloadDest = Join-Path $buildContext 'payload'
@@ -65,18 +97,15 @@ jobs:
 
           $imageTag = '${{ steps.versions.outputs.ghcr_image }}'
           docker build `
+            --build-arg BASE_IMAGE='${{ steps.config.outputs.setup_base_image }}' `
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" `
             --label "org.opencontainers.image.description=After Effects ${{ steps.versions.outputs.current }} installer payload for Shotwright" `
             -t $imageTag $buildContext
 
           "IMAGE_TAG=$imageTag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Login to GHCR
-        shell: pwsh
-        run: |
-          '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-
       - name: Push setup image to GHCR
+        if: steps.check_image.outputs.exists != 'true'
         shell: pwsh
         run: |
           docker push $env:IMAGE_TAG

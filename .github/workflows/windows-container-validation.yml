@@ -15,6 +15,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load Shotwright config
+        id: config
+        shell: pwsh
+        run: |
+          $config = Get-Content -Raw .\shotwright-config.json | ConvertFrom-Json
+          "runtime_base_image=$($config.tooling.docker.runtimeBaseImage)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "ci_image_tag=$($config.tooling.docker.defaultCiImageTag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Verify Windows container mode
         shell: pwsh
         run: |
@@ -26,8 +34,8 @@ jobs:
       - name: Build Shotwright image
         shell: pwsh
         run: |
-          docker build -t shotwright:ci .
-          docker image inspect shotwright:ci --format '{{.Id}}'
+          docker build --build-arg BASE_IMAGE='${{ steps.config.outputs.runtime_base_image }}' -t '${{ steps.config.outputs.ci_image_tag }}' .
+          docker image inspect '${{ steps.config.outputs.ci_image_tag }}' --format '{{.Id}}'
 
   validation-render:
     needs: dockerfile-build
@@ -38,9 +46,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Load Shotwright config
+        id: config
+        shell: pwsh
+        run: |
+          $config = Get-Content -Raw .\shotwright-config.json | ConvertFrom-Json
+          "python_version=$($config.tooling.ci.pythonVersion)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "payload_temp_dir_name=$($config.paths.githubRunnerWindows.payloadTempDirName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "runtime_base_image=$($config.tooling.docker.runtimeBaseImage)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "ci_image_tag=$($config.tooling.docker.defaultCiImageTag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ steps.config.outputs.python_version }}
 
       - name: Parse setup versions
         id: versions
@@ -69,7 +87,7 @@ jobs:
       - name: Extract installer payload from setup image
         shell: pwsh
         run: |
-          $payloadRoot = Join-Path $env:RUNNER_TEMP 'ae-payload'
+          $payloadRoot = Join-Path $env:RUNNER_TEMP '${{ steps.config.outputs.payload_temp_dir_name }}'
           docker create --name ae-setup-extract $env:SETUP_IMAGE cmd /c exit
           docker cp 'ae-setup-extract:C:\payload' $payloadRoot
           docker rm ae-setup-extract
@@ -78,13 +96,13 @@ jobs:
       - name: Build Shotwright image
         shell: pwsh
         run: |
-          docker build -t shotwright:ci .
+          docker build --build-arg BASE_IMAGE='${{ steps.config.outputs.runtime_base_image }}' -t '${{ steps.config.outputs.ci_image_tag }}' .
 
       - name: Install After Effects and render validation mp4
         shell: pwsh
         run: |
           powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
-            -ImageTag shotwright:ci `
+            -ImageTag '${{ steps.config.outputs.ci_image_tag }}' `
             -AfterEffectsPayloadRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT '${{ steps.versions.outputs.payload_dir_name }}') `
             -CreativeCloudHelperRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT '${{ steps.versions.outputs.helper_dir_name }}')
 
@@ -97,7 +115,7 @@ jobs:
             throw 'validation.mp4 was not produced.'
           }
 
-          $probeOutput = docker run --rm -v "${outputDir}:C:\output" shotwright:ci powershell -NoProfile -Command "ffprobe -v error -show_entries format=format_name,duration -of default=noprint_wrappers=1 'C:\output\validation.mp4'"
+          $probeOutput = docker run --rm -v "${outputDir}:C:\output" '${{ steps.config.outputs.ci_image_tag }}' powershell -NoProfile -Command "ffprobe -v error -show_entries format=format_name,duration -of default=noprint_wrappers=1 'C:\output\validation.mp4'"
           if ($probeOutput -notmatch 'format_name=.*mp4' -or $probeOutput -notmatch 'duration=') {
             throw "ffprobe did not report a valid mp4 container.`n$probeOutput"
           }

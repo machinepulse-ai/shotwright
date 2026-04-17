@@ -1,0 +1,40 @@
+{
+  "paths": {
+    "hostWindows": {
+      "dataRoot": "C:\\data",
+      "payloadDirName": "payload",
+      "imageArchiveDirName": "images"
+    },
+    "githubRunnerWindows": {
+      "payloadTempDirName": "ae-payload",
+      "setupBuildContextDirName": "ae-setup-build"
+    },
+    "windowsContainer": {
+      "repositoryRoot": "C:\\workspace",
+      "dataRoot": "C:\\data",
+      "payloadDirName": "payload",
+      "templatesDirName": "templates",
+      "outputDirName": "output",
+      "workDirName": "work",
+      "adobeInstallBaseRoot": "C:\\Program Files\\Adobe"
+    }
+  },
+  "workspace": {
+    "validationDataDirName": "validation-data",
+    "templatesDirName": "templates",
+    "outputDirName": "output",
+    "workDirName": "work",
+    "validationProjectFileName": "validation_motion.aep",
+    "validationOutputFileName": "validation.mp4"
+  },
+  "tooling": {
+    "docker": {
+      "runtimeBaseImage": "mcr.microsoft.com/windows/server:ltsc2025",
+      "setupBaseImage": "mcr.microsoft.com/windows/nanoserver:ltsc2025",
+      "defaultCiImageTag": "shotwright:ci"
+    },
+    "ci": {
+      "pythonVersion": "3.13"
+    }
+  }
+}

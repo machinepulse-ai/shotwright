@@ -15,7 +15,16 @@ from typing import Any
 from urllib import error, parse, request
 
 
-DEFAULT_IMAGE = "mcr.microsoft.com/windows/nanoserver:ltsc2025"
+SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from shotwright_config import build_resolved_config, get_default_config_path, load_config
+
+
+_RESOLVED = build_resolved_config(load_config(get_default_config_path()))
+DEFAULT_OUTPUT_DIR = _RESOLVED.host.image_archive_root
+
 DEFAULT_PROXY = os.environ.get("https_proxy") or os.environ.get("http_proxy") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
 CHUNK_SIZE = 32 * 1024 * 1024
 PROGRESS_INTERVAL_SECONDS = 10
@@ -45,11 +54,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download a container image through an HTTP proxy, package it as a docker archive, and optionally docker load it locally."
     )
-    parser.add_argument("--image", default=DEFAULT_IMAGE, help="Full image reference, for example ghcr.io/liuchangfreeman/shotwright/after-effects-setup:<VER>")
+    parser.add_argument("--image", required=True, help="Full image reference, for example ghcr.io/liuchangfreeman/shotwright/after-effects-setup:<VER>")
     parser.add_argument("--proxy", default=DEFAULT_PROXY)
     parser.add_argument("--platform-os", default="windows")
     parser.add_argument("--platform-arch", default="amd64")
-    parser.add_argument("--output-dir", default=r"C:\data\images")
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--archive-name", default=None)
     parser.add_argument("--load", action="store_true", help="Run docker load after the archive is created.")
     return parser.parse_args()

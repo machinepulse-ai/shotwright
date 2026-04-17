@@ -24,6 +24,9 @@
 > [!NOTE]
 > 本文约定如下：AI Agent 统一译为“AI 智能体”；proxy 统一译为“代理”；installer cache 统一称为“安装缓存”。
 
+> [!NOTE]
+> 宿主机路径、容器路径、runner 临时目录名、基础镜像标签和 nexrender 版本等共享默认值，现在统一放在 [shotwright-config.json](shotwright-config.json)；`setup-versions.yml` 仍然只负责当前选中的 AE setup 版本。
+
 <details>
 <summary><strong>目录</strong></summary>
 

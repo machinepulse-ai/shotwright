@@ -1,18 +1,47 @@
 param(
-    [string]$InstallerPayloadRoot = 'C:\data\payload',
+    [string]$InstallerPayloadRoot = '',
     [string]$AfterEffectsPayloadRoot = '',
     [string]$CreativeCloudHelperRoot = '',
     [string]$AfterEffectsPayloadDirName = '',
     [string]$CreativeCloudHelperDirName = '',
     [string]$InstallRoot = '',
-    [string]$SetupVersionsConfigPath = 'C:\workspace\setup-versions.yml',
-    [string]$SetupVersionsScriptPath = 'C:\workspace\scripts\install\setup_versions.py',
-    [string]$PatchScriptPath = 'C:\workspace\scripts\install\modify_setup_win.py',
+    [string]$SetupVersionsConfigPath = '',
+    [string]$SetupVersionsScriptPath = '',
+    [string]$PatchScriptPath = '',
     [string]$PythonBinary = 'python',
     [switch]$RequirePayload
 )
 
 $ErrorActionPreference = 'Stop'
+
+$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$ConfigPath = Join-Path $ProjectRoot 'shotwright-config.json'
+if (-not (Test-Path $ConfigPath)) {
+    throw "Shotwright config not found at $ConfigPath"
+}
+
+$ShotwrightConfig = Get-Content -Raw $ConfigPath | ConvertFrom-Json
+$ContainerPaths = $ShotwrightConfig.paths.windowsContainer
+$AdobeInstallBaseRoot = $ContainerPaths.adobeInstallBaseRoot
+
+if ([string]::IsNullOrWhiteSpace($InstallerPayloadRoot)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:SHOTWRIGHT_INSTALLER_PAYLOAD_ROOT)) {
+        $InstallerPayloadRoot = $env:SHOTWRIGHT_INSTALLER_PAYLOAD_ROOT
+    }
+    else {
+        $InstallerPayloadRoot = Join-Path $ContainerPaths.dataRoot $ContainerPaths.payloadDirName
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($SetupVersionsConfigPath)) {
+    $SetupVersionsConfigPath = Join-Path $ProjectRoot 'setup-versions.yml'
+}
+if ([string]::IsNullOrWhiteSpace($SetupVersionsScriptPath)) {
+    $SetupVersionsScriptPath = Join-Path $ProjectRoot 'scripts\install\setup_versions.py'
+}
+if ([string]::IsNullOrWhiteSpace($PatchScriptPath)) {
+    $PatchScriptPath = Join-Path $ProjectRoot 'scripts\install\modify_setup_win.py'
+}
 
 function Find-InstallerDirectoryName {
     param(
@@ -77,7 +106,7 @@ function Resolve-AfterEffectsInstallRoot {
     )
 
     if (-not [string]::IsNullOrWhiteSpace($InstallDirectoryName)) {
-        return (Join-Path 'C:\Program Files\Adobe' $InstallDirectoryName)
+        return (Join-Path $script:AdobeInstallBaseRoot $InstallDirectoryName)
     }
 
     if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -94,16 +123,15 @@ function Resolve-AfterEffectsInstallRoot {
         return ''
     }
 
-    return "C:\Program Files\Adobe\Adobe After Effects $(2000 + $majorVersion)"
+    return (Join-Path $script:AdobeInstallBaseRoot "Adobe After Effects $(2000 + $majorVersion)")
 }
 
 function Find-LatestInstalledAfterEffectsRoot {
-    $adobeRoot = 'C:\Program Files\Adobe'
-    if (-not (Test-Path $adobeRoot)) {
+    if (-not (Test-Path $script:AdobeInstallBaseRoot)) {
         return ''
     }
 
-    $candidate = Get-ChildItem -Path $adobeRoot -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue |
+    $candidate = Get-ChildItem -Path $script:AdobeInstallBaseRoot -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending |
         Select-Object -First 1
 
@@ -162,7 +190,7 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 $driverXmlPath = Join-Path $AfterEffectsPayloadRoot 'driver.xml'
 $helperSetupPath = Join-Path $CreativeCloudHelperRoot 'HDBox\Setup.exe'
 $helperIpcPath = Join-Path $CreativeCloudHelperRoot 'IPC'
-$targetRoot = 'C:\Program Files\Common Files\Adobe\Adobe Desktop Common'
+$targetRoot = $ContainerPaths.desktopCommonRoot
 $targetSetupPath = Join-Path $targetRoot 'HDBox\Setup.exe'
 $aeRenderBinary = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     ''

@@ -1,2 +1,3 @@
-FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
+ARG BASE_IMAGE=mcr.microsoft.com/windows/nanoserver:ltsc2025
+FROM ${BASE_IMAGE}
 COPY payload/ C:/payload/

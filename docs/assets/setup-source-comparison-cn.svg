@@ -1,26 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="860" viewBox="0 0 1200 860" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900" fill="none">
   <defs>
-    <linearGradient id="bg" x1="90" y1="50" x2="1110" y2="810" gradientUnits="userSpaceOnUse">
+    <linearGradient id="bg" x1="90" y1="50" x2="1110" y2="850" gradientUnits="userSpaceOnUse">
       <stop stop-color="#F8F2E4" />
       <stop offset="1" stop-color="#E6F1EF" />
     </linearGradient>
-    <linearGradient id="leftCard" x1="70" y1="150" x2="560" y2="760" gradientUnits="userSpaceOnUse">
+    <linearGradient id="leftCard" x1="70" y1="150" x2="560" y2="800" gradientUnits="userSpaceOnUse">
       <stop stop-color="#FFF7D7" />
       <stop offset="1" stop-color="#FFFDF5" />
     </linearGradient>
-    <linearGradient id="rightCard" x1="640" y1="150" x2="1130" y2="760" gradientUnits="userSpaceOnUse">
+    <linearGradient id="rightCard" x1="640" y1="150" x2="1130" y2="800" gradientUnits="userSpaceOnUse">
       <stop stop-color="#E6F8F3" />
       <stop offset="1" stop-color="#F8FFFD" />
     </linearGradient>
   </defs>
 
-  <rect width="1200" height="860" rx="42" fill="url(#bg)" />
+  <rect width="1200" height="900" rx="42" fill="url(#bg)" />
 
   <text x="600" y="78" text-anchor="middle" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="38" font-weight="700">两种拿到 AE 安装载荷的方式</text>
   <text x="600" y="113" text-anchor="middle" fill="#4D6B64" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="20">先读取 setup-versions.yml 的当前版本，再根据环境选择最快的交付路径。</text>
 
   <g>
-    <rect x="62" y="152" width="500" height="600" rx="34" fill="url(#leftCard)" stroke="#E1B343" stroke-width="4" />
+    <rect x="62" y="152" width="500" height="610" rx="34" fill="url(#leftCard)" stroke="#E1B343" stroke-width="4" />
     <rect x="86" y="176" width="178" height="42" rx="21" fill="#17443B" />
     <text x="175" y="203" text-anchor="middle" fill="#FFF8E5" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">优先路径</text>
 
@@ -43,19 +43,19 @@
     <path d="M312 598 V614" stroke="#E08E57" stroke-width="7" stroke-linecap="round" stroke-dasharray="8 10" />
     <path d="M294 607 L312 625 L330 607" stroke="#E08E57" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none" />
 
-    <rect x="120" y="602" width="384" height="62" rx="22" fill="#F6FBFC" stroke="#8DB7AE" stroke-width="4" />
-    <rect x="176" y="614" width="272" height="38" rx="12" fill="#FFE5A8" stroke="#D2A04C" stroke-width="3" />
-    <text x="312" y="639" text-anchor="middle" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="19" font-weight="700">宿主机 C:\payload</text>
+    <rect x="120" y="594" width="384" height="54" rx="20" fill="#F6FBFC" stroke="#8DB7AE" stroke-width="4" />
+    <rect x="176" y="604" width="272" height="34" rx="11" fill="#FFE5A8" stroke="#D2A04C" stroke-width="3" />
+    <text x="312" y="627" text-anchor="middle" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">宿主机 C:\payload</text>
 
-    <path d="M96 658 H528" stroke="#D6D5C7" stroke-width="2" />
+    <path d="M96 644 H528" stroke="#D6D5C7" stroke-width="2" />
 
-    <text x="98" y="684" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">为什么优先选这条</text>
-    <text x="98" y="712" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18">1. 最适合 CI 和验证渲染的快速启动</text>
-    <text x="98" y="736" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18">2. 不用在 setup 阶段再走一次 Adobe 目录下载</text>
+    <text x="98" y="670" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">为什么优先选这条</text>
+    <text x="98" y="696" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="16">1. 最适合 CI 和验证渲染的快速启动</text>
+    <text x="98" y="718" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="16">2. 不用在 setup 阶段再走一次 Adobe 目录下载</text>
   </g>
 
   <g>
-    <rect x="638" y="152" width="500" height="600" rx="34" fill="url(#rightCard)" stroke="#55A48D" stroke-width="4" />
+    <rect x="638" y="152" width="500" height="610" rx="34" fill="url(#rightCard)" stroke="#55A48D" stroke-width="4" />
     <rect x="662" y="176" width="170" height="42" rx="21" fill="#116B51" />
     <text x="747" y="203" text-anchor="middle" fill="#F1FFF9" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18" font-weight="700">兜底路径</text>
 
@@ -78,10 +78,10 @@
     <text x="976" y="589" text-anchor="middle" fill="#183F39" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="700">CreativeCloud</text>
     <text x="976" y="614" text-anchor="middle" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="17">Helper + 补丁</text>
 
-    <path d="M672 658 H1104" stroke="#D6D5C7" stroke-width="2" />
+    <path d="M672 644 H1104" stroke="#D6D5C7" stroke-width="2" />
 
-    <text x="674" y="684" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">为什么保留这条</text>
-    <text x="674" y="712" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18">1. 在 setup 镜像尚未发布时仍然可用</text>
-    <text x="674" y="736" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="18">2. 你可以完整检查和控制本地缓存内容</text>
+    <text x="674" y="670" fill="#183F39" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="20" font-weight="700">为什么保留这条</text>
+    <text x="674" y="696" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="16">1. 在 setup 镜像尚未发布时仍然可用</text>
+    <text x="674" y="718" fill="#486761" font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif" font-size="16">2. 你可以完整检查和控制本地缓存内容</text>
   </g>
 </svg>

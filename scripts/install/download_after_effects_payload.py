@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from download_utils import AdobeDownloadManager, DownloadTask
 from setup_versions import parse_setup_versions
 
+SCRIPT_ROOT = Path(__file__).resolve().parents[1]
+if str(SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_ROOT))
+
+from shotwright_config import build_resolved_config, get_default_config_path, load_config
+
 
 DEFAULT_SETUP = parse_setup_versions(Path(__file__).resolve().parents[2] / "setup-versions.yml")
+_RESOLVED = build_resolved_config(load_config(get_default_config_path()))
+DEFAULT_PAYLOAD_ROOT = Path(_RESOLVED.host.payload_root)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download an After Effects payload layout for container installs.")
-    parser.add_argument("--payload-root", type=Path, default=Path(r"C:\ae-container-lab\payload"))
+    parser.add_argument("--payload-root", type=Path, default=DEFAULT_PAYLOAD_ROOT)
     parser.add_argument("--product-id", default=DEFAULT_SETUP["product_id"])
     parser.add_argument("--version", default=DEFAULT_SETUP["current"])
     parser.add_argument("--language", default="ALL")

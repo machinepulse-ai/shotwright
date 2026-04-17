@@ -1,4 +1,5 @@
-FROM mcr.microsoft.com/windows/server:ltsc2025
+ARG BASE_IMAGE=mcr.microsoft.com/windows/server:ltsc2025
+FROM ${BASE_IMAGE}
 
 ARG http_proxy
 ARG https_proxy

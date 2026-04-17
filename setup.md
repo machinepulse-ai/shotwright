@@ -19,6 +19,8 @@ $setup = python .\scripts\install\setup_versions.py | ConvertFrom-Json
 
 This object also includes `$setup.install_root`, the AE install directory expected for the selected version.
 
+Cross-environment defaults such as host payload roots, runner temp subdirectory names, container mount roots, and base image tags are centralized in [shotwright-config.json](shotwright-config.json).
+
 <p align="center">
     <img src="./docs/assets/setup-source-comparison.svg" alt="Cartoon comparison of pulling the setup image from GHCR versus building the installer cache locally" width="960" />
 </p>

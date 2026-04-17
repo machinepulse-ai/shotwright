@@ -33,6 +33,9 @@ Build Windows render workers, mount a real After Effects install or auto-install
 > [!NOTE]
 > In this README, installer cache means the After Effects package set used for container installation, either pulled from GHCR or prepared locally.
 
+> [!NOTE]
+> Shared defaults such as host and container paths, runner temp subdirectory names, base image tags, and nexrender package versions now live in [shotwright-config.json](shotwright-config.json). `setup-versions.yml` remains the source of truth for the selected AE setup version.
+
 <details>
 <summary><strong>Jump to section</strong></summary>
 

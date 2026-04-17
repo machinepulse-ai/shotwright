@@ -1,6 +1,6 @@
 param(
-    [string]$ImageTag = 'shotwright:dev',
-    [string]$ContainerName = 'shotwright-validation',
+    [string]$ImageTag = '',
+    [string]$ContainerName = '',
     [string]$AfterEffectsPayloadRoot = '',
     [string]$CreativeCloudHelperRoot = '',
     [string]$HostAeRoot = '',
@@ -12,10 +12,39 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$DataRoot = Join-Path $ProjectRoot 'validation-data'
-$OutputMp4 = Join-Path $DataRoot 'output\validation.mp4'
-$WorkRoot = Join-Path $DataRoot 'work'
-$ContainerPayloadRoot = 'C:\data\payload'
+$ConfigPath = Join-Path $ProjectRoot 'shotwright-config.json'
+if (-not (Test-Path $ConfigPath)) {
+    throw "Shotwright config not found at $ConfigPath"
+}
+
+$ShotwrightConfig = Get-Content -Raw $ConfigPath | ConvertFrom-Json
+$WorkspaceConfig = $ShotwrightConfig.workspace
+$ContainerPaths = $ShotwrightConfig.paths.windowsContainer
+
+if ([string]::IsNullOrWhiteSpace($ImageTag)) {
+    $ImageTag = 'shotwright:dev'
+}
+if ([string]::IsNullOrWhiteSpace($ContainerName)) {
+    $ContainerName = 'shotwright-validation'
+}
+
+$DataRoot = Join-Path $ProjectRoot $WorkspaceConfig.validationDataDirName
+$TemplatesRoot = Join-Path $DataRoot $WorkspaceConfig.templatesDirName
+$OutputRoot = Join-Path $DataRoot $WorkspaceConfig.outputDirName
+$WorkRoot = Join-Path $DataRoot $WorkspaceConfig.workDirName
+$OutputMp4 = Join-Path $OutputRoot $WorkspaceConfig.validationOutputFileName
+$GeneratedValidationJobPath = Join-Path $WorkRoot 'validation_nexrender_job.generated.json'
+$ValidationJobTemplatePath = Join-Path $ProjectRoot 'scripts\validate\validation_nexrender_job.json'
+$ContainerPayloadRoot = Join-Path $ContainerPaths.dataRoot $ContainerPaths.payloadDirName
+$ContainerTemplatesRoot = Join-Path $ContainerPaths.dataRoot $ContainerPaths.templatesDirName
+$ContainerOutputRoot = Join-Path $ContainerPaths.dataRoot $ContainerPaths.outputDirName
+$ContainerWorkRoot = Join-Path $ContainerPaths.dataRoot $ContainerPaths.workDirName
+$ContainerValidationProjectPath = Join-Path $ContainerTemplatesRoot $WorkspaceConfig.validationProjectFileName
+$ContainerValidationOutputPath = Join-Path $ContainerOutputRoot $WorkspaceConfig.validationOutputFileName
+$ContainerGeneratedValidationJobPath = Join-Path $ContainerWorkRoot 'validation_nexrender_job.generated.json'
+$ContainerValidationPatchPath = Join-Path $ContainerPaths.repositoryRoot 'scripts\validate\validation_patch.jsx'
+$ContainerValidationProjectScriptPath = Join-Path $ContainerPaths.repositoryRoot 'scripts\validate\create_validation_animation_project.jsx'
+$ValidationYearText = Get-Date -Format 'yyyy'
 $UseInstallerPayload = -not [string]::IsNullOrWhiteSpace($AfterEffectsPayloadRoot) -or -not [string]::IsNullOrWhiteSpace($CreativeCloudHelperRoot)
 $ContainerAfterEffectsPayloadDirName = ''
 $ContainerCreativeCloudHelperDirName = ''
@@ -64,7 +93,7 @@ function Resolve-AfterEffectsInstallRoot {
     )
 
     if (-not [string]::IsNullOrWhiteSpace($InstallDirectoryName)) {
-        return (Join-Path 'C:\Program Files\Adobe' $InstallDirectoryName)
+        return (Join-Path $ContainerPaths.adobeInstallBaseRoot $InstallDirectoryName)
     }
 
     if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -81,16 +110,15 @@ function Resolve-AfterEffectsInstallRoot {
         return ''
     }
 
-    return "C:\Program Files\Adobe\Adobe After Effects $(2000 + $majorVersion)"
+    return (Join-Path $ContainerPaths.adobeInstallBaseRoot "Adobe After Effects $(2000 + $majorVersion)")
 }
 
 function Find-LatestInstalledAfterEffectsRoot {
-    $adobeRoot = 'C:\Program Files\Adobe'
-    if (-not (Test-Path $adobeRoot)) {
+    if (-not (Test-Path $ContainerPaths.adobeInstallBaseRoot)) {
         return ''
     }
 
-    $candidate = Get-ChildItem -Path $adobeRoot -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue |
+    $candidate = Get-ChildItem -Path $ContainerPaths.adobeInstallBaseRoot -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue |
         Sort-Object Name -Descending |
         Select-Object -First 1
 
@@ -99,6 +127,49 @@ function Find-LatestInstalledAfterEffectsRoot {
     }
 
     return $candidate.FullName
+}
+
+function Convert-ToFileUri {
+    param([string]$WindowsPath)
+
+    $normalized = $WindowsPath -replace '\\', '/'
+    return "file:///$normalized"
+}
+
+function Convert-ToForwardSlashPath {
+    param([string]$WindowsPath)
+
+    return ($WindowsPath -replace '\\', '/')
+}
+
+function Write-ValidationJobFile {
+    param(
+        [string]$TemplatePath,
+        [string]$OutputPath,
+        [string]$TemplateSrc,
+        [string]$PatchScriptSrc,
+        [string]$OutputFile,
+        [string]$YearText
+    )
+
+    $template = Get-Content -Raw $TemplatePath
+    $replacements = @{
+        '__TEMPLATE_SRC__' = Convert-ToFileUri $TemplateSrc
+        '__PATCH_SCRIPT_SRC__' = Convert-ToFileUri $PatchScriptSrc
+        '__OUTPUT_FILE__' = Convert-ToForwardSlashPath $OutputFile
+        '__COMP_NAME__' = 'main'
+        '__OUTPUT_EXT__' = 'mp4'
+        '__DURATION__' = '4'
+        '__TEXT_MAIN__' = 'NEXRENDER OK'
+        '__TEXT_SUB__' = 'cloud container smoke test'
+        '__TEXT_YEAR__' = [string]$YearText
+    }
+
+    foreach ($key in $replacements.Keys) {
+        $template = $template.Replace($key, $replacements[$key])
+    }
+
+    Set-Content -Path $OutputPath -Value $template -Encoding utf8
 }
 
 if ($UseInstallerPayload -and (
@@ -141,6 +212,11 @@ if ([string]::IsNullOrWhiteSpace($ResolvedInstallRoot)) {
     throw 'Unable to determine the After Effects install root from setup-versions.yml, the payload directory name, or an explicit -HostAeRoot/-ContainerAeRoot override.'
 }
 
+$setupReleaseYear = Get-SetupVersionsField -Field 'release_year'
+if (-not [string]::IsNullOrWhiteSpace($setupReleaseYear)) {
+    $ValidationYearText = $setupReleaseYear
+}
+
 if ([string]::IsNullOrWhiteSpace($ContainerAeRoot)) {
     $ContainerAeRoot = $ResolvedInstallRoot
 }
@@ -163,8 +239,9 @@ if (-not $UseInstallerPayload) {
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'output') | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $DataRoot 'templates') | Out-Null
+New-Item -ItemType Directory -Force -Path $TemplatesRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
+Write-ValidationJobFile -TemplatePath $ValidationJobTemplatePath -OutputPath $GeneratedValidationJobPath -TemplateSrc $ContainerValidationProjectPath -PatchScriptSrc $ContainerValidationPatchPath -OutputFile $ContainerValidationOutputPath -YearText $ValidationYearText
 
 function Get-ContainerLogsText {
     param([string]$Name)
@@ -222,9 +299,11 @@ $dockerArgs = @(
     '-d',
     '--name', $ContainerName,
     '--isolation', 'process',
-    '-v', "${ProjectRoot}:C:\workspace",
-    '-v', "${DataRoot}:C:\data",
-    '-w', 'C:\workspace'
+    '-e', "SHOTWRIGHT_TEMPLATES_ROOT=$ContainerTemplatesRoot",
+    '-e', "SHOTWRIGHT_VALIDATION_YEAR=$ValidationYearText",
+    '-v', "${ProjectRoot}:$($ContainerPaths.repositoryRoot)",
+    '-v', "${DataRoot}:$($ContainerPaths.dataRoot)",
+    '-w', $ContainerPaths.repositoryRoot
 )
 
 if ($UseInstallerPayload) {
@@ -252,11 +331,11 @@ try {
         Wait-ForAfterEffectsInstall -Name $ContainerName -AeRenderBinaryPath $AeRenderBinary -TimeoutSeconds $InstallTimeoutSeconds
     }
 
-    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item 'C:\data\templates\validation_motion.aep' -ErrorAction SilentlyContinue; `$proc = Start-Process -FilePath '$AeBinary' -ArgumentList '-r','C:\workspace\scripts\validate\create_validation_animation_project.jsx' -PassThru; `$proc | Wait-Process -Timeout 300; if (-not (Test-Path 'C:\data\templates\validation_motion.aep')) { throw 'validation AEP not generated'; } }"
+    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item '$ContainerValidationProjectPath' -ErrorAction SilentlyContinue; `$proc = Start-Process -FilePath '$AeBinary' -ArgumentList '-r','$ContainerValidationProjectScriptPath' -PassThru; `$proc | Wait-Process -Timeout 300; if (-not (Test-Path '$ContainerValidationProjectPath')) { throw 'validation AEP not generated'; } }"
 
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item 'C:\data\output\validation.mp4' -ErrorAction SilentlyContinue; & nexrender-cli.cmd -f 'C:\workspace\scripts\validate\validation_nexrender_job.json' -w 'C:\data\work' -b '$AeRenderBinary' --skip-cleanup --debug; exit `$LASTEXITCODE }"
+    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item '$ContainerValidationOutputPath' -ErrorAction SilentlyContinue; & nexrender-cli.cmd -f '$ContainerGeneratedValidationJobPath' -w '$ContainerWorkRoot' -b '$AeRenderBinary' --skip-cleanup --debug; exit `$LASTEXITCODE }"
     $renderExitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousErrorActionPreference
 

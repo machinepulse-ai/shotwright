@@ -1,20 +1,20 @@
 {
   "template": {
-    "src": "file:///C:/data/templates/validation_motion.aep",
+    "src": "__TEMPLATE_SRC__",
     "name": "validation_motion.aep",
-    "composition": "main",
-    "outputExt": "mp4"
+    "composition": "__COMP_NAME__",
+    "outputExt": "__OUTPUT_EXT__"
   },
   "assets": [
     {
-      "src": "file:///C:/workspace/scripts/validate/validation_patch.jsx",
+      "src": "__PATCH_SCRIPT_SRC__",
       "name": "validation_patch.jsx",
       "type": "script",
       "parameters": [
         {
           "type": "string",
           "key": "comp",
-          "value": "main"
+          "value": "__COMP_NAME__"
         },
         {
           "type": "number",
@@ -29,22 +29,22 @@
         {
           "type": "string",
           "key": "duration",
-          "value": 4.0
+          "value": "__DURATION__"
         },
         {
           "type": "string",
           "key": "text_main",
-          "value": "NEXRENDER OK"
+          "value": "__TEXT_MAIN__"
         },
         {
           "type": "string",
           "key": "text_sub",
-          "value": "cloud container smoke test"
+          "value": "__TEXT_SUB__"
         },
         {
           "type": "string",
           "key": "text",
-          "value": "2026"
+          "value": "__TEXT_YEAR__"
         }
       ]
     }
@@ -54,7 +54,7 @@
       {
         "module": "@nexrender/action-copy",
         "input": "result.mp4",
-        "output": "C:/data/output/validation.mp4"
+        "output": "__OUTPUT_FILE__"
       }
     ]
   },
