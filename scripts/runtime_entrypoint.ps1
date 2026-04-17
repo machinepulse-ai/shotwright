@@ -28,7 +28,7 @@ if (Test-FlagEnabled $autoInstallValue) {
         'C:\lab\payload'
     }
 
-    & 'C:\workspace\scripts\install_after_effects_in_container.ps1' -InstallerPayloadRoot $payloadRoot
+    & 'C:\workspace\scripts\install\install_after_effects_in_container.ps1' -InstallerPayloadRoot $payloadRoot
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

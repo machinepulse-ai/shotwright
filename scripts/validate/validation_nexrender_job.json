@@ -7,7 +7,7 @@
   },
   "assets": [
     {
-      "src": "file:///C:/workspace/scripts/validation_patch.jsx",
+      "src": "file:///C:/workspace/scripts/validate/validation_patch.jsx",
       "name": "validation_patch.jsx",
       "type": "script",
       "parameters": [

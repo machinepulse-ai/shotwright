@@ -9,8 +9,6 @@ on:
       - keepalive.ps1
       - package.json
       - scripts/**
-      - src/**
-      - tsconfig.json
   pull_request:
     paths:
       - .dockerignore
@@ -19,8 +17,6 @@ on:
       - keepalive.ps1
       - package.json
       - scripts/**
-      - src/**
-      - tsconfig.json
   workflow_dispatch:
 
 jobs:
@@ -90,7 +86,7 @@ jobs:
       - name: Install After Effects and render validation mp4
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File .\scripts\run_validation.ps1 `
+          powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
             -ImageTag shotwright:ci `
             -AfterEffectsPayloadRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT 'AEFT_26.2_win64') `
             -CreativeCloudHelperRoot (Join-Path $env:SHOTWRIGHT_PAYLOAD_ROOT 'CreativeCloudHelper_win64')

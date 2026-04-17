@@ -5,7 +5,7 @@ param(
     [string]$AfterEffectsPayloadDirName = 'AEFT_26.2_win64',
     [string]$CreativeCloudHelperDirName = 'CreativeCloudHelper_win64',
     [string]$InstallRoot = 'C:\Program Files\Adobe\Adobe After Effects 2026',
-    [string]$PatchScriptPath = 'C:\workspace\scripts\modify_setup_win.py',
+    [string]$PatchScriptPath = 'C:\workspace\scripts\install\modify_setup_win.py',
     [string]$PythonBinary = 'python',
     [switch]$RequirePayload
 )

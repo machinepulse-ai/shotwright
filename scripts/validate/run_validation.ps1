@@ -124,11 +124,11 @@ try {
         Wait-ForAfterEffectsInstall -Name $ContainerName -AeRenderBinaryPath $AeRenderBinary -TimeoutSeconds $InstallTimeoutSeconds
     }
 
-    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item 'C:\data\templates\validation_motion.aep' -ErrorAction SilentlyContinue; `$proc = Start-Process -FilePath '$AeBinary' -ArgumentList '-r','C:\workspace\scripts\create_validation_animation_project.jsx' -PassThru; `$proc | Wait-Process -Timeout 300; if (-not (Test-Path 'C:\data\templates\validation_motion.aep')) { throw 'validation AEP not generated'; } }"
+    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item 'C:\data\templates\validation_motion.aep' -ErrorAction SilentlyContinue; `$proc = Start-Process -FilePath '$AeBinary' -ArgumentList '-r','C:\workspace\scripts\validate\create_validation_animation_project.jsx' -PassThru; `$proc | Wait-Process -Timeout 300; if (-not (Test-Path 'C:\data\templates\validation_motion.aep')) { throw 'validation AEP not generated'; } }"
 
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item 'C:\data\output\validation.mp4' -ErrorAction SilentlyContinue; & nexrender-cli.cmd -f 'C:\workspace\scripts\validation_nexrender_job.json' -w 'C:\data\work' -b '$AeRenderBinary' --skip-cleanup --debug; exit `$LASTEXITCODE }"
+    docker exec $ContainerName powershell -NoProfile -Command "& { Remove-Item 'C:\data\output\validation.mp4' -ErrorAction SilentlyContinue; & nexrender-cli.cmd -f 'C:\workspace\scripts\validate\validation_nexrender_job.json' -w 'C:\data\work' -b '$AeRenderBinary' --skip-cleanup --debug; exit `$LASTEXITCODE }"
     $renderExitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousErrorActionPreference
 

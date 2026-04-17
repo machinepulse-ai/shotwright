@@ -2,9 +2,11 @@
 
 # Shotwright
 
+[简体中文](README-cn.md) | English
+
 ### Container-first Adobe After Effects runtime for AI agents
 
-Build Windows render workers, mount a real After Effects install or auto-install from a licensed payload cache, and validate nexrender output end to end without turning designers into infrastructure operators.
+Build Windows render workers, mount a real After Effects install or auto-install from a licensed payload cache, and validate nexrender output end to end — without turning designers into infrastructure operators.
 
 <p>
 	<img src="https://img.shields.io/badge/windows%20containers-ltsc2025-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows Containers LTSC 2025" />
@@ -37,7 +39,6 @@ Build Windows render workers, mount a real After Effects install or auto-install
 - [Validation Flow](#-validation-flow)
 - [Requirements](#-requirements)
 - [Quick Start](#-quick-start)
-- [MCP Tools](#-mcp-tools)
 - [Project Layout](#-project-layout)
 - [Design Notes](#-design-notes)
 - [Roadmap](#-roadmap)
@@ -74,8 +75,6 @@ Most AI video products shrink the creative surface area: fewer decisions, fewer 
 - Make infrastructure disappear into the background while taste stays with the human.
 - Treat After Effects like a serious runtime foundation, not a toy wrapper around a panel script.
 
-The project is inspired by Dakkshin's after-effects-mcp, but the center of gravity here is different: worker runtime infrastructure first, deterministic tool execution second, and designer control throughout.
-
 ## 🧰 Capabilities
 
 | Capability | What it means in practice |
@@ -85,7 +84,6 @@ The project is inspired by Dakkshin's after-effects-mcp, but the center of gravi
 | Payload install mode | Can install After Effects 26.2 inside the container from a mounted, user-supplied payload cache |
 | Validation project generation | Creates a reproducible AEP from JSX so smoke tests are easy to replay |
 | Patch-only validation script | Keeps the JSX focused on composition edits while nexrender owns rendering |
-| MCP control plane | Exposes status, validation render, and cleanup operations through deterministic tools |
 
 ## 🔄 Validation Flow
 
@@ -104,7 +102,6 @@ flowchart LR
 
 - Windows host
 - Docker with Windows containers enabled
-- Node.js 20+
 - One of the following:
 	- Adobe After Effects 2026 installed on the host
 	- A licensed After Effects 26.2 payload cache plus Creative Cloud helper payload
@@ -117,18 +114,22 @@ flowchart LR
 
 ## 🚀 Quick Start
 
-### 1. Build the image
+### Step 1 — Build the Docker image
+
+**What**: Produce a Windows container image with Node.js, Python, ffmpeg, and nexrender pre-installed.
+**Result**: A local Docker image tagged `shotwright:dev`.
+**Skip**: You cannot skip this step. The image is the foundation for all subsequent steps.
 
 ```powershell
-docker build -t shotwright:dev -f Dockerfile .
+docker build -t shotwright:dev .
 ```
 
-The Dockerfile enables container-side After Effects installation by default with `AUTO_INSTALL_AFTER_EFFECTS=1`.
+The Dockerfile defaults to `AUTO_INSTALL_AFTER_EFFECTS=1`, meaning the container will attempt to install AE from a mounted payload at startup. If no payload is mounted, the install step is silently skipped.
 
-If you only want host-mount mode, disable it explicitly:
+To explicitly disable auto-install:
 
 ```powershell
-docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:dev -f Dockerfile .
+docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:dev .
 ```
 
 <details>
@@ -141,152 +142,108 @@ docker build `
 	--build-arg https_proxy=$proxy `
 	--build-arg HTTP_PROXY=$proxy `
 	--build-arg HTTPS_PROXY=$proxy `
-	-t shotwright:dev `
-	-f Dockerfile .
+	-t shotwright:dev .
 ```
 
 </details>
 
-### 2. Install dependencies and build the MCP server
+### Step 2 — Run the validation render (host AE mode)
+
+**What**: Start a container, mount the host After Effects 2026 into it, generate a test AEP, and render it through nexrender.
+**Result**: `validation-data/output/validation.mp4` — a 4-second H.264 mp4.
+**Skip**: If you only want to use payload-install mode, jump to Step 3.
 
 ```powershell
-npm install
-npm run build
+powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:dev
 ```
 
-### 3. Run the MCP server
+### Step 3 — Run the validation render (payload install mode)
 
-```powershell
-npm start
-```
+**What**: Mount a licensed payload cache into the container. The container auto-installs After Effects, then runs the same validation render as Step 2.
+**Result**: Same `validation-data/output/validation.mp4`.
+**Skip**: If you already validated with a host AE install (Step 2), this step is optional.
 
-### 4. Run the validation render with a host AE install
+Prepare two directories on the host:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_validation.ps1 -ImageTag shotwright:dev
-```
-
-Expected result:
-
-- `validation-data/templates/validation_motion.aep`
-- `validation-data/output/validation.mp4`
-
-### 5. Run the validation render with container-side installation
-
-If you have a licensed local payload cache, mount it directly into the validation container and let the container auto-install After Effects before rendering:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_validation.ps1 `
-	-ImageTag shotwright:dev `
-	-AfterEffectsPayloadRoot 'D:\Downloads\Adobe Downloader AEFT_26.2-ALL-win64' `
-	-CreativeCloudHelperRoot 'D:\Downloads\AdobeDesktopCommon-win64'
-```
-
-Validated local result:
-
-- `validation-data/output/validation.mp4`
-- `ffprobe` reports `format_name=mov,mp4,m4a,3gp,3g2,mj2` and `duration=4.000000`
-
-### 6. Optional: build a payload cache locally
-
-If you need to assemble a fresh payload cache instead of pointing at an existing one, use the repository script:
-
-```powershell
-& .\.venv\Scripts\python.exe .\scripts\download_after_effects_payload.py --payload-root C:\ae-container-lab\payload
-```
-
-This produces:
-
-- `C:\ae-container-lab\payload\AEFT_26.2_win64`
-- `C:\ae-container-lab\payload\CreativeCloudHelper_win64`
-
-Patch the helper installer before using it outside Shotwright's automatic install flow:
-
-```powershell
-& .\.venv\Scripts\python.exe .\scripts\modify_setup_win.py C:\ae-container-lab\payload\CreativeCloudHelper_win64\HDBox\Setup.exe
-```
-
-## 🧪 MCP Tools
-
-| Tool | Purpose |
+| Directory | Contents |
 | --- | --- |
-| `shotwright_status` | Report Docker, image, After Effects, and artifact readiness |
-| `shotwright_render_validation` | Run the validation render end to end |
-| `shotwright_cleanup_validation` | Remove the temporary validation container |
-| `shotwright_download_installer_source` | Download a caller-supplied official installer URL into a local cache for a specific product/platform |
+| `C:\data\payload\AEFT_26.2_win64` | `driver.xml` and all AE package folders |
+| `C:\data\payload\CreativeCloudHelper_win64` | `HDBox` and `IPC` directories |
 
-### Installer Download Interface
+Run:
 
-Shotwright can cache a user-supplied installer payload, including Windows x64 After Effects sources, without discovering vendor endpoints on its own.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
+	-ImageTag shotwright:dev `
+	-AfterEffectsPayloadRoot 'C:\data\payload\AEFT_26.2_win64' `
+	-CreativeCloudHelperRoot 'C:\data\payload\CreativeCloudHelper_win64'
+```
 
-- The caller must provide the full HTTPS download URL explicitly.
-- Downloads are saved under `downloads/<product>/<platform>/` by default.
-- Set `SHOTWRIGHT_DOWNLOAD_ROOT` to change the cache location.
-- Set `SHOTWRIGHT_DOWNLOAD_ALLOWED_HOSTS` to a comma-separated allowlist if you want to restrict which hosts are accepted.
+### Step 4 — (Optional) Build a payload cache from scratch
 
-Example MCP call payload:
+**What**: Download the After Effects 26.2 installer layout using Adobe's public catalog. This is only needed if you don't already have the payload directories.
+**Result**: `C:\data\payload\AEFT_26.2_win64` and `C:\data\payload\CreativeCloudHelper_win64`.
+**Skip**: If you already have a local payload cache or are using host-mount mode.
 
-```json
-{
-	"sourceUrl": "https://example.invalid/After_Effects_Installer.zip",
-	"product": "after-effects",
-	"platform": "windows-x64",
-	"destinationFileName": "After_Effects_Installer.zip",
-	"overwrite": false
-}
+```powershell
+python scripts\install\download_after_effects_payload.py --payload-root C:\data\payload
+```
+
+Patch the helper installer before first use (one-time operation):
+
+```powershell
+python scripts\install\modify_setup_win.py C:\data\payload\CreativeCloudHelper_win64\HDBox\Setup.exe
 ```
 
 ## 🧱 Installer Cache And CI
 
-The GitHub Actions workflow in `.github/workflows/windows-container-validation.yml` uses `windows-2025` runners to validate that the Dockerfile still builds.
+The GitHub Actions workflow in `.github/workflows/windows-container-validation.yml` uses `windows-2025` runners to validate that the Dockerfile still builds on push/PR.
 
-If you want CI to run the full install-and-render path, provide a private zip cache through the `SHOTWRIGHT_INSTALLER_CACHE_URL` secret. The zip must expand to either:
+The full install-and-render path only runs on `workflow_dispatch` because it needs a private payload zip. Provide it through the `SHOTWRIGHT_INSTALLER_CACHE_URL` secret. The zip must expand to:
 
 - `payload/AEFT_26.2_win64` and `payload/CreativeCloudHelper_win64`
 - or those two directories at the archive root
 
-The repository intentionally does not point to a public Adobe installer release.
+The repository does not point to any public Adobe installer release.
 
 ## 📁 Project Layout
 
 ```text
-src/
-	config.ts                runtime configuration loader
-	index.ts                 MCP server entrypoint
-	shell.ts                 subprocess helpers for Docker and PowerShell
-	validation.ts            validation orchestration and artifact checks
-
 scripts/
-	create_validation_animation_project.jsx   generates the mock animated AEP
-	download_after_effects_payload.py         downloads a local payload cache layout
-	install_after_effects_in_container.ps1    installs AE inside the container from mounted payloads
-	modify_setup_win.py                       patches the Windows helper installer binary
-	runtime_entrypoint.ps1                    auto-installs AE on container startup when payloads exist
-	validation_patch.jsx                      patch-only JSX used by nexrender
-	validation_nexrender_job.json             minimal nexrender job definition
-	run_validation.ps1                        manual smoke-test entrypoint
+	install/
+		download_after_effects_payload.py    download AE payload from Adobe catalog
+		download_utils.py                    Adobe installer catalog and download helpers
+		install_after_effects_in_container.ps1  install AE from mounted payloads
+		modify_setup_win.py                  patch Adobe helper Setup.exe binary
+	validate/
+		create_validation_animation_project.jsx  generate the mock animated AEP
+		run_validation.ps1                   manual smoke-test entrypoint
+		validation_nexrender_job.json        minimal nexrender job definition
+		validation_patch.jsx                 patch-only JSX used by nexrender
+	runtime_entrypoint.ps1    container startup script (auto-install + keepalive)
+	pull_mcr_image.py         helper to pull MCR base image through proxy
 
 validation-data/
-	output/                  rendered validation artifacts
-	templates/               generated validation AEP files
-	work/                    nexrender working directories and logs
+	output/                   rendered validation artifacts
+	templates/                generated validation AEP files
+	work/                     nexrender working directories and logs
 ```
 
 ## 📝 Design Notes
 
 - The Docker image does not bundle Adobe After Effects itself.
-- The runtime can either mount `C:\Program Files\Adobe\Adobe After Effects 2026` from the host or install from a mounted payload cache at `C:\lab\payload`.
-- Container startup runs `scripts/runtime_entrypoint.ps1`, and `AUTO_INSTALL_AFTER_EFFECTS=1` is enabled by default.
+- The runtime can either mount `C:\Program Files\Adobe\Adobe After Effects 2026` from the host, or install from a mounted payload cache at `C:\lab\payload`.
+- Container startup runs `scripts/runtime_entrypoint.ps1`. When `AUTO_INSTALL_AFTER_EFFECTS=1` (the default) and payload directories are detected, AE is installed automatically. When payloads are absent, install is silently skipped.
 - Validation JSX is patch-only by design. nexrender owns output naming and render execution.
-- The validation job intentionally uses `outputExt: mp4` and `@nexrender/action-copy` so the smoke test ends with a single predictable video artifact.
+- The validation job uses `outputExt: mp4` and `@nexrender/action-copy` so the smoke test ends with a single predictable video artifact.
 
 ## 🗺️ Roadmap
 
-- [ ] add integration tests around the command builders in `src/validation.ts`
-- [ ] add remote worker pool support
-- [ ] add job packaging for arbitrary AEP uploads
-- [ ] add artifact retention and cleanup policies
-- [ ] add a higher-level natural-language job model that maps designer intent to containerized execution
+- [ ] Integration tests around the validation command builders
+- [ ] Remote worker pool support
+- [ ] Job packaging for arbitrary AEP uploads
+- [ ] Artifact retention and cleanup policies
+- [ ] Higher-level natural-language job model that maps designer intent to containerized execution
 
 ## 📄 License
 
