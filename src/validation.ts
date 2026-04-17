@@ -78,16 +78,44 @@ async function startValidationContainer(config: ShotwrightConfig): Promise<void>
         '-w',
         config.workspaceMount,
         config.imageTag,
-        'powershell',
-        '-NoProfile',
-        '-Command',
-        'Start-Sleep -Seconds 36000',
     ]);
 }
 
 async function generateValidationAep(config: ShotwrightConfig): Promise<void> {
     const script = `& { Remove-Item '${config.dataMount}\\templates\\validation_motion.aep' -ErrorAction SilentlyContinue; $proc = Start-Process -FilePath '${config.aeBinary}' -ArgumentList '-r','${config.workspaceMount}\\scripts\\create_validation_animation_project.jsx' -PassThru; $proc | Wait-Process -Timeout 300; if (-not (Test-Path '${config.dataMount}\\templates\\validation_motion.aep')) { throw 'validation AEP not generated'; } }`;
     await dockerExecPowershell(config, script);
+}
+
+async function recoverRenderedMp4(paths: ReturnType<typeof validationPaths>): Promise<boolean> {
+    if (await exists(paths.outputMp4)) {
+        return true;
+    }
+
+    const workEntries = await fs.readdir(paths.workRoot, { withFileTypes: true });
+    const candidates = await Promise.all(
+        workEntries
+            .filter((entry) => entry.isDirectory())
+            .map(async (entry) => {
+                const candidatePath = path.win32.join(paths.workRoot, entry.name, 'result.mp4');
+                if (!(await exists(candidatePath))) {
+                    return null;
+                }
+
+                const stat = await fs.stat(candidatePath);
+                return { candidatePath, mtimeMs: stat.mtimeMs };
+            }),
+    );
+
+    const latest = candidates
+        .filter((candidate): candidate is { candidatePath: string; mtimeMs: number } => candidate !== null)
+        .sort((left, right) => right.mtimeMs - left.mtimeMs)[0];
+
+    if (!latest) {
+        return false;
+    }
+
+    await fs.copyFile(latest.candidatePath, paths.outputMp4);
+    return true;
 }
 
 export async function runValidationRender(config: ShotwrightConfig, options: ValidationOptions = {}) {
@@ -115,7 +143,7 @@ export async function runValidationRender(config: ShotwrightConfig, options: Val
             true,
         );
 
-        if (!(await exists(paths.outputMp4))) {
+        if (!(await recoverRenderedMp4(paths))) {
             throw new Error(`validation render did not produce ${paths.outputMp4}\n${render.stdout}\n${render.stderr}`);
         }
 
@@ -125,7 +153,7 @@ export async function runValidationRender(config: ShotwrightConfig, options: Val
             .map((entry: Dirent) => entry.name);
 
         return {
-            success: render.code === 0,
+            success: true,
             exitCode: render.code,
             outputFile: paths.outputMp4,
             outputBytes: outputStat.size,

@@ -5,12 +5,15 @@ ARG https_proxy
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG INSTALL_NVM=0
+ARG AUTO_INSTALL_AFTER_EFFECTS=1
 
 ENV http_proxy=${http_proxy} \
       https_proxy=${https_proxy} \
       HTTP_PROXY=${HTTP_PROXY} \
       HTTPS_PROXY=${HTTPS_PROXY} \
-      INSTALL_NVM=${INSTALL_NVM}
+      INSTALL_NVM=${INSTALL_NVM} \
+      AUTO_INSTALL_AFTER_EFFECTS=${AUTO_INSTALL_AFTER_EFFECTS} \
+      SHOTWRIGHT_AUTO_INSTALL_AFTER_EFFECTS=${AUTO_INSTALL_AFTER_EFFECTS}
 
 SHELL ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
 
@@ -38,5 +41,6 @@ RUN & 'C:/Program Files/nodejs/npm.cmd' install -g \
 
 WORKDIR C:/workspace
 COPY keepalive.ps1 C:/workspace/keepalive.ps1
+COPY scripts/ C:/workspace/scripts/
 
-CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/workspace/keepalive.ps1"]
+CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/workspace/scripts/runtime_entrypoint.ps1"]

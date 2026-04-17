@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { loadConfig } from './config.js';
+import { downloadInstallerSource } from './download.js';
 import { cleanupValidationContainer, getRuntimeStatus, runValidationRender } from './validation.js';
 
 const config = loadConfig();
@@ -57,6 +58,52 @@ server.tool(
                 {
                     type: 'text',
                     text: 'shotwright validation container removed.',
+                },
+            ],
+        };
+    },
+);
+
+server.tool(
+    'shotwright_download_installer_source',
+    'Download a user-supplied official installer source into the local Shotwright cache. This tool does not discover Adobe endpoints; the caller must provide the source URL explicitly.',
+    {
+        sourceUrl: z.string().url(),
+        product: z.string().optional().default('after-effects'),
+        platform: z.string().optional().default('windows-x64'),
+        destinationFileName: z.string().optional(),
+        expectedSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
+        overwrite: z.boolean().optional().default(false),
+    },
+    async ({
+        sourceUrl,
+        product,
+        platform,
+        destinationFileName,
+        expectedSha256,
+        overwrite,
+    }: {
+        sourceUrl: string;
+        product: string;
+        platform: string;
+        destinationFileName?: string;
+        expectedSha256?: string;
+        overwrite: boolean;
+    }) => {
+        const result = await downloadInstallerSource(config, {
+            sourceUrl,
+            product,
+            platform,
+            destinationFileName,
+            expectedSha256,
+            overwrite,
+        });
+
+        return {
+            content: [
+                {
+                    type: 'text',
+                    text: JSON.stringify(result, null, 2),
                 },
             ],
         };

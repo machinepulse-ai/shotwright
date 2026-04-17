@@ -3,3 +3,5 @@ node_modules/
 !.dockerignore
 !Dockerfile
 !keepalive.ps1
+!scripts/
+!scripts/**
