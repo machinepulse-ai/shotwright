@@ -1,0 +1,26 @@
+{
+  "name": "shotwright",
+  "version": "0.1.0",
+  "description": "Windows container infrastructure and MCP control plane for Adobe After Effects",
+  "license": "MIT",
+  "type": "module",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=build/index.js --packages=external",
+    "start": "node build/index.js",
+    "dev": "npm run build && npm start",
+    "validate": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_validation.ps1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "esbuild": "^0.27.4",
+    "typescript": "^5.8.3"
+  }
+}

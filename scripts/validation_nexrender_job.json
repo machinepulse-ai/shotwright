@@ -1,0 +1,64 @@
+{
+  "template": {
+    "src": "file:///C:/data/templates/validation_motion.aep",
+    "name": "validation_motion.aep",
+    "composition": "main",
+    "outputExt": "mp4"
+  },
+  "assets": [
+    {
+      "src": "file:///C:/workspace/scripts/validation_patch.jsx",
+      "name": "validation_patch.jsx",
+      "type": "script",
+      "parameters": [
+        {
+          "type": "string",
+          "key": "comp",
+          "value": "main"
+        },
+        {
+          "type": "number",
+          "key": "stretch",
+          "value": 100
+        },
+        {
+          "type": "string",
+          "key": "start",
+          "value": 0.0
+        },
+        {
+          "type": "string",
+          "key": "duration",
+          "value": 4.0
+        },
+        {
+          "type": "string",
+          "key": "text_main",
+          "value": "NEXRENDER OK"
+        },
+        {
+          "type": "string",
+          "key": "text_sub",
+          "value": "cloud container smoke test"
+        },
+        {
+          "type": "string",
+          "key": "text",
+          "value": "2026"
+        }
+      ]
+    }
+  ],
+  "actions": {
+    "postrender": [
+      {
+        "module": "@nexrender/action-copy",
+        "input": "result.mp4",
+        "output": "C:/data/output/validation.mp4"
+      }
+    ]
+  },
+  "ae_render": {
+    "legacy": false
+  }
+}
