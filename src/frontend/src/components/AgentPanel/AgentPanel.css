@@ -1,0 +1,131 @@
+.agent-panel {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 1.5rem;
+  min-height: calc(100vh - 100px);
+}
+
+.agent-sidebar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.sidebar-header h2 {
+  font-size: 1rem;
+}
+
+.session-list {
+  list-style: none;
+}
+
+.session-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-bottom: 0.25rem;
+  transition: background 0.15s;
+}
+
+.session-item:hover {
+  background: var(--bg);
+}
+
+.session-item.active {
+  background: var(--bg);
+  border: 1px solid var(--primary);
+}
+
+.session-name {
+  font-size: 0.875rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.header-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.upload-btn {
+  display: inline-block;
+  text-align: center;
+}
+
+.jsx-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.jsx-editor h3 {
+  font-size: 0.9rem;
+}
+
+.jsx-editor textarea {
+  font-family: "Consolas", "Courier New", monospace;
+  resize: vertical;
+}
+
+.jsx-editor button {
+  align-self: flex-end;
+}
+
+.action-log {
+  margin-top: 1rem;
+}
+
+.action-log h3 {
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+}
+
+.log-entry {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+  margin-bottom: 0.25rem;
+  font-family: "Consolas", monospace;
+}
+
+.log-entry.success {
+  background: rgba(34, 197, 94, 0.08);
+  color: var(--success);
+}
+
+.log-entry.error {
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger);
+}
+
+.log-action {
+  font-weight: 600;
+  margin-right: 0.5rem;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 300px;
+  color: var(--text-secondary);
+}

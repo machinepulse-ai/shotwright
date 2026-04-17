@@ -1,0 +1,104 @@
+# Shotwright Platform — Docker Compose
+# All services run as Windows containers on Windows Server LTSC 2025.
+#
+# K8s migration notes:
+#   - Each service maps 1:1 to a Deployment + Service.
+#   - `mongo` becomes a StatefulSet with a PersistentVolumeClaim.
+#   - Named volumes become PVCs.
+#   - Environment variables migrate to ConfigMaps / Secrets.
+#   - Labels below follow the app.kubernetes.io convention for easy Helm generation.
+
+services:
+  # ---------- MongoDB ----------
+  mongo:
+    image: mongo:7-windowsservercore-ltsc2025
+    # If the official Windows mongo image is unavailable, build one from:
+    #   https://github.com/docker-library/mongo (Windows Dockerfiles)
+    # or use the community-maintained variant.
+    container_name: shotwright-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:C:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: shotwright
+    labels:
+      app.kubernetes.io/name: mongo
+      app.kubernetes.io/component: database
+      app.kubernetes.io/part-of: shotwright
+
+  # ---------- Backend API ----------
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: backend
+      args:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    container_name: shotwright-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      SHOTWRIGHT_MONGO_URI: mongodb://mongo:27017
+      SHOTWRIGHT_MONGO_DB: shotwright
+      SHOTWRIGHT_SECRET_KEY: ${SHOTWRIGHT_SECRET_KEY:-change-me-in-production}
+      SHOTWRIGHT_ADMIN_PASSWORD: ${SHOTWRIGHT_ADMIN_PASSWORD:-admin}
+      SHOTWRIGHT_GITHUB_TOKEN: ${SHOTWRIGHT_GITHUB_TOKEN:-}
+      SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
+      SHOTWRIGHT_SHOTWRIGHT_IMAGE: shotwright:latest
+    volumes:
+      - uploads:C:/data/uploads
+      - exports:C:/data/exports
+      - hls:C:/data/hls
+      # Mount host Docker named pipe so the backend can manage AE containers
+      - type: npipe
+        source: \\.\pipe\docker_engine
+        target: \\.\pipe\docker_engine
+    depends_on:
+      - mongo
+    labels:
+      app.kubernetes.io/name: backend
+      app.kubernetes.io/component: api
+      app.kubernetes.io/part-of: shotwright
+
+  # ---------- Frontend ----------
+  frontend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: frontend
+      args:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    container_name: shotwright-ui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    labels:
+      app.kubernetes.io/name: frontend
+      app.kubernetes.io/component: ui
+      app.kubernetes.io/part-of: shotwright
+
+volumes:
+  mongo-data:
+    labels:
+      app.kubernetes.io/name: mongo-data
+      app.kubernetes.io/part-of: shotwright
+  uploads:
+    labels:
+      app.kubernetes.io/part-of: shotwright
+  exports:
+    labels:
+      app.kubernetes.io/part-of: shotwright
+  hls:
+    labels:
+      app.kubernetes.io/part-of: shotwright

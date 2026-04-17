@@ -1,0 +1,25 @@
+.container-manager h3 {
+  font-size: 0.9rem;
+  margin-bottom: 0.75rem;
+}
+
+.container-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.container-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border-radius: 6px;
+}
+
+.container-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}

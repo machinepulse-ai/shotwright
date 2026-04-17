@@ -1,0 +1,44 @@
+# Shotwright Platform — Development Overrides
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# Enables:
+#   - Backend hot reload via uvicorn --reload with source mount
+#   - Frontend webpack-dev-server with HMR via source mount
+#   - Debug-friendly environment variables
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: backend
+    # Override CMD for hot-reload
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./backend/app:C:/app/app
+      - uploads:C:/data/uploads
+      - exports:C:/data/exports
+      - hls:C:/data/hls
+      - type: npipe
+        source: \\.\pipe\docker_engine
+        target: \\.\pipe\docker_engine
+    environment:
+      SHOTWRIGHT_DEBUG: "true"
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: frontend
+    # Override to use webpack-dev-server in dev
+    command: ["cmd", "/c", "npm", "run", "dev"]
+    volumes:
+      - ./frontend/src:C:/frontend/src
+      - ./frontend/public:C:/frontend/public
+    ports:
+      - "3000:3000"
+
+volumes:
+  uploads:
+  exports:
+  hls:

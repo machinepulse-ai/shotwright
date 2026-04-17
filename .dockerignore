@@ -5,3 +5,14 @@ node_modules/
 !keepalive.ps1
 !scripts/
 !scripts/**
+!src/backend/pyproject.toml
+!src/backend/.python-version
+!src/backend/app/
+!src/backend/app/**
+!src/frontend/package.json
+!src/frontend/webpack.config.js
+!src/frontend/tsconfig.json
+!src/frontend/public/
+!src/frontend/public/**
+!src/frontend/src/
+!src/frontend/src/**

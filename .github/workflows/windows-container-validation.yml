@@ -11,7 +11,7 @@ on:
 
 jobs:
   dockerfile-build:
-    runs-on: windows-2025
+    runs-on: ${{ vars.SHOTWRIGHT_WINDOWS_RUNNER || 'windows-2025' }}
     permissions:
       contents: read
       packages: write
@@ -93,7 +93,7 @@ jobs:
   validation-render:
     needs: dockerfile-build
     if: github.event_name == 'workflow_dispatch'
-    runs-on: windows-2025
+    runs-on: ${{ vars.SHOTWRIGHT_WINDOWS_RUNNER || 'windows-2025' }}
     permissions:
       contents: read
       packages: read
