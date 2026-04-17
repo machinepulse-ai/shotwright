@@ -9,6 +9,7 @@ __pycache__/
 *.log
 validation-data/output/*
 !validation-data/output/.gitkeep
+!validation-data/output/validation.mp4
 validation-data/templates/*
 !validation-data/templates/.gitkeep
 validation-data/work/*

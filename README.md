@@ -1,92 +1,137 @@
+<div align="center">
+
 # Shotwright
 
-Shotwright turns Adobe After Effects into a cloud-executable creative engine for AI agents.
+### Container-first Adobe After Effects runtime for AI agents
 
-Most "AI video" products win by shrinking the creative surface area: fewer choices, more templates, more lock-in. Shotwright takes the opposite position.
+Build Windows render workers, mount a real After Effects install, and validate nexrender output end to end without turning designers into infrastructure operators.
 
-It is built for real motion designers, compositors, and AE-heavy teams who should not have to become DevOps engineers just to keep their edge. A designer should be able to describe the result they want, let an agent drive the runtime, and still keep After Effects at the center of the craft.
+<p>
+	<img src="https://img.shields.io/badge/windows%20containers-ltsc2025-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows Containers LTSC 2025" />
+	<img src="https://img.shields.io/badge/after%20effects-2026-9999FF?style=for-the-badge&logo=adobeaftereffects&logoColor=white" alt="Adobe After Effects 2026" />
+	<img src="https://img.shields.io/badge/node-%E2%89%A520-5FA04E?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node 20 or newer" />
+	<img src="https://img.shields.io/badge/nexrender-validated-0A7EA4?style=for-the-badge&logo=render&logoColor=white" alt="Validated with nexrender" />
+	<img src="https://img.shields.io/badge/license-MIT-2EA44F?style=for-the-badge" alt="MIT License" />
+</p>
 
-## The Story
+<p>
+	<a href="https://github.com/LiuChangFreeman/shotwright/stargazers">
+		<img src="https://img.shields.io/github/stars/LiuChangFreeman/shotwright?style=social" alt="GitHub stars" />
+	</a>
+	<a href="https://github.com/LiuChangFreeman/shotwright/network/members">
+		<img src="https://img.shields.io/github/forks/LiuChangFreeman/shotwright?style=social" alt="GitHub forks" />
+	</a>
+</p>
 
-Shotwright exists for a simple reason:
+</div>
 
-- ordinary AE designers should not need to wire Docker, Windows workers, JSX pipelines, or render queues by hand
-- creative teams should not lose authority to shallow startup editing apps that trade taste for convenience
-- the person with visual judgment should stay in control while infrastructure becomes invisible
+> [!IMPORTANT]
+> Shotwright keeps After Effects at the center of the workflow. The goal is not generic AI video automation; it is reproducible AE runtime infrastructure that lets agents execute the boring parts while designers keep the taste and control.
 
-The promise is straightforward:
+<details>
+<summary><strong>Jump to section</strong></summary>
 
-Say what you want.
-Let agents execute the boring parts.
-Keep the creative leverage in After Effects.
+- [Validation Demo](#-validation-demo)
+- [Why Shotwright](#-why-shotwright)
+- [Capabilities](#-capabilities)
+- [Validation Flow](#-validation-flow)
+- [Requirements](#-requirements)
+- [Quick Start](#-quick-start)
+- [MCP Tools](#-mcp-tools)
+- [Project Layout](#-project-layout)
+- [Design Notes](#-design-notes)
+- [Roadmap](#-roadmap)
 
-## What Shotwright Is
+</details>
 
-Shotwright is a container runtime plus MCP control plane for Adobe After Effects.
+## ✨ Validation Demo
 
-It gives agents a reproducible way to:
-- build a Windows After Effects runtime image
-- mount a host Adobe After Effects installation into an isolated container
-- generate or patch test AEP projects with JSX
-- run nexrender-based validation renders in a repeatable way
-- expose those actions through a deterministic MCP server
+<p align="center">
+	<a href="./validation-data/output/validation.mp4">
+		<img src="./docs/assets/validation-preview.png" alt="Shotwright validation render preview" width="960" />
+	</a>
+</p>
 
-The project is inspired by Dakkshin/after-effects-mcp, but the emphasis here is different:
-- after-effects-mcp focuses on direct After Effects control through MCP tools and a bridge panel
-- Shotwright focuses on cloud-style Windows container infrastructure that agents can drive safely and repeatedly
+<p align="center">
+	<a href="./validation-data/output/validation.mp4">
+		<img src="https://img.shields.io/badge/Open-validation.mp4-FF5A5F?style=for-the-badge&logo=adobeaftereffects&logoColor=white" alt="Open validation.mp4" />
+	</a>
+</p>
 
-## Who It Is For
+The current smoke test successfully renders a real mp4 through a Windows container, a mounted host After Effects installation, and nexrender.
 
-- AE designers who want leverage without surrendering craft
-- studios that need repeatable rendering infrastructure behind an agent workflow
-- teams building AI-native creative tooling on top of real After Effects instead of toy editors
-- technical operators who want a clean validation path before building remote worker fleets
+| Artifact | Status | Notes |
+| --- | --- | --- |
+| `validation.mp4` | ✅ committed | Smoke-test render output for the current repo state |
+| `validation_motion.aep` | 🟡 generated locally | Recreated during validation and intentionally kept out of Git to avoid unnecessary binary churn |
 
-## Why It Matters
+## 🎬 Why Shotwright
 
-Creative software is moving into a dangerous phase where tooling gets easier by making the output flatter.
+Most AI video products shrink the creative surface area: fewer decisions, fewer controls, more templates. Shotwright takes the opposite bet.
 
-Shotwright is built on a different bet:
-- the future belongs to designers with taste plus infrastructure that disappears into the background
-- agents should amplify high-skill creative workers, not route around them
-- After Effects should become easier to command, not easier to replace
+- Give AE designers agent leverage without asking them to become Windows container operators.
+- Keep validation renders reproducible, replayable, and easy to audit.
+- Make infrastructure disappear into the background while taste stays with the human.
+- Treat After Effects like a serious runtime foundation, not a toy wrapper around a panel script.
 
-If this project succeeds, a designer does not need to fight infra to stay competitive. They can use natural language, reusable assets, and cloud execution to out-produce teams shipping template-first video apps.
+The project is inspired by Dakkshin's after-effects-mcp, but the center of gravity here is different: worker runtime infrastructure first, deterministic tool execution second, and designer control throughout.
 
-## Current Scope
+## 🧰 Capabilities
 
-- Build a Windows container image with Node.js, Python 3.13, ffmpeg, Git, and nexrender dependencies.
-- Mount `C:\Program Files\Adobe\Adobe After Effects 2026` from the host into the container.
-- Generate a validation AEP with animated solids and text.
-- Patch that AEP through nexrender without mixing custom render queue logic into the validation script.
-- Produce a single validation mp4 as the expected smoke-test artifact.
+| Capability | What it means in practice |
+| --- | --- |
+| Windows runtime image | Builds a container with Node.js, Python 3.13, ffmpeg, Git, and nexrender dependencies |
+| Host AE mount | Uses a real host installation of Adobe After Effects 2026 instead of baking AE into the image |
+| Validation project generation | Creates a reproducible AEP from JSX so smoke tests are easy to replay |
+| Patch-only validation script | Keeps the JSX focused on composition edits while nexrender owns rendering |
+| MCP control plane | Exposes status, validation render, and cleanup operations through deterministic tools |
 
-## Project Layout
+## 🔄 Validation Flow
 
-- `src/index.ts`: MCP server entrypoint.
-- `src/config.ts`: runtime configuration loader.
-- `src/shell.ts`: subprocess utilities for Docker and PowerShell execution.
-- `src/validation.ts`: validation container orchestration and artifact checks.
-- `scripts/create_validation_animation_project.jsx`: builds a mock animated AEP.
-- `scripts/validation_patch.jsx`: patch-only JSX used by nexrender.
-- `scripts/validation_nexrender_job.json`: minimal validation job.
-- `scripts/run_validation.ps1`: manual smoke-test entrypoint.
-- `Dockerfile`: Windows runtime image recipe.
+```mermaid
+flowchart LR
+		H[Host Adobe After Effects 2026] -->|mounted into container| C[Shotwright Windows runtime]
+		C --> P[create_validation_animation_project.jsx]
+		P --> A[validation_motion.aep]
+		A --> N[nexrender-cli]
+		N --> S[validation_patch.jsx]
+		S --> R[aerender.exe]
+		R --> M[validation.mp4]
+```
 
-## Requirements
+## 🧱 Requirements
 
 - Windows host
 - Docker with Windows containers enabled
 - Adobe After Effects 2026 installed on the host
 - Node.js 20+
 
-## Quick Start
+> [!TIP]
+> Proxy-aware builds are already wired through the Dockerfile via `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` build args.
+
+## 🚀 Quick Start
 
 ### 1. Build the image
 
 ```powershell
 docker build -t shotwright:dev -f Dockerfile .
 ```
+
+<details>
+<summary><strong>Proxy-friendly build example</strong></summary>
+
+```powershell
+$proxy = 'http://192.168.1.80:8080'
+docker build `
+	--build-arg http_proxy=$proxy `
+	--build-arg https_proxy=$proxy `
+	--build-arg HTTP_PROXY=$proxy `
+	--build-arg HTTPS_PROXY=$proxy `
+	-t shotwright:dev `
+	-f Dockerfile .
+```
+
+</details>
 
 ### 2. Install dependencies and build the MCP server
 
@@ -101,39 +146,61 @@ npm run build
 npm start
 ```
 
-### 4. Manual validation render
+### 4. Run the validation render
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_validation.ps1 -ImageTag shotwright:dev
 ```
 
 Expected result:
+
 - `validation-data/templates/validation_motion.aep`
 - `validation-data/output/validation.mp4`
 
-## MCP Tools
+## 🧪 MCP Tools
 
-Current MCP tools exposed by the server:
-- `shotwright_status`: report Docker/image/After Effects/asset readiness
-- `shotwright_render_validation`: run the validation render end to end
-- `shotwright_cleanup_validation`: remove the temporary validation container
+| Tool | Purpose |
+| --- | --- |
+| `shotwright_status` | Report Docker, image, After Effects, and artifact readiness |
+| `shotwright_render_validation` | Run the validation render end to end |
+| `shotwright_cleanup_validation` | Remove the temporary validation container |
 
-## Design Notes
+## 📁 Project Layout
+
+```text
+src/
+	config.ts                runtime configuration loader
+	index.ts                 MCP server entrypoint
+	shell.ts                 subprocess helpers for Docker and PowerShell
+	validation.ts            validation orchestration and artifact checks
+
+scripts/
+	create_validation_animation_project.jsx   generates the mock animated AEP
+	validation_patch.jsx                      patch-only JSX used by nexrender
+	validation_nexrender_job.json             minimal nexrender job definition
+	run_validation.ps1                        manual smoke-test entrypoint
+
+validation-data/
+	output/                  rendered validation artifacts
+	templates/               generated validation AEP files
+	work/                    nexrender working directories and logs
+```
+
+## 📝 Design Notes
 
 - The Docker image does not bundle Adobe After Effects itself.
-- The runtime depends on a host mount of the Adobe install directory.
-- Validation JSX is patch-only. nexrender owns the render output path.
-- Proxy-aware Docker builds are supported through `http_proxy` and `https_proxy` build args.
+- The runtime expects the host path `C:\Program Files\Adobe\Adobe After Effects 2026` to be mounted into the container.
+- Validation JSX is patch-only by design. nexrender owns output naming and render execution.
+- The validation job intentionally uses `outputExt: mp4` and `@nexrender/action-copy` so the smoke test ends with a single predictable video artifact.
 
-## Roadmap
+## 🗺️ Roadmap
 
-- add remote worker registration and leasing
-- add job packaging for user-provided AEP assets
-- add object storage upload/download hooks
-- add container pool management for concurrent agents
-- add richer MCP tools for composition packaging and artifact retrieval
-- add a designer-first natural-language job layer on top of the runtime primitives
+- [ ] add integration tests around the command builders in `src/validation.ts`
+- [ ] add remote worker pool support
+- [ ] add job packaging for arbitrary AEP uploads
+- [ ] add artifact retention and cleanup policies
+- [ ] add a higher-level natural-language job model that maps designer intent to containerized execution
 
-## License
+## 📄 License
 
 MIT
