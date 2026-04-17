@@ -7,9 +7,10 @@ from pydantic import BaseModel, Field
 
 
 class SessionStatus(str, Enum):
-    active = "active"
     idle = "idle"
-    rendering = "rendering"
+    running = "running"
+    awaiting_input = "awaiting_input"
+    error = "error"
     closed = "closed"
 
 
@@ -20,8 +21,13 @@ class SessionCreate(BaseModel):
 class SessionInDB(BaseModel):
     id: str = Field(alias="_id")
     name: str
-    status: SessionStatus = SessionStatus.active
+    status: SessionStatus = SessionStatus.idle
+    copilot_session_id: str | None = None
     container_id: str | None = None
+    active_project_id: str | None = None
+    latest_render_path: str | None = None
+    latest_stream_url: str | None = None
+    last_error: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -31,4 +37,9 @@ class SessionInDB(BaseModel):
 class SessionUpdate(BaseModel):
     name: str | None = None
     status: SessionStatus | None = None
+    copilot_session_id: str | None = None
     container_id: str | None = None
+    active_project_id: str | None = None
+    latest_render_path: str | None = None
+    latest_stream_url: str | None = None
+    last_error: str | None = None

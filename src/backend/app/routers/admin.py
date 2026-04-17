@@ -6,6 +6,7 @@ from app.config import settings
 from app.database import get_admin_collection, get_container_collection, get_session_collection
 from app.middleware.auth import create_access_token, require_admin, verify_password
 from app.models.admin import AdminLogin, AdminSettings, GithubTokenUpdate, TokenResponse
+from app.services.copilot_runtime import runtime_manager
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -33,6 +34,7 @@ async def update_github_token(body: GithubTokenUpdate):
         {"$set": {"github_token": body.github_token}},
         upsert=True,
     )
+    await runtime_manager.shutdown()
     return {"ok": True}
 
 
@@ -42,7 +44,7 @@ async def admin_dashboard():
     containers_col = get_container_collection()
 
     total_sessions = await sessions_col.count_documents({})
-    active_sessions = await sessions_col.count_documents({"status": "active"})
+    active_sessions = await sessions_col.count_documents({"status": {"$in": ["idle", "running", "awaiting_input"]}})
     total_containers = await containers_col.count_documents({})
     running_containers = await containers_col.count_documents({"status": "running"})
 

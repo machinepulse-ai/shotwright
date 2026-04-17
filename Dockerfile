@@ -71,9 +71,8 @@ RUN $ProgressPreference = 'SilentlyContinue'; \
 WORKDIR C:/app
 
 COPY src/backend/pyproject.toml src/backend/.python-version ./
-RUN & python -m uv pip install --system -r pyproject.toml
-
 COPY src/backend/app/ ./app/
+RUN & python -m uv pip install --system .
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

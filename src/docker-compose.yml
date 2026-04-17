@@ -49,6 +49,7 @@ services:
       SHOTWRIGHT_SECRET_KEY: ${SHOTWRIGHT_SECRET_KEY:-change-me-in-production}
       SHOTWRIGHT_ADMIN_PASSWORD: ${SHOTWRIGHT_ADMIN_PASSWORD:-admin}
       SHOTWRIGHT_GITHUB_TOKEN: ${SHOTWRIGHT_GITHUB_TOKEN:-}
+      SHOTWRIGHT_COPILOT_MODEL: ${SHOTWRIGHT_COPILOT_MODEL:-gpt-5}
       SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
       SHOTWRIGHT_SHOTWRIGHT_IMAGE: shotwright:latest
     volumes:
@@ -90,15 +91,19 @@ services:
 
 volumes:
   mongo-data:
+    name: shotwright_mongo_data
     labels:
       app.kubernetes.io/name: mongo-data
       app.kubernetes.io/part-of: shotwright
   uploads:
+    name: shotwright_uploads
     labels:
       app.kubernetes.io/part-of: shotwright
   exports:
+    name: shotwright_exports
     labels:
       app.kubernetes.io/part-of: shotwright
   hls:
+    name: shotwright_hls
     labels:
       app.kubernetes.io/part-of: shotwright

@@ -1,8 +1,13 @@
 export interface Session {
   _id: string;
   name: string;
-  status: "active" | "idle" | "rendering" | "closed";
+  status: "idle" | "running" | "awaiting_input" | "error" | "closed";
+  copilot_session_id: string | null;
   container_id: string | null;
+  active_project_id: string | null;
+  latest_render_path: string | null;
+  latest_stream_url: string | null;
+  last_error: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -22,6 +27,47 @@ export interface AgentResponse {
   action: string;
   message: string;
   data: Record<string, unknown>;
+}
+
+export interface ChatMessage {
+  _id: string;
+  session_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface SessionEvent {
+  _id: string;
+  session_id: string;
+  type: string;
+  summary: string;
+  created_at: string;
+  data: Record<string, unknown>;
+}
+
+export interface ProjectInfo {
+  _id: string;
+  session_id: string;
+  filename: string;
+  workspace_dir: string;
+  aep_files: string[];
+  created_at: string;
+  status: "uploaded" | "active" | "exported";
+}
+
+export interface AgentContext {
+  session: Session;
+  container: Container | null;
+  projects: ProjectInfo[];
+  latest_render_path: string | null;
+  latest_stream_url: string | null;
+}
+
+export interface ChatTurnResult {
+  assistant_message: ChatMessage;
+  session_status: Session["status"];
 }
 
 export interface DashboardData {

@@ -142,7 +142,17 @@ textarea:focus {
   color: var(--text-secondary);
 }
 
+.status-awaiting_input {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
 .status-error {
   background: rgba(239, 68, 68, 0.15);
   color: var(--danger);
+}
+
+.status-closed {
+  background: rgba(75, 85, 99, 0.22);
+  color: #d1d5db;
 }

@@ -91,16 +91,17 @@ npm run dev
 
 ### Agent 面板
 - 创建/管理 Agent 会话
-- 启动/停止 shotwright Windows 容器
-- 上传 AEP 工程压缩包到容器
-- 执行 JSX 脚本控制 After Effects
-- 触发 nexrender 渲染
+- 以聊天方式向 Copilot agent 下达创意目标
+- 展示 agent 的工具调用时间线与会话状态
+- 上传 AEP 工程压缩包供 agent 选择和操作
+- 由 agent 通过 backend custom tools 自主启动/复用 shotwright Windows 容器
+- 由 agent 通过 JSX 和 nexrender 控制 After Effects
 - HLS (m3u8) 流式视频预览
-- 导出修改后的 AEP 工程
+- 导出 agent 修改后的工程压缩包
 
 ### 后台管理
 - 管理员密码登录
-- GitHub Token 配置 (Copilot SDK)
+- GitHub Token 配置 (Copilot SDK，更新后会重建 runtime)
 - 会话数据管理
 - 容器实例管理
 - 仪表盘统计

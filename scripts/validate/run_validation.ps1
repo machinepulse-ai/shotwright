@@ -11,7 +11,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $ConfigPath = Join-Path $ProjectRoot 'shotwright-config.json'
 if (-not (Test-Path $ConfigPath)) {
     throw "Shotwright config not found at $ConfigPath"

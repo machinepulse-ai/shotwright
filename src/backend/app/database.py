@@ -15,6 +15,12 @@ _client: AsyncIOMotorClient | None = None
 async def connect_db() -> None:
     global _client
     _client = AsyncIOMotorClient(settings.mongo_uri)
+    db = _client[settings.mongo_db]
+    await db["sessions"].create_index([("updated_at", -1)])
+    await db["containers"].create_index([("session_id", 1), ("created_at", -1)])
+    await db["projects"].create_index([("session_id", 1), ("created_at", -1)])
+    await db["messages"].create_index([("session_id", 1), ("created_at", 1)])
+    await db["events"].create_index([("session_id", 1), ("created_at", 1)])
 
 
 async def close_db() -> None:
@@ -56,3 +62,15 @@ def get_container_collection():
 
 def get_admin_collection():
     return get_db()["admin"]
+
+
+def get_project_collection():
+    return get_db()["projects"]
+
+
+def get_message_collection():
+    return get_db()["messages"]
+
+
+def get_event_collection():
+    return get_db()["events"]

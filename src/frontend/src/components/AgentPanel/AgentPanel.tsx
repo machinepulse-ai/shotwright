@@ -1,16 +1,17 @@
-import { useState, useEffect, useCallback } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
-  getSessions,
   createSession,
-  createContainer,
+  deleteSession,
+  exportProject,
+  getAgentContext,
+  getAgentEvents,
+  getAgentMessages,
+  getSessions,
+  sendChatTurn,
   stopContainer,
-  sendAgentCommand,
-  runJsx,
   uploadProject,
-  renderProject,
-  createStream,
 } from "../../services/api";
-import { Session, Container, AgentResponse } from "../../types";
+import { AgentContext, ChatMessage, ProjectInfo, Session, SessionEvent } from "../../types";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
 import "./AgentPanel.css";
@@ -18,90 +19,131 @@ import "./AgentPanel.css";
 export default function AgentPanel() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
-  const [containers, setContainers] = useState<Container[]>([]);
-  const [log, setLog] = useState<AgentResponse[]>([]);
-  const [jsxInput, setJsxInput] = useState("");
-  const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [context, setContext] = useState<AgentContext | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [prompt, setPrompt] = useState("");
+  const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const fetchSessions = useCallback(async () => {
+  const sortedEvents = useMemo(
+    () => [...events].sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime()),
+    [events]
+  );
+
+  const fetchSessions = async () => {
     const res = await getSessions();
     setSessions(res.data);
-  }, []);
+    if (!currentSession && res.data.length > 0) {
+      setCurrentSession(res.data[0]);
+    }
+  };
+
+  const loadCurrentSession = async (sessionId: string) => {
+    const [contextRes, messageRes, eventRes] = await Promise.all([
+      getAgentContext(sessionId),
+      getAgentMessages(sessionId),
+      getAgentEvents(sessionId),
+    ]);
+    setContext(contextRes.data);
+    setMessages(messageRes.data);
+    setEvents(eventRes.data);
+    setError(null);
+  };
 
   useEffect(() => {
     fetchSessions();
-  }, [fetchSessions]);
+  }, []);
+
+  useEffect(() => {
+    if (!currentSession) {
+      setContext(null);
+      setMessages([]);
+      setEvents([]);
+      return;
+    }
+
+    loadCurrentSession(currentSession._id).catch((err) => {
+      setError(err?.response?.data?.detail || "Failed to load session data.");
+    });
+
+    const timer = window.setInterval(() => {
+      loadCurrentSession(currentSession._id).catch(() => {});
+      fetchSessions().catch(() => {});
+    }, 2500);
+
+    return () => window.clearInterval(timer);
+  }, [currentSession?._id]);
 
   const handleNewSession = async () => {
     const name = `Session ${sessions.length + 1}`;
     const res = await createSession(name);
-    setSessions((prev) => [res.data, ...prev]);
+    setSessions((prev: Session[]) => [res.data, ...prev]);
     setCurrentSession(res.data);
   };
 
-  const handleStartContainer = async () => {
-    if (!currentSession) return;
-    setLoading(true);
+  const handleSend = async () => {
+    if (!currentSession || !prompt.trim()) return;
+    const content = prompt.trim();
+    setSending(true);
+    setPrompt("");
     try {
-      const res = await createContainer(currentSession._id);
-      setContainers((prev) => [...prev, res.data]);
-      addLog({ success: true, action: "start_container", message: "Container started", data: res.data });
-    } catch {
-      addLog({ success: false, action: "start_container", message: "Failed to start container", data: {} });
+      await sendChatTurn(currentSession._id, content);
+      await loadCurrentSession(currentSession._id);
+      await fetchSessions();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to send prompt to Copilot agent.");
     }
-    setLoading(false);
+    setSending(false);
   };
 
   const handleUpload = async (file: File) => {
-    if (!currentSession || containers.length === 0) return;
-    setLoading(true);
+    if (!currentSession) return;
+    setUploading(true);
     try {
-      const res = await uploadProject(currentSession._id, containers[0]._id, file);
-      addLog({ success: true, action: "upload_project", message: "Project uploaded", data: res.data });
-    } catch {
-      addLog({ success: false, action: "upload_project", message: "Upload failed", data: {} });
+      await uploadProject(currentSession._id, file);
+      await loadCurrentSession(currentSession._id);
+      await fetchSessions();
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Upload failed.");
     }
-    setLoading(false);
+    setUploading(false);
   };
 
-  const handleRender = async (aepPath: string) => {
-    if (!currentSession || containers.length === 0) return;
-    setLoading(true);
-    try {
-      const res = await renderProject(currentSession._id, containers[0]._id, aepPath);
-      addLog({ success: true, action: "render_video", message: "Render complete", data: res.data });
-    } catch {
-      addLog({ success: false, action: "render_video", message: "Render failed", data: {} });
-    }
-    setLoading(false);
-  };
-
-  const handleStream = async (mp4Path: string) => {
+  const handleDownload = async (project: ProjectInfo) => {
     if (!currentSession) return;
     try {
-      const res = await createStream(currentSession._id, mp4Path);
-      setStreamUrl(res.data.playlist_url);
-    } catch {
-      addLog({ success: false, action: "stream", message: "Stream creation failed", data: {} });
+      const res = await exportProject(currentSession._id, project._id);
+      const blob = new Blob([res.data], { type: "application/zip" });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = `${project.filename.replace(/\.zip$/i, "")}-export.zip`;
+      anchor.click();
+      URL.revokeObjectURL(href);
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Export failed.");
     }
   };
 
-  const handleRunJsx = async () => {
-    if (!currentSession || !jsxInput.trim()) return;
-    setLoading(true);
+  const handleStopContainer = async (containerId: string) => {
     try {
-      const res = await runJsx(currentSession._id, jsxInput);
-      addLog(res.data);
-    } catch {
-      addLog({ success: false, action: "run_jsx", message: "JSX execution failed", data: {} });
+      await stopContainer(containerId);
+      if (currentSession) {
+        await loadCurrentSession(currentSession._id);
+        await fetchSessions();
+      }
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || "Failed to stop container.");
     }
-    setLoading(false);
-    setJsxInput("");
   };
 
-  const addLog = (entry: AgentResponse) => {
-    setLog((prev) => [entry, ...prev].slice(0, 50));
+  const handleDeleteSession = async (sessionId: string) => {
+    await deleteSession(sessionId);
+    const remaining = sessions.filter((session: Session) => session._id !== sessionId);
+    setSessions(remaining);
+    setCurrentSession(remaining[0] ?? null);
   };
 
   return (
@@ -120,7 +162,10 @@ export default function AgentPanel() {
               className={`session-item ${currentSession?._id === s._id ? "active" : ""}`}
               onClick={() => setCurrentSession(s)}
             >
-              <span className="session-name">{s.name}</span>
+              <div className="session-meta">
+                <span className="session-name">{s.name}</span>
+                {s.active_project_id && <span className="session-project">project linked</span>}
+              </div>
               <span className={`status-badge status-${s.status}`}>{s.status}</span>
             </li>
           ))}
@@ -131,56 +176,145 @@ export default function AgentPanel() {
         {currentSession ? (
           <>
             <div className="content-header">
-              <h2>{currentSession.name}</h2>
+              <div>
+                <h2>{currentSession.name}</h2>
+                <p className="session-subtitle">直接和 Copilot agent 对话，资源操作通过后端 custom tools 执行。</p>
+              </div>
               <div className="header-actions">
-                <button className="btn-primary" onClick={handleStartContainer} disabled={loading}>
-                  Start Container
-                </button>
                 <label className="btn-primary upload-btn">
-                  Upload AEP
+                  {uploading ? "Uploading..." : "Upload AEP Zip"}
                   <input
                     type="file"
                     accept=".zip"
                     hidden
-                    onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files?.[0] && handleUpload(e.target.files[0])}
                   />
                 </label>
+                <button className="btn-danger" onClick={() => handleDeleteSession(currentSession._id)}>
+                  Delete Session
+                </button>
               </div>
             </div>
 
-            <ContainerManager
-              containers={containers}
-              onStop={(id) => stopContainer(id).then(() => fetchSessions())}
-            />
+            {error && <div className="card error-banner">{error}</div>}
 
-            <div className="card jsx-editor">
-              <h3>JSX Script</h3>
-              <textarea
-                rows={6}
-                placeholder="Enter ExtendScript / JSX code..."
-                value={jsxInput}
-                onChange={(e) => setJsxInput(e.target.value)}
-              />
-              <button className="btn-primary" onClick={handleRunJsx} disabled={loading || !jsxInput.trim()}>
-                Execute
-              </button>
-            </div>
-
-            {streamUrl && <VideoPlayer src={streamUrl} />}
-
-            <div className="action-log">
-              <h3>Action Log</h3>
-              {log.map((entry, i) => (
-                <div key={i} className={`log-entry ${entry.success ? "success" : "error"}`}>
-                  <span className="log-action">[{entry.action}]</span>
-                  <span className="log-message">{entry.message}</span>
+            <div className="agent-grid">
+              <section className="chat-column card">
+                <div className="chat-header">
+                  <h3>Copilot Agent</h3>
+                  <span className={`status-badge status-${context?.session.status || currentSession.status}`}>
+                    {context?.session.status || currentSession.status}
+                  </span>
                 </div>
-              ))}
+
+                <div className="chat-messages">
+                  {messages.length === 0 ? (
+                    <div className="empty-chat">
+                      <p>先上传 AEP 压缩包，然后直接告诉 agent 你的目标。</p>
+                      <p>例如：请启动容器，检查我上传的工程，并渲染一版 H.264 预览。</p>
+                    </div>
+                  ) : (
+                    messages.map((message) => (
+                      <article key={message._id} className={`chat-bubble chat-${message.role}`}>
+                        <header>{message.role === "user" ? "You" : "Copilot Agent"}</header>
+                        <p>{message.content || "(empty response)"}</p>
+                      </article>
+                    ))
+                  )}
+                </div>
+
+                <div className="chat-composer">
+                  <textarea
+                    rows={4}
+                    placeholder="告诉 agent 你要对 After Effects 工程做什么，比如：把标题改成白色描边并渲染 1080p 预览。"
+                    value={prompt}
+                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
+                  />
+                  <div className="composer-actions">
+                    <span className="composer-hint">Agent 会自行决定何时启动容器、选择工程、执行 JSX 和渲染。</span>
+                    <button className="btn-primary" onClick={handleSend} disabled={sending || !prompt.trim()}>
+                      {sending ? "Sending..." : "Send"}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <aside className="workspace-column">
+                <div className="card workspace-card">
+                  <h3>Workspace</h3>
+                  <div className="workspace-summary">
+                    <div>
+                      <span className="label">Active Project</span>
+                      <strong>{context?.session.active_project_id || "None"}</strong>
+                    </div>
+                    <div>
+                      <span className="label">Latest Render</span>
+                      <strong>{context?.latest_render_path || "None"}</strong>
+                    </div>
+                    <div>
+                      <span className="label">Copilot Session</span>
+                      <strong>{context?.session.copilot_session_id || "Not started"}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <ContainerManager
+                  containers={context?.container ? [context.container] : []}
+                  onStop={handleStopContainer}
+                />
+
+                <div className="card project-card">
+                  <h3>Uploaded Projects</h3>
+                  {context?.projects.length ? (
+                    <div className="project-list">
+                      {context.projects.map((project) => (
+                        <div key={project._id} className="project-item">
+                          <div>
+                            <div className="project-name">{project.filename}</div>
+                            <div className="project-meta">
+                              {project.aep_files.length ? project.aep_files.join(", ") : "No .aep detected"}
+                            </div>
+                          </div>
+                          <div className="project-actions">
+                            <span className={`status-badge status-${project.status === "active" ? "running" : "idle"}`}>
+                              {project.status}
+                            </span>
+                            <button className="btn-primary btn-sm" onClick={() => handleDownload(project)}>
+                              Export Zip
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-side">还没有上传工程文件。</p>
+                  )}
+                </div>
+
+                {context?.latest_stream_url && <VideoPlayer src={context.latest_stream_url} />}
+
+                <div className="card timeline-card">
+                  <h3>Agent Timeline</h3>
+                  {sortedEvents.length ? (
+                    <div className="timeline-list">
+                      {sortedEvents.map((event) => (
+                        <div key={event._id} className="timeline-item">
+                          <div className="timeline-type">{event.type}</div>
+                          <div className="timeline-summary">{event.summary}</div>
+                          <div className="timeline-time">{new Date(event.created_at).toLocaleTimeString()}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-side">Agent 还没有执行任何工具。</p>
+                  )}
+                </div>
+              </aside>
             </div>
           </>
         ) : (
           <div className="empty-state">
-            <p>Select a session or create a new one to get started.</p>
+            <p>Create a session to start collaborating with Copilot agent.</p>
           </div>
         )}
       </div>

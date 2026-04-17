@@ -5,8 +5,10 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 
-from app.database import get_session_collection
+from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
 from app.models.session import SessionCreate, SessionInDB, SessionStatus, SessionUpdate
+from app.services import container_manager as cm
+from app.services.copilot_runtime import runtime_manager
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -17,8 +19,13 @@ async def create_session(body: SessionCreate):
     doc = {
         "_id": str(uuid4()),
         "name": body.name,
-        "status": SessionStatus.active.value,
+        "status": SessionStatus.idle.value,
+        "copilot_session_id": None,
         "container_id": None,
+        "active_project_id": None,
+        "latest_render_path": None,
+        "latest_stream_url": None,
+        "last_error": None,
         "created_at": now,
         "updated_at": now,
     }
@@ -62,6 +69,16 @@ async def update_session(session_id: str, body: SessionUpdate):
 @router.delete("/{session_id}", status_code=204)
 async def delete_session(session_id: str):
     col = get_session_collection()
+    doc = await col.find_one({"_id": session_id})
+    if not doc:
+        raise HTTPException(404, "Session not found")
+
+    if doc.get("container_id"):
+        await cm.remove_container(doc["container_id"])
+    await runtime_manager.disconnect_session(session_id)
+    await get_project_collection().delete_many({"session_id": session_id})
+    await get_message_collection().delete_many({"session_id": session_id})
+    await get_event_collection().delete_many({"session_id": session_id})
     result = await col.delete_one({"_id": session_id})
     if result.deleted_count == 0:
         raise HTTPException(404, "Session not found")

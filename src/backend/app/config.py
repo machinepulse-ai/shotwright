@@ -17,11 +17,18 @@ class Settings(BaseSettings):
     # --- Docker ---
     docker_host: str = "npipe:////./pipe/docker_engine"
     shotwright_image: str = "shotwright:latest"
-    container_network: str = "shotwright_default"
+    container_network: str = ""
     container_data_root: str = "C:\\data"
+    shared_uploads_volume: str = "shotwright_uploads"
+    shared_exports_volume: str = "shotwright_exports"
+    shared_hls_volume: str = "shotwright_hls"
 
     # --- Copilot ---
     github_token: str = ""
+    copilot_model: str = "gpt-5"
+    copilot_reasoning_effort: str = "high"
+    copilot_cli_path: str = ""
+    copilot_workspace_root: str = "C:\\workspace"
 
     # --- Paths ---
     upload_dir: str = "C:\\data\\uploads"

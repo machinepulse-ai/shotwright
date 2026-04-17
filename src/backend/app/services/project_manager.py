@@ -1,16 +1,13 @@
 """AEP project management — upload, extract, export, and render."""
 
-import logging
+from datetime import datetime, timezone
 import os
-import shutil
 import zipfile
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
 from app.config import settings
-from app.services.container_manager import exec_in_container, get_container
-
-logger = logging.getLogger(__name__)
+from app.database import get_project_collection, get_session_collection
 
 UPLOAD_DIR = Path(settings.upload_dir)
 EXPORT_DIR = Path(settings.export_dir)
@@ -21,50 +18,89 @@ def _ensure_dirs() -> None:
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-async def upload_project(session_id: str, container_db_id: str, file_bytes: bytes, filename: str) -> dict:
-    """Save uploaded zip and extract into the container's data volume."""
+def _list_relative_files(base_dir: Path) -> list[str]:
+    return [str(path.relative_to(base_dir)) for path in base_dir.rglob("*") if path.is_file()]
+
+
+async def upload_project(session_id: str, file_bytes: bytes, filename: str) -> dict:
+    """Save uploaded zip into the shared uploads volume and extract it for agent access."""
     _ensure_dirs()
     project_id = str(uuid4())
-    zip_path = UPLOAD_DIR / f"{project_id}.zip"
+    session_dir = UPLOAD_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    zip_path = session_dir / f"{project_id}.zip"
     zip_path.write_bytes(file_bytes)
 
-    extract_dir = UPLOAD_DIR / project_id
+    extract_dir = session_dir / project_id
     with zipfile.ZipFile(zip_path, "r") as zf:
-        # Validate paths to prevent zip-slip
         for member in zf.namelist():
             member_path = PureWindowsPath(member)
             if member_path.is_absolute() or ".." in member_path.parts:
                 raise ValueError(f"Unsafe path in zip: {member}")
         zf.extractall(extract_dir)
 
-    container = await get_container(container_db_id)
-    if not container:
-        raise ValueError("Container not found")
-
-    # Copy extracted files into the container
-    container_target = f"C:\\data\\projects\\{project_id}"
-    exit_code, output = await exec_in_container(
-        container["docker_id"],
-        ["powershell", "-Command", f"New-Item -ItemType Directory -Force -Path '{container_target}'"],
-    )
-    logger.info("Created project dir in container: exit=%d output=%s", exit_code, output)
-
-    return {
-        "project_id": project_id,
-        "container_path": container_target,
-        "files": os.listdir(extract_dir),
+    relative_files = _list_relative_files(extract_dir)
+    aep_files = [path for path in relative_files if path.lower().endswith(".aep")]
+    project_doc = {
+        "_id": project_id,
+        "session_id": session_id,
+        "filename": filename,
+        "workspace_dir": str(extract_dir),
+        "aep_files": aep_files,
+        "created_at": datetime.now(timezone.utc),
+        "status": "uploaded",
     }
+    await get_project_collection().insert_one(project_doc)
+
+    session_col = get_session_collection()
+    session_doc = await session_col.find_one({"_id": session_id})
+    if session_doc and not session_doc.get("active_project_id"):
+        await session_col.update_one(
+            {"_id": session_id},
+            {"$set": {"active_project_id": project_id, "updated_at": project_doc["created_at"]}},
+        )
+        project_doc["status"] = "active"
+        await get_project_collection().update_one({"_id": project_id}, {"$set": {"status": "active"}})
+
+    return project_doc
 
 
-async def export_project(session_id: str, container_db_id: str, project_id: str) -> Path | None:
-    """Pack project files from container into a downloadable zip."""
+async def list_projects(session_id: str) -> list[dict]:
+    return await get_project_collection().find({"session_id": session_id}).sort("created_at", -1).to_list(length=100)
+
+
+async def get_project(session_id: str, project_id: str) -> dict | None:
+    return await get_project_collection().find_one({"_id": project_id, "session_id": session_id})
+
+
+async def set_active_project(session_id: str, project_id: str) -> None:
+    await get_project_collection().update_many(
+        {"session_id": session_id},
+        {"$set": {"status": "uploaded"}},
+    )
+    await get_project_collection().update_one(
+        {"_id": project_id, "session_id": session_id},
+        {"$set": {"status": "active"}},
+    )
+    await get_session_collection().update_one(
+        {"_id": session_id},
+        {"$set": {"active_project_id": project_id, "updated_at": datetime.now(timezone.utc)}},
+    )
+
+
+async def export_project(session_id: str, project_id: str) -> Path | None:
+    """Pack the shared project workspace into a downloadable zip."""
     _ensure_dirs()
-    container = await get_container(container_db_id)
-    if not container:
+    project = await get_project(session_id, project_id)
+    if not project:
         return None
 
-    export_zip = EXPORT_DIR / f"{project_id}-export.zip"
-    source_dir = UPLOAD_DIR / project_id
+    export_dir = EXPORT_DIR / session_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    export_zip = export_dir / f"{project_id}-export.zip"
+    source_dir = Path(project["workspace_dir"])
 
     if not source_dir.exists():
         return None
@@ -76,4 +112,8 @@ async def export_project(session_id: str, container_db_id: str, project_id: str)
                 arcname = full.relative_to(source_dir)
                 zf.write(full, arcname)
 
+    await get_project_collection().update_one(
+        {"_id": project_id},
+        {"$set": {"status": "exported"}},
+    )
     return export_zip

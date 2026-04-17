@@ -8,7 +8,7 @@ import docker
 from docker.errors import DockerException, NotFound
 
 from app.config import settings
-from app.database import get_container_collection
+from app.database import get_container_collection, get_session_collection
 from app.models.container import ContainerStatus
 
 logger = logging.getLogger(__name__)
@@ -28,21 +28,37 @@ async def create_container(session_id: str, image: str | None = None) -> dict:
     image = image or settings.shotwright_image
     client = _get_docker()
 
-    container = client.containers.run(
-        image=image,
-        detach=True,
-        name=f"shotwright-{session_id[:12]}",
-        environment={
-            "AUTO_INSTALL_AFTER_EFFECTS": "1",
+    volume_mounts = {
+        settings.shared_uploads_volume: {
+            "bind": "C:\\data\\uploads",
+            "mode": "rw",
         },
-        volumes={
-            f"{settings.container_data_root}\\payload": {
-                "bind": "C:\\data\\payload",
-                "mode": "ro",
-            }
+        settings.shared_exports_volume: {
+            "bind": "C:\\data\\exports",
+            "mode": "rw",
         },
-        isolation="process",
-    )
+        settings.shared_hls_volume: {
+            "bind": "C:\\data\\hls",
+            "mode": "rw",
+        },
+        f"{settings.container_data_root}\\payload": {
+            "bind": "C:\\data\\payload",
+            "mode": "ro",
+        },
+    }
+
+    run_kwargs = {
+        "image": image,
+        "detach": True,
+        "name": f"shotwright-{session_id[:8]}-{uuid4().hex[:6]}",
+        "environment": {"AUTO_INSTALL_AFTER_EFFECTS": "1"},
+        "volumes": volume_mounts,
+        "isolation": "process",
+    }
+    if settings.container_network:
+        run_kwargs["network"] = settings.container_network
+
+    container = client.containers.run(**run_kwargs)
 
     doc = {
         "_id": str(uuid4()),
@@ -55,6 +71,15 @@ async def create_container(session_id: str, image: str | None = None) -> dict:
     }
     col = get_container_collection()
     await col.insert_one(doc)
+    await get_session_collection().update_one(
+        {"_id": session_id},
+        {
+            "$set": {
+                "container_id": doc["_id"],
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
     return doc
 
 
@@ -77,6 +102,10 @@ async def stop_container(container_db_id: str) -> dict | None:
         {"_id": container_db_id},
         {"$set": {"status": ContainerStatus.stopped.value}},
     )
+    await get_session_collection().update_one(
+        {"container_id": container_db_id},
+        {"$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
     doc["status"] = ContainerStatus.stopped.value
     return doc
 
@@ -97,6 +126,15 @@ async def remove_container(container_db_id: str) -> bool:
         logger.warning("Failed to remove container %s: %s", doc["docker_id"], exc)
 
     await col.delete_one({"_id": container_db_id})
+    await get_session_collection().update_one(
+        {"container_id": container_db_id},
+        {
+            "$set": {
+                "container_id": None,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+    )
     return True
 
 
@@ -112,6 +150,11 @@ async def list_containers(session_id: str | None = None) -> list[dict]:
 async def get_container(container_db_id: str) -> dict | None:
     col = get_container_collection()
     return await col.find_one({"_id": container_db_id})
+
+
+async def get_session_container(session_id: str) -> dict | None:
+    col = get_container_collection()
+    return await col.find_one({"session_id": session_id, "status": ContainerStatus.running.value})
 
 
 async def exec_in_container(docker_id: str, cmd: list[str]) -> tuple[int, str]:

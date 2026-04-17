@@ -2,10 +2,16 @@
 
 import json
 import logging
+from pathlib import Path
+from uuid import uuid4
 
+from app.config import settings
+from app.services import project_manager as pm
 from app.services.container_manager import exec_in_container, get_container
 
 logger = logging.getLogger(__name__)
+
+EXPORT_DIR = Path(settings.export_dir)
 
 
 def build_nexrender_job(
@@ -68,6 +74,47 @@ async def run_render(container_db_id: str, job: dict) -> dict:
         "exit_code": exit_code,
         "success": success,
         "output": output[-2000:] if len(output) > 2000 else output,
+    }
+
+
+async def render_project(
+    session_id: str,
+    project_id: str,
+    container_db_id: str,
+    aep_relative_path: str | None = None,
+    composition: str = "Main",
+    output_name: str | None = None,
+    patch_script: str | None = None,
+) -> dict:
+    """Render an uploaded project from the shared uploads volume."""
+    project = await pm.get_project(session_id, project_id)
+    if not project:
+        raise ValueError("Project not found")
+
+    aep_file = aep_relative_path or (project.get("aep_files") or [None])[0]
+    if not aep_file:
+        raise ValueError("No .aep file found in uploaded project")
+
+    output_dir = EXPORT_DIR / session_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_output_name = output_name or f"{project_id}-{uuid4().hex[:8]}.mp4"
+    output_path = output_dir / resolved_output_name
+    aep_path = Path(project["workspace_dir"]) / aep_file
+
+    job = build_nexrender_job(
+        aep_path=str(aep_path),
+        composition=composition,
+        output_path=str(output_path),
+        patch_script=patch_script,
+    )
+    result = await run_render(container_db_id, job)
+    return {
+        **result,
+        "project_id": project_id,
+        "aep_path": str(aep_path),
+        "output_path": str(output_path),
+        "stream_id": f"{session_id}-{project_id}-{uuid4().hex[:6]}",
     }
 
 

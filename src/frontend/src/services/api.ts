@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { InternalAxiosRequestConfig } from "axios";
 
 const api = axios.create({
   baseURL: "/api",
@@ -6,7 +6,7 @@ const api = axios.create({
 });
 
 // Attach admin token if present
-api.interceptors.request.use((config) => {
+api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const token = localStorage.getItem("shotwright_token");
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
@@ -28,34 +28,21 @@ export const stopContainer = (id: string) => api.post(`/containers/${id}/stop`);
 export const removeContainer = (id: string) => api.delete(`/containers/${id}`);
 
 // --- Projects ---
-export const uploadProject = (sessionId: string, containerId: string, file: File) => {
+export const listProjects = (sessionId: string) => api.get(`/projects/${sessionId}`);
+export const uploadProject = (sessionId: string, file: File) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post(`/projects/${sessionId}/upload?container_id=${containerId}`, form);
+  return api.post(`/agent/sessions/${sessionId}/uploads`, form);
 };
-export const exportProject = (sessionId: string, containerId: string, projectId: string) =>
-  api.post(
-    `/projects/${sessionId}/export?container_id=${containerId}&project_id=${projectId}`,
-    {},
-    { responseType: "blob" }
-  );
-export const renderProject = (
-  sessionId: string,
-  containerId: string,
-  aepPath: string,
-  composition?: string
-) =>
-  api.post(`/projects/${sessionId}/render`, null, {
-    params: { container_id: containerId, aep_path: aepPath, composition: composition || "Main" },
-  });
-export const createStream = (sessionId: string, mp4Path: string) =>
-  api.post(`/projects/${sessionId}/stream`, null, { params: { mp4_path: mp4Path } });
+export const exportProject = (sessionId: string, projectId: string) =>
+  api.get(`/projects/${sessionId}/${projectId}/archive`, { responseType: "blob" });
 
 // --- Agent ---
-export const sendAgentCommand = (sessionId: string, action: string, payload: Record<string, unknown> = {}) =>
-  api.post("/agent/command", { session_id: sessionId, action, payload });
-export const runJsx = (sessionId: string, scriptContent: string, description?: string) =>
-  api.post("/agent/jsx", { session_id: sessionId, script_content: scriptContent, description });
+export const getAgentContext = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/context`);
+export const getAgentMessages = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/messages`);
+export const getAgentEvents = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/events`);
+export const sendChatTurn = (sessionId: string, content: string) =>
+  api.post(`/agent/sessions/${sessionId}/messages`, { content });
 
 // --- Admin ---
 export const adminLogin = (password: string) => api.post("/admin/login", { password });

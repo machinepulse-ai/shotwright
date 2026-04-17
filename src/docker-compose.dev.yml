@@ -29,12 +29,15 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      target: frontend
+      target: frontend-build
     # Override to use webpack-dev-server in dev
     command: ["cmd", "/c", "npm", "run", "dev"]
     volumes:
       - ./frontend/src:C:/frontend/src
       - ./frontend/public:C:/frontend/public
+      - ../src/frontend/package.json:C:/frontend/package.json
+      - ../src/frontend/webpack.config.js:C:/frontend/webpack.config.js
+      - ../src/frontend/tsconfig.json:C:/frontend/tsconfig.json
     ports:
       - "3000:3000"
 
