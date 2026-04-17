@@ -1,0 +1,11 @@
+# After Effects setup image versions for Shotwright.
+# Modifying this file triggers the ae-setup-publish workflow which downloads
+# the AE installer payload, patches the helper Setup.exe, and publishes
+# a container image to GHCR.
+
+current: "26.2"
+
+versions:
+  "26.2":
+    product-id: AEFT
+    platform: win64

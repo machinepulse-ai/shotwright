@@ -1,0 +1,2 @@
+FROM mcr.microsoft.com/windows/nanoserver:ltsc2025
+COPY payload/ C:/payload/

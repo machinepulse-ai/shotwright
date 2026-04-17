@@ -1,0 +1,97 @@
+name: ae-setup-publish
+
+on:
+  push:
+    paths:
+      - setup-versions.yml
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: windows-2025
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Parse setup versions
+        id: versions
+        shell: pwsh
+        run: |
+          pip install pyyaml --quiet 2>&1 | Out-Null
+          @'
+          import yaml, json
+          with open("setup-versions.yml") as f:
+              data = yaml.safe_load(f)
+          current = data["current"]
+          ver = data["versions"][current]
+          print(json.dumps({
+              "current": current,
+              "product_id": ver.get("product-id", "AEFT"),
+              "platform": ver.get("platform", "win64")
+          }))
+          '@ | Set-Content -Path _parse_versions.py -Encoding utf8
+          $json = python _parse_versions.py
+          Remove-Item _parse_versions.py
+          $parsed = $json | ConvertFrom-Json
+          "current=$($parsed.current)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "product_id=$($parsed.product_id)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "platform=$($parsed.platform)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Download After Effects payload
+        shell: pwsh
+        run: |
+          $payloadRoot = Join-Path $env:RUNNER_TEMP 'ae-payload'
+          python scripts/install/download_after_effects_payload.py `
+            --payload-root $payloadRoot `
+            --product-id '${{ steps.versions.outputs.product_id }}' `
+            --version '${{ steps.versions.outputs.current }}' `
+            --platform '${{ steps.versions.outputs.platform }}'
+          "PAYLOAD_ROOT=$payloadRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Patch helper Setup.exe
+        shell: pwsh
+        run: |
+          $platform = '${{ steps.versions.outputs.platform }}'
+          $helperSetup = Join-Path $env:PAYLOAD_ROOT "CreativeCloudHelper_${platform}\HDBox\Setup.exe"
+          python scripts/install/modify_setup_win.py $helperSetup
+
+      - name: Build setup container image
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.versions.outputs.current }}'
+          $platform = '${{ steps.versions.outputs.platform }}'
+          $buildContext = Join-Path $env:RUNNER_TEMP 'ae-setup-build'
+          New-Item -ItemType Directory -Force -Path $buildContext | Out-Null
+
+          $payloadDest = Join-Path $buildContext 'payload'
+          New-Item -ItemType Directory -Force -Path $payloadDest | Out-Null
+          Copy-Item (Join-Path $env:PAYLOAD_ROOT "AEFT_${ver}_${platform}") (Join-Path $payloadDest "AEFT_${ver}_${platform}") -Recurse
+          Copy-Item (Join-Path $env:PAYLOAD_ROOT "CreativeCloudHelper_${platform}") (Join-Path $payloadDest "CreativeCloudHelper_${platform}") -Recurse
+
+          Copy-Item scripts/install/Dockerfile.ae-setup (Join-Path $buildContext 'Dockerfile')
+
+          $repo = '${{ github.repository }}'.ToLower()
+          $imageTag = "ghcr.io/${repo}/after-effects-setup:${ver}"
+          docker build `
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" `
+            --label "org.opencontainers.image.description=After Effects ${ver} installer payload for Shotwright" `
+            -t $imageTag $buildContext
+
+          "IMAGE_TAG=$imageTag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Login to GHCR
+        shell: pwsh
+        run: |
+          '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Push setup image to GHCR
+        shell: pwsh
+        run: |
+          docker push $env:IMAGE_TAG
+          Write-Host "Published $env:IMAGE_TAG"

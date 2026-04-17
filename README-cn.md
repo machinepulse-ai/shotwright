@@ -33,7 +33,7 @@
 - [验证流程](#-验证流程)
 - [环境要求](#-环境要求)
 - [快速开始](#-快速开始)
-- [CI 与私有安装缓存](#-ci-与私有安装缓存)
+- [CI 与 GHCR 安装镜像](#-ci-与-ghcr-安装镜像)
 - [项目结构](#-项目结构)
 - [设计说明](#-设计说明)
 - [路线图](#-路线图)
@@ -76,7 +76,7 @@
 | --- | --- |
 | Windows 运行时镜像 | 构建包含 Node.js、Python 3.13、ffmpeg、Git 与 nexrender 依赖的容器 |
 | 宿主机挂载模式 | 直接使用宿主机上的 Adobe After Effects 2026，而不是把 AE 打包进镜像 |
-| 安装缓存模式 | 从挂载进容器的许可安装缓存中安装 After Effects 26.2 |
+| 安装缓存模式 | 从 GHCR 托管或本地准备的安装缓存中安装 After Effects 26.2 |
 | 验证工程生成 | 通过 JSX 生成可复现的 AEP，方便重复执行冒烟测试 |
 | 仅补丁 JSX | 验证脚本只负责合成修改，渲染过程完全交由 nexrender |
 
@@ -99,10 +99,10 @@ flowchart LR
 - 已启用 Windows 容器模式的 Docker
 - 满足以下任一条件：
 	- 宿主机已安装 Adobe After Effects 2026
-	- 已准备 After Effects 26.2 的许可安装缓存以及 Creative Cloud Helper 安装缓存
+	- 从 GHCR 拉取安装载荷镜像（见第 3 步）
 
-> [!IMPORTANT]
-> Shotwright 不分发 Adobe 安装程序。请将安装缓存保存在你自己的本地存储或私有制品仓库中。
+> [!TIP]
+> 预构建的安装载荷镜像已发布到 GHCR。可用版本见 [setup-versions.yml](setup-versions.yml)。
 
 > [!TIP]
 > Dockerfile 已通过 `http_proxy`、`https_proxy`、`HTTP_PROXY`、`HTTPS_PROXY` 构建参数内置代理支持。
@@ -154,16 +154,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -
 
 ### 第 3 步 — 运行验证渲染（安装缓存模式）
 
-- 做什么：把许可安装缓存挂载进容器。容器先自动安装 After Effects，再执行与第 2 步相同的验证渲染。
+- 做什么：从 GHCR 拉取预构建的安装载荷镜像，提取安装缓存，容器自动安装 After Effects 后执行验证渲染。
 - 结果：同样得到 `validation-data/output/validation.mp4`。
 - 能跳过吗：如果第 2 步已经覆盖了你的验证场景，这一步可选。
 
-先在宿主机准备这两个目录：
+拉取安装载荷并提取到本地目录：
 
-| 目录 | 内容 |
-| --- | --- |
-| `C:\data\payload\AEFT_26.2_win64` | `driver.xml` 以及所有 AE 安装包目录 |
-| `C:\data\payload\CreativeCloudHelper_win64` | `HDBox` 和 `IPC` 目录 |
+```powershell
+$ver = '26.2'
+$repo = 'ghcr.io/liuchangfreeman/shotwright/after-effects-setup'
+docker pull "${repo}:${ver}"
+docker create --name ae-setup "${repo}:${ver}" cmd /c exit
+docker cp 'ae-setup:C:\payload' 'C:\data\payload'
+docker rm ae-setup
+```
 
 运行：
 
@@ -174,35 +178,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
 	-CreativeCloudHelperRoot 'C:\data\payload\CreativeCloudHelper_win64'
 ```
 
-### 第 4 步 — 可选：从零准备安装缓存
+<details>
+<summary><strong>进阶：在本地从零构建安装缓存</strong></summary>
 
-- 做什么：通过 Adobe 公开目录下载 After Effects 26.2 的安装布局。
-- 结果：得到 `C:\data\payload\AEFT_26.2_win64` 和 `C:\data\payload\CreativeCloudHelper_win64`。
-- 能跳过吗：如果你已经有本地安装缓存，或者采用宿主机挂载模式，可以跳过。
+如果需要自行从 Adobe 目录下载安装缓存而非通过 GHCR 获取：
 
 ```powershell
 python scripts\install\download_after_effects_payload.py --payload-root C:\data\payload
-```
-
-首次使用前，需要先对辅助安装器做一次补丁：
-
-```powershell
 python scripts\install\modify_setup_win.py C:\data\payload\CreativeCloudHelper_win64\HDBox\Setup.exe
 ```
 
-## 🧱 CI 与私有安装缓存
+</details>
 
-`.github/workflows/windows-container-validation.yml` 中的 GitHub Actions 工作流使用 `windows-2025` 运行器。
+## 🧱 CI 与 GHCR 安装镜像
 
-- `dockerfile-build` 会在 push 和 pull request 上运行，用来确认镜像仍然可以正常构建。
-- `validation-render` 仅在手动触发的 `workflow_dispatch` 下运行，因为它依赖一个私有安装缓存压缩包。
+`.github/workflows/` 下的 GitHub Actions 工作流使用 `windows-2025` 运行器。
 
-该压缩包通过 `SHOTWRIGHT_INSTALLER_CACHE_URL` 密钥提供。解压后必须满足以下任一结构：
+| 工作流 | 触发条件 | 用途 |
+| --- | --- | --- |
+| `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装程序，打补丁后发布到 GHCR |
+| `windows-container-validation` — `dockerfile-build` | 推送或 PR 修改 `Dockerfile` | 确认 Shotwright 镜像构建正常 |
+| `windows-container-validation` — `validation-render` | 手动 `workflow_dispatch` | 从 GHCR 拉取安装载荷，运行完整验证 |
 
-- `payload/AEFT_26.2_win64` 与 `payload/CreativeCloudHelper_win64`
-- 或者直接把这两个目录放在压缩包根目录
+`ae-setup-publish` 工作流读取 [setup-versions.yml](setup-versions.yml) 来确定要构建的 After Effects 版本。它从 Adobe 公开目录下载安装载荷、给辅助安装器 `Setup.exe` 打补丁，并将所有内容打包为 `nanoserver:ltsc2025` 容器镜像后推送到 GHCR。
 
-仓库不会指向任何公开的 Adobe 安装程序下载链接。
+`validation-render` 任务会自动从 GHCR 拉取安装镜像并提取载荷。除默认的 `GITHUB_TOKEN` 外不需要额外密钥。
 
 ## 📁 项目结构
 
@@ -230,7 +230,7 @@ validation-data/
 ## 📝 设计说明
 
 - Docker 镜像本身不包含 Adobe After Effects。
-- 运行时既可以挂载宿主机上的 `C:\Program Files\Adobe\Adobe After Effects 2026`，也可以从挂载到 `C:\lab\payload` 的安装缓存中安装。
+- 运行时既可以挂载宿主机上的 `C:\Program Files\Adobe\Adobe After Effects 2026`，也可以从 GHCR 安装镜像提取的安装缓存或挂载到 `C:\lab\payload` 的本地安装缓存中安装。
 - 容器启动时会执行 `scripts/runtime_entrypoint.ps1`。当 `AUTO_INSTALL_AFTER_EFFECTS=1` 且检测到安装缓存目录时，会自动安装 AE；否则直接跳过。
 - 验证用 JSX 只负责补丁逻辑，渲染执行与输出管理由 nexrender 统一负责。
 - 验证任务通过 `outputExt: mp4` 和 `@nexrender/action-copy` 保证最终只留下一个稳定、可预期的视频产物。

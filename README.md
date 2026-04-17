@@ -31,7 +31,7 @@ Build Windows render workers, mount a real After Effects install or auto-install
 > Shotwright keeps After Effects at the center of the workflow. The goal is not generic AI video automation; it is reproducible AE runtime infrastructure that lets AI agents handle the repetitive execution work while designers keep taste and control.
 
 > [!NOTE]
-> In this README, installer cache means the licensed After Effects package set mounted into the container for installation.
+> In this README, installer cache means the After Effects package set used for container installation, either pulled from GHCR or prepared locally.
 
 <details>
 <summary><strong>Jump to section</strong></summary>
@@ -42,7 +42,7 @@ Build Windows render workers, mount a real After Effects install or auto-install
 - [Validation Flow](#-validation-flow)
 - [Requirements](#-requirements)
 - [Quick Start](#-quick-start)
-- [CI And Private Installer Cache](#-ci-and-private-installer-cache)
+- [CI And GHCR Setup Images](#-ci-and-ghcr-setup-images)
 - [Project Layout](#-project-layout)
 - [Design Notes](#-design-notes)
 - [Roadmap](#-roadmap)
@@ -85,7 +85,7 @@ Most AI video products reduce the creative surface area: fewer decisions, fewer 
 | --- | --- |
 | Windows runtime image | Builds a container with Node.js, Python 3.13, ffmpeg, Git, and nexrender dependencies |
 | Host-mount mode | Uses a real host installation of Adobe After Effects 2026 instead of packaging AE into the image |
-| Installer-cache mode | Installs After Effects 26.2 inside the container from a mounted, user-supplied installer cache |
+| Installer-cache mode | Installs After Effects 26.2 inside the container from a GHCR-hosted or locally prepared installer cache |
 | Validation project generation | Creates a reproducible AEP from JSX so smoke tests are easy to replay |
 | Patch-only JSX | Keeps validation JSX focused on composition edits while nexrender owns rendering |
 
@@ -108,10 +108,10 @@ flowchart LR
 - Docker with Windows containers enabled
 - One of the following:
 	- Adobe After Effects 2026 installed on the host
-	- A licensed After Effects 26.2 installer cache plus the Creative Cloud helper cache
+	- An installer payload image pulled from GHCR (see Step 3)
 
-> [!IMPORTANT]
-> Shotwright does not redistribute Adobe installers. Keep the installer cache in your own local storage or private artifact store.
+> [!TIP]
+> Pre-built installer payload images are published to GHCR. See [setup-versions.yml](setup-versions.yml) for available versions.
 
 > [!TIP]
 > Proxy-aware builds are already wired through the Dockerfile via `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` build args.
@@ -163,16 +163,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -
 
 ### Step 3 — Run validation in installer-cache mode
 
-- What: Mount a licensed installer cache into the container. The container installs After Effects automatically, then runs the same validation render as Step 2.
+- What: Pull a pre-built installer payload image from GHCR, extract it, and run validation with auto-installed After Effects.
 - Result: The same `validation-data/output/validation.mp4`.
 - Skip: Optional if Step 2 already covers your validation needs.
 
-Prepare these two directories on the host:
+Pull the installer payload and extract it:
 
-| Directory | Contents |
-| --- | --- |
-| `C:\data\payload\AEFT_26.2_win64` | `driver.xml` and all AE package folders |
-| `C:\data\payload\CreativeCloudHelper_win64` | `HDBox` and `IPC` directories |
+```powershell
+$ver = '26.2'
+$repo = 'ghcr.io/liuchangfreeman/shotwright/after-effects-setup'
+docker pull "${repo}:${ver}"
+docker create --name ae-setup "${repo}:${ver}" cmd /c exit
+docker cp 'ae-setup:C:\payload' 'C:\data\payload'
+docker rm ae-setup
+```
 
 Run:
 
@@ -183,35 +187,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
 	-CreativeCloudHelperRoot 'C:\data\payload\CreativeCloudHelper_win64'
 ```
 
-### Step 4 — Optional: build an installer cache from scratch
+<details>
+<summary><strong>Advanced: build an installer cache locally</strong></summary>
 
-- What: Download the After Effects 26.2 installer layout from Adobe's public catalog.
-- Result: `C:\data\payload\AEFT_26.2_win64` and `C:\data\payload\CreativeCloudHelper_win64`.
-- Skip: Skip if you already have the required installer cache or are using host-mount mode.
+If you need to build the installer cache from scratch instead of pulling from GHCR:
 
 ```powershell
 python scripts\install\download_after_effects_payload.py --payload-root C:\data\payload
-```
-
-Patch the helper installer before first use as a one-time step:
-
-```powershell
 python scripts\install\modify_setup_win.py C:\data\payload\CreativeCloudHelper_win64\HDBox\Setup.exe
 ```
 
-## 🧱 CI And Private Installer Cache
+</details>
 
-The GitHub Actions workflow in `.github/workflows/windows-container-validation.yml` uses `windows-2025` runners.
+## 🧱 CI And GHCR Setup Images
 
-- `dockerfile-build` runs on push and pull request events to confirm the image still builds.
-- `validation-render` runs only on manual `workflow_dispatch` because it requires a private installer-cache archive.
+The GitHub Actions workflows in `.github/workflows/` use `windows-2025` runners.
 
-Provide that archive through the `SHOTWRIGHT_INSTALLER_CACHE_URL` secret. After extraction, the archive must contain either:
+| Workflow | Trigger | Purpose |
+| --- | --- | --- |
+| `ae-setup-publish` | Push to `setup-versions.yml` or manual dispatch | Download AE installer from Adobe, patch, and publish to GHCR |
+| `windows-container-validation` — `dockerfile-build` | Push or PR to `Dockerfile` | Confirm the Shotwright image builds |
+| `windows-container-validation` — `validation-render` | Manual `workflow_dispatch` | Pull installer payload from GHCR, run full validation |
 
-- `payload/AEFT_26.2_win64` and `payload/CreativeCloudHelper_win64`
-- or those two directories directly at the archive root
+The `ae-setup-publish` workflow reads [setup-versions.yml](setup-versions.yml) to determine which After Effects version to build. It downloads the installer payload from Adobe's public catalog, patches the helper `Setup.exe`, packages everything into a `nanoserver:ltsc2025` container image, and pushes it to GHCR.
 
-The repository does not link to any public Adobe installer release.
+The `validation-render` job pulls the setup image from GHCR and extracts the payload automatically. No private secrets are required beyond the default `GITHUB_TOKEN`.
 
 ## 📁 Project Layout
 
@@ -239,7 +239,7 @@ validation-data/
 ## 📝 Design Notes
 
 - The Docker image does not bundle Adobe After Effects itself.
-- The runtime can either mount `C:\Program Files\Adobe\Adobe After Effects 2026` from the host or install from a mounted installer cache at `C:\lab\payload`.
+- The runtime can either mount `C:\Program Files\Adobe\Adobe After Effects 2026` from the host or install from a GHCR-sourced installer cache at `C:\lab\payload`.
 - Container startup runs `scripts/runtime_entrypoint.ps1`. When `AUTO_INSTALL_AFTER_EFFECTS=1` and installer-cache directories are detected, AE is installed automatically. When they are absent, installation is skipped.
 - Validation JSX is patch-only by design. nexrender owns render execution and output routing.
 - The validation job uses `outputExt: mp4` plus `@nexrender/action-copy` so the smoke test ends with a single predictable video artifact.

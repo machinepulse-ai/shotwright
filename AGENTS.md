@@ -18,7 +18,7 @@ This repository should stay:
 - Adobe After Effects is intentionally not included in the image.
 - Two runtime modes are supported:
   1. **Host mount** — mount `C:\Program Files\Adobe\Adobe After Effects 2026` from the host into the container.
-  2. **Installer-cache mode** — mount a licensed installer cache at `C:\lab\payload` and let the container install AE at startup through `scripts/runtime_entrypoint.ps1`.
+  2. **Installer-cache mode** — pull a pre-built installer payload image from GHCR (or mount a locally prepared cache) at `C:\lab\payload` and let the container install AE at startup through `scripts/runtime_entrypoint.ps1`.
 - `AUTO_INSTALL_AFTER_EFFECTS=1` is enabled by default in the Dockerfile. If no installer cache is mounted, the install step is skipped.
 - Validation uses `scripts/validate/create_validation_animation_project.jsx` to generate the test project and `scripts/validate/validation_patch.jsx` to make composition-level edits only.
 - nexrender owns the final render execution and output handling. Do not move render-queue logic into the validation patch script.
@@ -91,11 +91,12 @@ Last validated on **2026-04-17**:
 
 ## CI Workflow
 
-- Workflow file: `.github/workflows/windows-container-validation.yml`
+- Workflow files: `.github/workflows/ae-setup-publish.yml` and `.github/workflows/windows-container-validation.yml`
+- `ae-setup-publish` runs on push to `setup-versions.yml` and manual `workflow_dispatch`; downloads AE from Adobe, patches, and publishes to GHCR
 - `dockerfile-build` runs on push and pull request events
-- `validation-render` runs only on manual `workflow_dispatch`
-- The full render workflow requires the `SHOTWRIGHT_INSTALLER_CACHE_URL` secret
+- `validation-render` runs only on manual `workflow_dispatch`; pulls installer payload from GHCR
 - Runner target: `windows-2025`
+- Setup image versions are tracked in `setup-versions.yml`
 
 ## Next Good Steps
 
