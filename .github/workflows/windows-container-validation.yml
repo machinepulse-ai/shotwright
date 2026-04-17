@@ -12,6 +12,9 @@ on:
 jobs:
   dockerfile-build:
     runs-on: windows-2025
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -31,10 +34,60 @@ jobs:
             throw "Expected Docker Windows container mode but got '$osType'."
           }
 
+      - name: Login to GHCR for base image cache
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Resolve runtime base image
+        id: base_image
+        shell: pwsh
+        run: |
+          $sourceImage = '${{ steps.config.outputs.runtime_base_image }}'
+          $sourceTag = $sourceImage.Split(':')[-1]
+          $cacheImage = "ghcr.io/liuchangfreeman/shotwright/base_image:$sourceTag"
+          $resolvedImage = $sourceImage
+          $cacheHit = $false
+
+          Write-Host "Trying GHCR base-image cache: $cacheImage"
+          docker pull $cacheImage
+          if ($LASTEXITCODE -eq 0) {
+            $resolvedImage = $cacheImage
+            $cacheHit = $true
+            Write-Host "Using cached base image from GHCR: $cacheImage"
+          }
+          else {
+            Write-Host "GHCR base-image cache miss. Pulling source image from MCR: $sourceImage"
+            docker pull $sourceImage
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to pull runtime base image from $sourceImage"
+            }
+
+            docker tag $sourceImage $cacheImage
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Failed to retag $sourceImage as $cacheImage. Continuing with the MCR image already pulled locally."
+            }
+            else {
+              docker push $cacheImage
+              if ($LASTEXITCODE -eq 0) {
+                $resolvedImage = $cacheImage
+                Write-Host "Pushed runtime base-image cache to GHCR: $cacheImage"
+              }
+              else {
+                Write-Warning "Failed to push $cacheImage to GHCR. Continuing with the MCR image already pulled locally."
+              }
+            }
+          }
+
+          "resolved_image=$resolvedImage" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "cache_image=$cacheImage" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "cache_hit=$($cacheHit.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Build Shotwright image
         shell: pwsh
         run: |
-          docker build --build-arg BASE_IMAGE='${{ steps.config.outputs.runtime_base_image }}' -t '${{ steps.config.outputs.ci_image_tag }}' .
+          docker build --build-arg BASE_IMAGE='${{ steps.base_image.outputs.resolved_image }}' -t '${{ steps.config.outputs.ci_image_tag }}' .
           docker image inspect '${{ steps.config.outputs.ci_image_tag }}' --format '{{.Id}}'
 
   validation-render:
@@ -42,6 +95,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-2025
     permissions:
+      contents: read
       packages: read
     steps:
       - uses: actions/checkout@v4
@@ -77,6 +131,32 @@ jobs:
         run: |
           '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
+      - name: Resolve runtime base image
+        id: base_image
+        shell: pwsh
+        run: |
+          $sourceImage = '${{ steps.config.outputs.runtime_base_image }}'
+          $sourceTag = $sourceImage.Split(':')[-1]
+          $cacheImage = "ghcr.io/liuchangfreeman/shotwright/base_image:$sourceTag"
+          $resolvedImage = $sourceImage
+
+          Write-Host "Trying GHCR base-image cache: $cacheImage"
+          docker pull $cacheImage
+          if ($LASTEXITCODE -eq 0) {
+            $resolvedImage = $cacheImage
+            Write-Host "Using cached base image from GHCR: $cacheImage"
+          }
+          else {
+            Write-Host "GHCR base-image cache miss. Pulling source image from MCR: $sourceImage"
+            docker pull $sourceImage
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to pull runtime base image from $sourceImage"
+            }
+          }
+
+          "resolved_image=$resolvedImage" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "cache_image=$cacheImage" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Pull setup image from GHCR
         shell: pwsh
         run: |
@@ -96,7 +176,7 @@ jobs:
       - name: Build Shotwright image
         shell: pwsh
         run: |
-          docker build --build-arg BASE_IMAGE='${{ steps.config.outputs.runtime_base_image }}' -t '${{ steps.config.outputs.ci_image_tag }}' .
+          docker build --build-arg BASE_IMAGE='${{ steps.base_image.outputs.resolved_image }}' -t '${{ steps.config.outputs.ci_image_tag }}' .
 
       - name: Install After Effects and render validation mp4
         shell: pwsh
