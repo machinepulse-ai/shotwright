@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
   adminLogin,
   getAdminDashboard,
   getAdminSettings,
+  getCopilotModelOptions,
   updateGithubToken,
   updateAdminSettings,
   getContainers,
@@ -10,12 +11,14 @@ import {
   getSessions,
   deleteSession,
 } from "../../services/api";
-import { AdminSettings, Container, DashboardData, Session } from "../../types";
+import { AdminSettings, Container, CopilotModelOption, DashboardData, ReasoningEffort, Session } from "../../types";
 import { useI18n } from "../../i18n";
 import "./AdminPanel.css";
 
 const defaultAdminSettings: AdminSettings = {
   github_token_set: false,
+  default_copilot_model: "gpt-5.4",
+  default_copilot_reasoning_effort: "high",
   copilot_cli_path: "",
   copilot_workspace_root: "C:/workspace",
   copilot_use_logged_in_user: false,
@@ -23,6 +26,40 @@ const defaultAdminSettings: AdminSettings = {
   copilot_https_proxy: "",
   copilot_no_proxy: "",
 };
+
+function normalizeAdminSettings(settings: Partial<AdminSettings> | null | undefined): AdminSettings {
+  return {
+    ...defaultAdminSettings,
+    ...(settings || {}),
+    default_copilot_model:
+      typeof settings?.default_copilot_model === "string" && settings.default_copilot_model.trim()
+        ? settings.default_copilot_model
+        : defaultAdminSettings.default_copilot_model,
+    default_copilot_reasoning_effort:
+      settings && "default_copilot_reasoning_effort" in settings
+        ? settings.default_copilot_reasoning_effort ?? null
+        : defaultAdminSettings.default_copilot_reasoning_effort,
+    copilot_cli_path: settings?.copilot_cli_path ?? defaultAdminSettings.copilot_cli_path,
+    copilot_workspace_root: settings?.copilot_workspace_root ?? defaultAdminSettings.copilot_workspace_root,
+    copilot_http_proxy: settings?.copilot_http_proxy ?? defaultAdminSettings.copilot_http_proxy,
+    copilot_https_proxy: settings?.copilot_https_proxy ?? defaultAdminSettings.copilot_https_proxy,
+    copilot_no_proxy: settings?.copilot_no_proxy ?? defaultAdminSettings.copilot_no_proxy,
+    copilot_use_logged_in_user: settings?.copilot_use_logged_in_user ?? defaultAdminSettings.copilot_use_logged_in_user,
+    github_token_set: settings?.github_token_set ?? defaultAdminSettings.github_token_set,
+  };
+}
+
+function buildFallbackModelOption(settings: AdminSettings): CopilotModelOption {
+  return {
+    id: settings.default_copilot_model,
+    name: settings.default_copilot_model,
+    supports_reasoning_effort: Boolean(settings.default_copilot_reasoning_effort),
+    supported_reasoning_efforts: settings.default_copilot_reasoning_effort
+      ? [settings.default_copilot_reasoning_effort]
+      : [],
+    default_reasoning_effort: settings.default_copilot_reasoning_effort,
+  };
+}
 
 export default function AdminPanel() {
   const { copy, locale } = useI18n();
@@ -33,14 +70,32 @@ export default function AdminPanel() {
   const [githubToken, setGithubToken] = useState("");
   const [tokenSet, setTokenSet] = useState(false);
   const [runtimeSettings, setRuntimeSettings] = useState<AdminSettings>(defaultAdminSettings);
+  const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [containers, setContainers] = useState<Container[]>([]);
+  const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [actionMessage, setActionMessage] = useState("");
   const [actionError, setActionError] = useState("");
   const sessionStatusLabels = copy.status.session;
   const containerStatusLabels = copy.status.container;
+
+  const adminModelOptions = useMemo(() => {
+    if (!runtimeSettings.default_copilot_model) return modelOptions;
+    if (modelOptions.some((option) => option.id === runtimeSettings.default_copilot_model)) return modelOptions;
+    return [buildFallbackModelOption(runtimeSettings), ...modelOptions];
+  }, [modelOptions, runtimeSettings]);
+
+  const selectedDefaultModel = useMemo(
+    () => adminModelOptions.find((option) => option.id === runtimeSettings.default_copilot_model) ?? null,
+    [adminModelOptions, runtimeSettings.default_copilot_model]
+  );
+
+  const defaultReasoningOptions = selectedDefaultModel?.supported_reasoning_efforts ?? [];
+  const defaultReasoningSupported = Boolean(
+    selectedDefaultModel?.supports_reasoning_effort && defaultReasoningOptions.length
+  );
 
   const resetFeedback = () => {
     setActionMessage("");
@@ -68,7 +123,7 @@ export default function AdminPanel() {
       ]);
       setDashboard(dashRes.data);
       setTokenSet(settingsRes.data.github_token_set);
-      setRuntimeSettings(settingsRes.data);
+      setRuntimeSettings(normalizeAdminSettings(settingsRes.data));
       setSessions(sessionsRes.data);
       setContainers(containersRes.data);
     } catch {
@@ -77,8 +132,23 @@ export default function AdminPanel() {
     }
   };
 
+  const loadModelOptions = async () => {
+    setModelOptionsLoading(true);
+    try {
+      const response = await getCopilotModelOptions();
+      setModelOptions(response.data);
+    } catch {
+      setModelOptions([]);
+    } finally {
+      setModelOptionsLoading(false);
+    }
+  };
+
   useEffect(() => {
-    if (authenticated) fetchData();
+    if (authenticated) {
+      fetchData();
+      loadModelOptions();
+    }
   }, [authenticated]);
 
   const handleTokenUpdate = async () => {
@@ -102,11 +172,39 @@ export default function AdminPanel() {
     setRuntimeSettings((previous) => ({ ...previous, [key]: value }));
   };
 
+  const handleDefaultModelChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextModel = event.target.value;
+    const nextModelOption = adminModelOptions.find((option) => option.id === nextModel) ?? null;
+
+    let nextReasoning: ReasoningEffort | null = runtimeSettings.default_copilot_reasoning_effort;
+    if (!nextModelOption?.supports_reasoning_effort || !nextModelOption.supported_reasoning_efforts.length) {
+      nextReasoning = null;
+    } else if (!nextReasoning || !nextModelOption.supported_reasoning_efforts.includes(nextReasoning)) {
+      nextReasoning = nextModelOption.default_reasoning_effort ?? nextModelOption.supported_reasoning_efforts[0] ?? null;
+    }
+
+    resetFeedback();
+    setRuntimeSettings((previous) => ({
+      ...previous,
+      default_copilot_model: nextModel,
+      default_copilot_reasoning_effort: nextReasoning,
+    }));
+  };
+
+  const handleDefaultReasoningChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextReasoning = (event.target.value || null) as ReasoningEffort | null;
+    handleRuntimeSettingChange("default_copilot_reasoning_effort", nextReasoning);
+  };
+
   const handleSaveSettings = async () => {
     resetFeedback();
     setSavingSettings(true);
     try {
       const response = await updateAdminSettings({
+        default_copilot_model: runtimeSettings.default_copilot_model,
+        default_copilot_reasoning_effort: defaultReasoningSupported
+          ? runtimeSettings.default_copilot_reasoning_effort
+          : null,
         copilot_cli_path: runtimeSettings.copilot_cli_path,
         copilot_workspace_root: runtimeSettings.copilot_workspace_root,
         copilot_use_logged_in_user: runtimeSettings.copilot_use_logged_in_user,
@@ -114,7 +212,7 @@ export default function AdminPanel() {
         copilot_https_proxy: runtimeSettings.copilot_https_proxy,
         copilot_no_proxy: runtimeSettings.copilot_no_proxy,
       });
-      setRuntimeSettings(response.data);
+      setRuntimeSettings(normalizeAdminSettings(response.data));
       setTokenSet(response.data.github_token_set);
       setActionMessage(copy.common.saved);
     } catch {
@@ -240,6 +338,44 @@ export default function AdminPanel() {
 
           <div className="admin-config-grid">
             <label className="form-field">
+              <span className="field-label">{copy.admin.fields.defaultModel}</span>
+              <select
+                value={runtimeSettings.default_copilot_model}
+                onChange={handleDefaultModelChange}
+                disabled={modelOptionsLoading || !adminModelOptions.length}
+              >
+                {adminModelOptions.length ? (
+                  adminModelOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.name}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">{copy.agent.sessionSettingsNoOptions}</option>
+                )}
+              </select>
+            </label>
+
+            <label className="form-field">
+              <span className="field-label">{copy.admin.fields.defaultReasoning}</span>
+              <select
+                value={runtimeSettings.default_copilot_reasoning_effort ?? ""}
+                onChange={handleDefaultReasoningChange}
+                disabled={!defaultReasoningSupported}
+              >
+                {defaultReasoningSupported ? (
+                  defaultReasoningOptions.map((effort) => (
+                    <option key={effort} value={effort}>
+                      {copy.common.reasoningEfforts[effort]}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
+                )}
+              </select>
+            </label>
+
+            <label className="form-field">
               <span className="field-label">{copy.admin.fields.workspaceRoot}</span>
               <input
                 value={runtimeSettings.copilot_workspace_root}
@@ -296,9 +432,20 @@ export default function AdminPanel() {
             </label>
           </div>
 
+          <p className="field-help">
+            {modelOptionsLoading
+              ? copy.admin.defaultSessionLoading
+              : adminModelOptions.length
+                ? copy.admin.defaultSessionHint
+                : copy.admin.defaultSessionUnavailable}
+          </p>
           <p className="field-help">{copy.admin.configHint}</p>
           <div className="admin-actions">
-            <button className="btn-primary" onClick={handleSaveSettings} disabled={savingSettings || !runtimeSettings.copilot_workspace_root.trim()}>
+            <button
+              className="btn-primary"
+              onClick={handleSaveSettings}
+              disabled={savingSettings || !runtimeSettings.copilot_workspace_root.trim() || !runtimeSettings.default_copilot_model.trim()}
+            >
               {savingSettings ? copy.common.saving : copy.common.save}
             </button>
           </div>

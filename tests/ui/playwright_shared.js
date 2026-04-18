@@ -64,7 +64,8 @@ async function openWorkbench(options = {}) {
     await options.beforeGoto(page, resolvedBaseUrl);
   }
 
-  await page.goto(resolvedBaseUrl, { waitUntil: "networkidle" });
+  const targetUrl = new URL(options.path || "/", resolvedBaseUrl).toString();
+  await page.goto(targetUrl, { waitUntil: "networkidle" });
   await page.waitForSelector(".workbench");
 
   return { browser, page, baseUrl: resolvedBaseUrl };

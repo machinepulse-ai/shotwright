@@ -11,6 +11,7 @@ from app.database import get_session_collection
 from app.services import container_manager as cm
 from app.services import nexrender as nr
 from app.services import project_manager as pm
+from app.services.session_streams import publish_context_refresh, publish_session_updated
 from app.services.video_streaming import generate_hls
 
 
@@ -196,6 +197,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 }
             },
         )
+        await publish_session_updated(app_session_id)
+        await publish_context_refresh(app_session_id, "render.completed", project_id=project_id)
 
         payload = {
             **render,

@@ -11,6 +11,7 @@ from app.database import get_event_collection, get_message_collection, get_proje
 from app.models.session import CopilotModelOption, SessionCreate, SessionInDB, SessionStatus, SessionUpdate
 from app.services import container_manager as cm
 from app.services.copilot_runtime import runtime_manager
+from app.services.session_streams import publish_session_updated
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -18,12 +19,13 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 @router.post("", response_model=SessionInDB, status_code=201)
 async def create_session(body: SessionCreate):
     now = datetime.now(timezone.utc)
+    default_model, default_reasoning_effort = await runtime_manager.resolve_default_session_settings()
     doc = {
         "_id": str(uuid4()),
         "name": body.name,
         "status": SessionStatus.idle.value,
-        "copilot_model": settings.copilot_model,
-        "copilot_reasoning_effort": settings.copilot_reasoning_effort,
+        "copilot_model": default_model,
+        "copilot_reasoning_effort": default_reasoning_effort,
         "copilot_session_id": None,
         "container_id": None,
         "active_project_id": None,
@@ -97,6 +99,7 @@ async def update_session(session_id: str, body: SessionUpdate):
     )
     if not result:
         raise HTTPException(404, "Session not found")
+    await publish_session_updated(session_id, result)
     return result
 
 

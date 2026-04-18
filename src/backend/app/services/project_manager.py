@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.config import settings
 from app.database import get_project_collection, get_session_collection
+from app.services.session_streams import publish_context_refresh, publish_session_updated
 
 UPLOAD_DIR = Path(settings.upload_dir)
 EXPORT_DIR = Path(settings.export_dir)
@@ -62,6 +63,9 @@ async def upload_project(session_id: str, file_bytes: bytes, filename: str) -> d
         )
         project_doc["status"] = "active"
         await get_project_collection().update_one({"_id": project_id}, {"$set": {"status": "active"}})
+        await publish_session_updated(session_id)
+
+    await publish_context_refresh(session_id, "project.uploaded", project_id=project_id)
 
     return project_doc
 
@@ -87,6 +91,8 @@ async def set_active_project(session_id: str, project_id: str) -> None:
         {"_id": session_id},
         {"$set": {"active_project_id": project_id, "updated_at": datetime.now(timezone.utc)}},
     )
+    await publish_session_updated(session_id)
+    await publish_context_refresh(session_id, "project.selected", project_id=project_id)
 
 
 async def export_project(session_id: str, project_id: str) -> Path | None:
@@ -116,4 +122,5 @@ async def export_project(session_id: str, project_id: str) -> Path | None:
         {"_id": project_id},
         {"$set": {"status": "exported"}},
     )
+    await publish_context_refresh(session_id, "project.exported", project_id=project_id)
     return export_zip

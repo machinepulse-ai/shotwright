@@ -6,7 +6,8 @@ import { useI18n } from "./i18n";
 function WorkbenchApp() {
   const location = useLocation();
   const { locale, setLocale, copy } = useI18n();
-  const currentSection = location.pathname === "/admin" ? copy.app.admin : copy.app.chat;
+  const isAdminSection = location.pathname.startsWith("/admin");
+  const currentSection = isAdminSection ? copy.app.admin : copy.app.chat;
 
   return (
     <div className="workbench">
@@ -15,10 +16,10 @@ function WorkbenchApp() {
           <div className="titlebar-brand-mark">SW</div>
           <span className="titlebar-product">{copy.app.product}</span>
           <nav className="titlebar-nav" aria-label={copy.app.primaryNavLabel}>
-            <NavLink to="/" end className={({ isActive }) => `titlebar-tab${isActive ? " active" : ""}`}>
+            <NavLink to="/" className={() => `titlebar-tab${!isAdminSection ? " active" : ""}`}>
               {copy.app.chat}
             </NavLink>
-            <NavLink to="/admin" className={({ isActive }) => `titlebar-tab${isActive ? " active" : ""}`}>
+            <NavLink to="/admin" className={() => `titlebar-tab${isAdminSection ? " active" : ""}`}>
               {copy.app.admin}
             </NavLink>
           </nav>
@@ -38,6 +39,7 @@ function WorkbenchApp() {
         <main className="app-main">
           <Routes>
             <Route path="/" element={<AgentPanel />} />
+            <Route path="/sessions/:sessionId" element={<AgentPanel />} />
             <Route path="/admin" element={<AdminPanel />} />
           </Routes>
         </main>

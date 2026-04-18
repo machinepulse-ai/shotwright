@@ -24,13 +24,23 @@ async def get_admin_settings():
     col = get_admin_collection()
     doc = await col.find_one({"_id": "settings"}) or {}
     runtime_settings = await runtime_manager.get_runtime_settings()
-    return AdminSettings(github_token_set=bool(doc.get("github_token")), **runtime_settings)
+    return AdminSettings(
+        github_token_set=bool(doc.get("github_token")),
+        default_copilot_model=(doc.get("default_copilot_model") or settings.copilot_model),
+        default_copilot_reasoning_effort=(
+            doc["default_copilot_reasoning_effort"]
+            if "default_copilot_reasoning_effort" in doc
+            else settings.copilot_reasoning_effort
+        ),
+        **runtime_settings,
+    )
 
 
 @router.put("/settings", response_model=AdminSettings, dependencies=[Depends(require_admin)])
 async def update_admin_settings(body: CopilotSettingsUpdate):
     col = get_admin_collection()
     payload = body.model_dump()
+    payload["default_copilot_model"] = payload["default_copilot_model"].strip() or settings.copilot_model
     payload["copilot_cli_path"] = payload["copilot_cli_path"].strip()
     payload["copilot_workspace_root"] = payload["copilot_workspace_root"].strip()
     payload["copilot_http_proxy"] = payload["copilot_http_proxy"].strip()
@@ -40,7 +50,16 @@ async def update_admin_settings(body: CopilotSettingsUpdate):
     await runtime_manager.shutdown()
     doc = await col.find_one({"_id": "settings"}) or {}
     runtime_settings = await runtime_manager.get_runtime_settings()
-    return AdminSettings(github_token_set=bool(doc.get("github_token")), **runtime_settings)
+    return AdminSettings(
+        github_token_set=bool(doc.get("github_token")),
+        default_copilot_model=(doc.get("default_copilot_model") or settings.copilot_model),
+        default_copilot_reasoning_effort=(
+            doc["default_copilot_reasoning_effort"]
+            if "default_copilot_reasoning_effort" in doc
+            else settings.copilot_reasoning_effort
+        ),
+        **runtime_settings,
+    )
 
 
 @router.put("/github-token", dependencies=[Depends(require_admin)])

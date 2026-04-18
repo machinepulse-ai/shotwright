@@ -21,6 +21,7 @@ async def connect_db() -> None:
     await db["projects"].create_index([("session_id", 1), ("created_at", -1)])
     await db["messages"].create_index([("session_id", 1), ("created_at", 1)])
     await db["events"].create_index([("session_id", 1), ("created_at", 1)])
+    await db["copilot_model_cache"].create_index([("expires_at", 1)], expireAfterSeconds=0)
 
 
 async def close_db() -> None:

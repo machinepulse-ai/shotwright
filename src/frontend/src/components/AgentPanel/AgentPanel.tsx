@@ -1,6 +1,7 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   createSession,
   deleteSession,
@@ -10,6 +11,7 @@ import {
   getAgentMessages,
   getCopilotModelOptions,
   getSessions,
+  openAgentSessionStream,
   sendChatTurn,
   stopContainer,
   updateSession,
@@ -26,6 +28,7 @@ type UiErrorKey =
   | "failedLoadSessionData"
   | "failedCreateSession"
   | "failedLoadModelOptions"
+  | "failedRenameSession"
   | "failedSendPrompt"
   | "failedSaveSessionSettings"
   | "uploadFailed"
@@ -149,15 +152,97 @@ function buildModelFallbackOption(session: Session): CopilotModelOption {
   };
 }
 
+type OptimisticTurn = {
+  sessionId: string;
+  baselineCount: number;
+  userMessage: ChatMessage;
+  assistantMessage: ChatMessage;
+};
+
+function buildOptimisticMessage(
+  sessionId: string,
+  role: ChatMessage["role"],
+  content: string,
+  metadata: Record<string, unknown> = {}
+): ChatMessage {
+  return {
+    _id: `optimistic-${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    session_id: sessionId,
+    role,
+    content,
+    created_at: new Date().toISOString(),
+    metadata,
+  };
+}
+
+function isStreamingMessage(message: ChatMessage) {
+  return Boolean(message.metadata?.["streaming"]);
+}
+
+function hasRenderableMessageContent(message: ChatMessage) {
+  return Boolean(message.content.trim());
+}
+
+function upsertMessage(messages: ChatMessage[], nextMessage: ChatMessage) {
+  const existingIndex = messages.findIndex((message) => message._id === nextMessage._id);
+  if (existingIndex >= 0) {
+    const nextMessages = [...messages];
+    nextMessages[existingIndex] = nextMessage;
+    return nextMessages;
+  }
+
+  return [...messages, nextMessage].sort(
+    (left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+  );
+}
+
+function removeMessage(messages: ChatMessage[], messageId: string) {
+  return messages.filter((message) => message._id !== messageId);
+}
+
+function upsertTimelineEvent(events: SessionEvent[], nextEvent: SessionEvent) {
+  const existingIndex = events.findIndex((event) => event._id === nextEvent._id);
+  if (existingIndex >= 0) {
+    const nextEvents = [...events];
+    nextEvents[existingIndex] = nextEvent;
+    return nextEvents;
+  }
+
+  return [...events, nextEvent].sort(
+    (left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+  );
+}
+
+function upsertSessionRecord(sessions: Session[], nextSession: Session) {
+  const existingIndex = sessions.findIndex((session) => session._id === nextSession._id);
+  if (existingIndex >= 0) {
+    const nextSessions = [...sessions];
+    nextSessions[existingIndex] = nextSession;
+    return nextSessions;
+  }
+
+  return [...sessions, nextSession].sort(
+    (left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+  );
+}
+
+function buildRenderUrl(sessionId: string, latestRenderPath: string | null | undefined) {
+  return latestRenderPath ? `/api/streams/renders/${sessionId}` : null;
+}
+
 export default function AgentPanel() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { sessionId: routedSessionId } = useParams<{ sessionId?: string }>();
   const { copy, locale } = useI18n();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [context, setContext] = useState<AgentContext | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [optimisticTurn, setOptimisticTurn] = useState<OptimisticTurn | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [sending, setSending] = useState(false);
+  const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
   const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
@@ -168,7 +253,13 @@ export default function AgentPanel() {
   const [sessionsError, setSessionsError] = useState<UiError | null>(null);
   const [panelError, setPanelError] = useState<UiError | null>(null);
   const [sessionSettingsError, setSessionSettingsError] = useState<UiError | null>(null);
+  const [editingSessionName, setEditingSessionName] = useState(false);
+  const [draftSessionName, setDraftSessionName] = useState("");
+  const [savingSessionName, setSavingSessionName] = useState(false);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const streamRef = useRef<EventSource | null>(null);
   const sessionStatusLabels = copy.status.session;
   const projectStatusLabels = copy.status.project;
   const containerStatusLabels = copy.status.container;
@@ -204,6 +295,33 @@ export default function AgentPanel() {
     return sessionModelOptions.find((option) => option.id === currentSession.copilot_model)?.name || currentSession.copilot_model;
   }, [copy.common.copilot, currentSession, sessionModelOptions]);
 
+  const sending = Boolean(currentSession && sendingSessionId === currentSession._id);
+  const sessionStatus = context?.session.status || currentSession?.status || "idle";
+  const isResponding = sending || sessionStatus === "running";
+  const visibleMessages = useMemo(() => {
+    if (!currentSession || !optimisticTurn || optimisticTurn.sessionId !== currentSession._id) {
+      return messages;
+    }
+
+    if (messages.length >= optimisticTurn.baselineCount + 2) {
+      return messages;
+    }
+
+    return [...messages, optimisticTurn.userMessage, optimisticTurn.assistantMessage];
+  }, [currentSession, messages, optimisticTurn]);
+
+  const latestAssistantMessage = useMemo(() => {
+    for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
+      const message = visibleMessages[index];
+      if (message.role === "assistant" && (hasRenderableMessageContent(message) || isStreamingMessage(message))) {
+        return message;
+      }
+    }
+
+    return null;
+  }, [visibleMessages]);
+
+  const lastVisibleMessageContent = visibleMessages.length ? visibleMessages[visibleMessages.length - 1].content : "";
   const selectedReasoningOptions = selectedModelOption?.supported_reasoning_efforts ?? [];
   const reasoningSupported = Boolean(selectedModelOption?.supports_reasoning_effort && selectedReasoningOptions.length);
   const effectiveDraftReasoning = reasoningSupported ? draftReasoning : null;
@@ -213,11 +331,8 @@ export default function AgentPanel() {
     draftModel !== (currentSession?.copilot_model ?? "") ||
     effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
   );
-
-  const sessionStatus = context?.session.status || currentSession?.status || "idle";
-  const latestMessage = messages.length ? messages[messages.length - 1] : null;
-  const showStarterCards = Boolean(currentSession) && messages.length === 0;
-  const showComposerSuggestions = Boolean(currentSession) && messages.length > 0;
+  const showStarterCards = Boolean(currentSession) && visibleMessages.length === 0;
+  const showComposerSuggestions = Boolean(currentSession) && visibleMessages.length > 0;
   const metaChips = useMemo((): MetaChip[] => {
     if (!currentSession) {
       return [
@@ -297,6 +412,31 @@ export default function AgentPanel() {
     }
   };
 
+  const navigateToSession = (sessionId: string | null, replace = false) => {
+    const targetPath = sessionId ? `/sessions/${sessionId}` : "/";
+    if (location.pathname !== targetPath) {
+      navigate(targetPath, { replace });
+    }
+  };
+
+  const syncSessionRecord = (session: Session) => {
+    setCurrentSession((previous) => (previous && previous._id === session._id ? session : previous));
+    setSessions((previous) => upsertSessionRecord(previous, session));
+    setContext((previous) => {
+      if (!previous || previous.session._id !== session._id) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        session,
+        latest_render_path: session.latest_render_path,
+        latest_render_url: buildRenderUrl(session._id, session.latest_render_path),
+        latest_stream_url: session.latest_stream_url,
+      };
+    });
+  };
+
   const fetchSessions = async () => {
     try {
       const res = await getSessions();
@@ -304,16 +444,24 @@ export default function AgentPanel() {
       setSessionsError(null);
       if (res.data.length === 0) {
         setCurrentSession(null);
+        setOptimisticTurn(null);
+        setContext(null);
+        setMessages([]);
+        setEvents([]);
         return;
       }
-
-      setCurrentSession((previous) => {
-        if (!previous) return res.data[0];
-        return res.data.find((session: Session) => session._id === previous._id) ?? res.data[0];
-      });
     } catch (err: any) {
       setSessionsError(buildUiError(err, "failedLoadSessions"));
     }
+  };
+
+  const loadSessionContext = async (sessionId: string) => {
+    const contextRes = await getAgentContext(sessionId);
+    if (activeSessionIdRef.current !== sessionId) return;
+
+    setContext(contextRes.data);
+    syncSessionRecord(contextRes.data.session);
+    setPanelError(null);
   };
 
   const loadModelOptions = async () => {
@@ -335,12 +483,19 @@ export default function AgentPanel() {
       getAgentMessages(sessionId),
       getAgentEvents(sessionId),
     ]);
+    if (activeSessionIdRef.current !== sessionId) return;
+
     setContext(contextRes.data);
     setMessages(messageRes.data);
     setEvents(eventRes.data);
-    setCurrentSession((previous) =>
-      previous && previous._id === contextRes.data.session._id ? contextRes.data.session : previous
-    );
+    setOptimisticTurn((previous) => {
+      if (!previous || previous.sessionId !== sessionId) {
+        return previous;
+      }
+
+      return messageRes.data.length >= previous.baselineCount + 2 ? null : previous;
+    });
+    syncSessionRecord(contextRes.data.session);
     setPanelError(null);
   };
 
@@ -350,47 +505,129 @@ export default function AgentPanel() {
   }, []);
 
   useEffect(() => {
+    if (!sessions.length) {
+      if (routedSessionId) {
+        navigateToSession(null, true);
+      }
+      return;
+    }
+
+    const routedSession = routedSessionId
+      ? sessions.find((session) => session._id === routedSessionId) ?? null
+      : null;
+    const preservedSession = currentSession
+      ? sessions.find((session) => session._id === currentSession._id) ?? null
+      : null;
+    const nextSession = routedSession ?? preservedSession ?? sessions[0];
+
+    setCurrentSession(nextSession);
+
+    if ((!routedSessionId || !routedSession) && nextSession) {
+      navigateToSession(nextSession._id, true);
+    }
+  }, [sessions, routedSessionId]);
+
+  useEffect(() => {
     if (!currentSession) {
       setDraftModel("");
       setDraftReasoning(null);
+      setDraftSessionName("");
+      setEditingSessionName(false);
       setSessionSettingsError(null);
       return;
     }
 
     setDraftModel(currentSession.copilot_model);
     setDraftReasoning(currentSession.copilot_reasoning_effort);
+    setDraftSessionName(currentSession.name);
+    setEditingSessionName(false);
     setSessionSettingsError(null);
-  }, [currentSession?._id, currentSession?.copilot_model, currentSession?.copilot_reasoning_effort]);
+  }, [currentSession?._id, currentSession?.copilot_model, currentSession?.copilot_reasoning_effort, currentSession?.name]);
 
   useEffect(() => {
-    if (!messages.length) return;
+    if (!editingSessionName) return;
+
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
+  }, [editingSessionName, currentSession?._id]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = currentSession?._id ?? null;
+  }, [currentSession?._id]);
+
+  useEffect(() => {
+    if (!visibleMessages.length) return;
 
     messageEndRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length]);
+  }, [visibleMessages.length, lastVisibleMessageContent]);
 
   useEffect(() => {
     setExpandedTimelineEventIds([]);
   }, [currentSession?._id]);
 
   useEffect(() => {
+    setOptimisticTurn((previous) => {
+      if (!previous) return null;
+      return previous.sessionId === currentSession?._id ? previous : null;
+    });
+  }, [currentSession?._id]);
+
+  useEffect(() => {
+    streamRef.current?.close();
+    streamRef.current = null;
+
     if (!currentSession) {
       setContext(null);
       setMessages([]);
       setEvents([]);
       setPanelError(null);
+      activeSessionIdRef.current = null;
       return;
     }
 
-    loadCurrentSession(currentSession._id).catch((err) => {
+    const sessionId = currentSession._id;
+    activeSessionIdRef.current = sessionId;
+
+    loadCurrentSession(sessionId).catch((err) => {
       setPanelError(buildUiError(err, "failedLoadSessionData"));
     });
 
-    const timer = window.setInterval(() => {
-      loadCurrentSession(currentSession._id).catch(() => {});
-      fetchSessions().catch(() => {});
-    }, 2500);
+    const stream = openAgentSessionStream(sessionId, {
+      onSessionUpdated: (session) => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        syncSessionRecord(session);
+        if (session.status !== "running") {
+          setSendingSessionId((previous) => (previous === sessionId ? null : previous));
+        }
+      },
+      onMessageUpsert: (message) => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        setMessages((previous) => upsertMessage(previous, message));
+      },
+      onMessageDeleted: (payload) => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        setMessages((previous) => removeMessage(previous, payload.message_id));
+        setOptimisticTurn((previous) => (previous?.sessionId === sessionId ? null : previous));
+      },
+      onTimelineEvent: (event) => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        setEvents((previous) => upsertTimelineEvent(previous, event));
+      },
+      onContextRefresh: () => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        void loadSessionContext(sessionId).catch((err) => {
+          setPanelError(buildUiError(err, "failedLoadSessionData"));
+        });
+      },
+    });
+    streamRef.current = stream;
 
-    return () => window.clearInterval(timer);
+    return () => {
+      if (streamRef.current === stream) {
+        streamRef.current = null;
+      }
+      stream.close();
+    };
   }, [currentSession?._id]);
 
   const createNewSession = async () => {
@@ -399,6 +636,8 @@ export default function AgentPanel() {
       const res = await createSession(name);
       setSessions((prev: Session[]) => [res.data, ...prev]);
       setCurrentSession(res.data);
+      setOptimisticTurn(null);
+      navigateToSession(res.data._id);
       setSessionsError(null);
       return res.data;
     } catch (err: any) {
@@ -426,22 +665,103 @@ export default function AgentPanel() {
     setPrompt(starterPrompt);
   };
 
-  const handleSend = async () => {
-    if (!currentSession || !prompt.trim()) return;
-    const content = prompt.trim();
-    setSending(true);
-    setPrompt("");
-    try {
-      await sendChatTurn(currentSession._id, content);
-      await loadCurrentSession(currentSession._id);
-      await fetchSessions();
-      setPanelError(null);
-    } catch (err: any) {
-      setPanelError(buildUiError(err, "failedSendPrompt"));
-    }
-    setSending(false);
+  const handleSelectSession = (session: Session) => {
+    setCurrentSession(session);
+    setPanelError(null);
+    navigateToSession(session._id);
   };
 
+  const handleStartRenameSession = () => {
+    if (!currentSession) return;
+
+    setDraftSessionName(currentSession.name);
+    setEditingSessionName(true);
+    setPanelError(null);
+  };
+
+  const handleCancelRenameSession = () => {
+    setDraftSessionName(currentSession?.name ?? "");
+    setEditingSessionName(false);
+  };
+
+  const handleRenameSession = async () => {
+    if (!currentSession) return;
+
+    const nextName = draftSessionName.trim();
+    if (!nextName) return;
+    if (nextName === currentSession.name) {
+      setEditingSessionName(false);
+      return;
+    }
+
+    setSavingSessionName(true);
+    try {
+      const response = await updateSession(currentSession._id, { name: nextName });
+      syncSessionRecord(response.data);
+      setDraftSessionName(response.data.name);
+      setEditingSessionName(false);
+      setPanelError(null);
+    } catch (err: any) {
+      setPanelError(buildUiError(err, "failedRenameSession"));
+    } finally {
+      setSavingSessionName(false);
+    }
+  };
+
+  const handleRenameSessionKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void handleRenameSession();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      handleCancelRenameSession();
+    }
+  };
+
+  const handleSend = () => {
+    if (!currentSession || !prompt.trim() || sending) return;
+
+    const sessionId = currentSession._id;
+    const content = prompt.trim();
+    const optimisticUserMessage = buildOptimisticMessage(sessionId, "user", content);
+    const optimisticAssistantMessage = buildOptimisticMessage(sessionId, "assistant", "", {
+      streaming: true,
+      state: "pending",
+    });
+
+    setOptimisticTurn({
+      sessionId,
+      baselineCount: messages.length,
+      userMessage: optimisticUserMessage,
+      assistantMessage: optimisticAssistantMessage,
+    });
+    setSendingSessionId(sessionId);
+    setPrompt("");
+    setPanelError(null);
+    syncSessionRecord({
+      ...currentSession,
+      status: "running",
+      last_error: null,
+      updated_at: new Date().toISOString(),
+    });
+
+    void sendChatTurn(sessionId, content)
+      .then(() => {
+        setPanelError(null);
+        void Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
+      })
+      .catch(async (err: any) => {
+        setPanelError(buildUiError(err, "failedSendPrompt"));
+        setOptimisticTurn((previous) => (previous?.sessionId === sessionId ? null : previous));
+        await Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
+      })
+      .finally(() => {
+        setSendingSessionId((previous) => (previous === sessionId ? null : previous));
+      });
+  };
   const handleModelChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextModel = event.target.value;
     const nextModelOption = sessionModelOptions.find((option) => option.id === nextModel) ?? null;
@@ -533,6 +853,8 @@ export default function AgentPanel() {
       const remaining = sessions.filter((session: Session) => session._id !== sessionId);
       setSessions(remaining);
       setCurrentSession(remaining[0] ?? null);
+      setOptimisticTurn(null);
+      navigateToSession(remaining[0]?._id ?? null);
       setSessionsError(null);
     } catch (err: any) {
       setSessionsError(buildUiError(err, "failedDeleteSession"));
@@ -558,8 +880,9 @@ export default function AgentPanel() {
                 <li key={session._id}>
                   <button
                     type="button"
+                    data-testid="session-list-item"
                     className={`session-item ${currentSession?._id === session._id ? "active" : ""}`}
-                    onClick={() => setCurrentSession(session)}
+                    onClick={() => handleSelectSession(session)}
                   >
                     <div className="session-item-top">
                       <div className="session-title-group">
@@ -586,9 +909,51 @@ export default function AgentPanel() {
         <header className="chat-stage-header">
           <div className="chat-stage-heading">
             <span className="eyebrow">{copy.agent.eyebrow}</span>
-            <h1>{currentSession ? currentSession.name : copy.agent.title.empty}</h1>
+            {currentSession && editingSessionName ? (
+              <input
+                ref={renameInputRef}
+                className="session-title-input"
+                data-testid="session-rename-input"
+                value={draftSessionName}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setDraftSessionName(event.target.value)}
+                onKeyDown={handleRenameSessionKeyDown}
+                disabled={savingSessionName}
+              />
+            ) : (
+              <h1>{currentSession ? currentSession.name : copy.agent.title.empty}</h1>
+            )}
           </div>
           <div className="chat-stage-actions">
+            {currentSession && !editingSessionName && (
+              <button
+                type="button"
+                className="ghost-button chat-stage-action-button"
+                data-testid="session-rename-trigger"
+                onClick={handleStartRenameSession}
+              >
+                {copy.common.rename}
+              </button>
+            )}
+            {currentSession && editingSessionName && (
+              <>
+                <button
+                  type="button"
+                  className="btn-primary chat-stage-action-button"
+                  onClick={() => void handleRenameSession()}
+                  disabled={savingSessionName || !draftSessionName.trim()}
+                >
+                  {savingSessionName ? copy.common.saving : copy.common.confirm}
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button chat-stage-action-button"
+                  onClick={handleCancelRenameSession}
+                  disabled={savingSessionName}
+                >
+                  {copy.common.cancel}
+                </button>
+              </>
+            )}
             <label className="toolbar-button chat-stage-action-button file-action">
               {uploading ? copy.common.uploading : copy.common.uploadProject}
               <input
@@ -618,22 +983,39 @@ export default function AgentPanel() {
         <div className="chat-transcript">
           {panelErrorMessage && <div className="notice-banner transcript-notice">{panelErrorMessage}</div>}
           {currentSession ? (
-            messages.length ? (
-              messages.map((message) => (
-                <article key={message._id} className={`chat-message role-${message.role}`}>
-                  <div className="chat-message-meta">
-                    <span className="chat-message-author">{message.role === "user" ? copy.agent.you : copy.agent.assistant}</span>
-                    <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
-                  </div>
-                  <div className="chat-message-body markdown-content">
-                    {message.content ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                    ) : (
-                      <p>{copy.common.emptyResponse}</p>
-                    )}
-                  </div>
-                </article>
-              ))
+            visibleMessages.length ? (
+              visibleMessages.map((message) => {
+                const streaming = isStreamingMessage(message);
+                const hasContent = hasRenderableMessageContent(message);
+
+                return (
+                  <article key={message._id} className={`chat-message role-${message.role}`}>
+                    <div className="chat-message-meta">
+                      <span className="chat-message-author">{message.role === "user" ? copy.agent.you : copy.agent.assistant}</span>
+                      <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
+                    </div>
+                    <div className={`chat-message-body markdown-content${streaming ? " streaming" : ""}`} aria-live={streaming ? "polite" : undefined}>
+                      {hasContent ? (
+                        <>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                          {streaming ? <span className="streaming-cursor" aria-hidden="true" /> : null}
+                        </>
+                      ) : streaming ? (
+                        <div className="chat-message-placeholder">
+                          <span>{copy.agent.typingPlaceholder}</span>
+                          <span className="typing-dots" aria-hidden="true">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                        </div>
+                      ) : (
+                        <p>{copy.common.emptyResponse}</p>
+                      )}
+                    </div>
+                  </article>
+                );
+              })
             ) : showStarterCards ? (
               <div className="chat-welcome">
                 <span className="eyebrow">{copy.agent.starterEyebrow}</span>
@@ -644,6 +1026,7 @@ export default function AgentPanel() {
                     <button
                       key={starter.prompt}
                       type="button"
+                      data-testid="starter-card"
                       className="starter-card"
                       onClick={() => handleStarterPrompt(starter.prompt)}
                     >
@@ -672,6 +1055,7 @@ export default function AgentPanel() {
                   <button
                     key={starter.prompt}
                     type="button"
+                    data-testid="starter-card"
                     className="starter-card"
                     onClick={() => handleStarterPrompt(starter.prompt)}
                   >
@@ -687,6 +1071,17 @@ export default function AgentPanel() {
         </div>
 
         <div className="composer-shell">
+          {currentSession && isResponding && (
+            <div className="composer-status" data-testid="composer-status">
+              <span className="typing-dots" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </span>
+              <span>{copy.agent.respondingStatus}</span>
+            </div>
+          )}
+
           {showComposerSuggestions && (
             <div className="composer-toolbar">
               {starterPrompts.map((starter) => (
@@ -741,7 +1136,6 @@ export default function AgentPanel() {
                 <div>
                   <span className="eyebrow">{copy.agent.sessionPanelEyebrow}</span>
                   <h3>{currentSession.name}</h3>
-                  <p className="panel-description">{copy.agent.sessionPanelDescription}</p>
                 </div>
               </div>
               <div className="session-overview-scroll">
@@ -750,7 +1144,6 @@ export default function AgentPanel() {
                     <div>
                       <span className="eyebrow">{copy.agent.sessionSettingsEyebrow}</span>
                       <h4>{copy.agent.sessionSettingsTitle}</h4>
-                      <p className="panel-description">{copy.agent.sessionSettingsDescription}</p>
                     </div>
                   </div>
                   <div className="session-settings-grid">
@@ -800,9 +1193,7 @@ export default function AgentPanel() {
                       </div>
                     </label>
                   </div>
-                  <p className="settings-help">
-                    {modelOptionsLoading ? copy.agent.sessionSettingsLoading : copy.agent.sessionSettingsHint}
-                  </p>
+                  {modelOptionsLoading ? <p className="settings-help">{copy.agent.sessionSettingsLoading}</p> : null}
                   {sessionSettingsErrorMessage && <div className="inline-alert">{sessionSettingsErrorMessage}</div>}
                   <div className="session-settings-actions">
                     <button
@@ -830,7 +1221,7 @@ export default function AgentPanel() {
                   </div>
                   <div className="fact-row">
                     <dt>{copy.agent.sessionPanelFields.lastReply}</dt>
-                    <dd>{latestMessage ? formatDateTime(latestMessage.created_at, locale, copy.common.notStarted) : copy.common.none}</dd>
+                    <dd>{latestAssistantMessage ? formatDateTime(latestAssistantMessage.created_at, locale, copy.common.notStarted) : copy.common.none}</dd>
                   </div>
                   <div className="fact-row">
                     <dt>{copy.agent.sessionPanelFields.latestRender}</dt>

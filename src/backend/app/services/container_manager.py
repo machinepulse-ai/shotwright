@@ -10,6 +10,7 @@ from docker.errors import DockerException, NotFound
 from app.config import settings
 from app.database import get_container_collection, get_session_collection
 from app.models.container import ContainerStatus
+from app.services.session_streams import publish_context_refresh, publish_session_updated
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,8 @@ async def create_container(session_id: str, image: str | None = None) -> dict:
             }
         },
     )
+    await publish_session_updated(session_id)
+    await publish_context_refresh(session_id, "container.created", container_id=doc["_id"])
     return doc
 
 
@@ -107,6 +110,8 @@ async def stop_container(container_db_id: str) -> dict | None:
         {"$set": {"updated_at": datetime.now(timezone.utc)}},
     )
     doc["status"] = ContainerStatus.stopped.value
+    await publish_session_updated(doc["session_id"])
+    await publish_context_refresh(doc["session_id"], "container.stopped", container_id=container_db_id)
     return doc
 
 
@@ -135,6 +140,8 @@ async def remove_container(container_db_id: str) -> bool:
             }
         },
     )
+    await publish_session_updated(doc["session_id"])
+    await publish_context_refresh(doc["session_id"], "container.removed", container_id=container_db_id)
     return True
 
 

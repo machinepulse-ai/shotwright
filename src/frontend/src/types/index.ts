@@ -83,6 +83,16 @@ export interface ChatTurnResult {
   session_status: Session["status"];
 }
 
+export interface ChatMessageDeletedEvent {
+  session_id: string;
+  message_id: string;
+}
+
+export interface SessionContextRefreshEvent {
+  reason: string;
+  [key: string]: unknown;
+}
+
 export interface DashboardData {
   total_sessions: number;
   active_sessions: number;
@@ -92,6 +102,8 @@ export interface DashboardData {
 
 export interface AdminSettings {
   github_token_set: boolean;
+  default_copilot_model: string;
+  default_copilot_reasoning_effort: ReasoningEffort | null;
   copilot_cli_path: string;
   copilot_workspace_root: string;
   copilot_use_logged_in_user: boolean;

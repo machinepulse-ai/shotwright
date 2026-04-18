@@ -1,6 +1,10 @@
 """Copilot agent action dispatcher."""
 
-from fastapi import APIRouter, HTTPException, UploadFile
+import asyncio
+import json
+
+from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
 from app.models.chat import ChatMessage, ChatTurnCreate, ChatTurnResult, SessionEvent
@@ -8,10 +12,15 @@ from app.models.container import ContainerInfo
 from app.models.project import ProjectInfo
 from app.models.session import SessionInDB
 from app.services.copilot_runtime import runtime_manager
+from app.services.session_streams import session_stream_broker
 from app.services import container_manager as cm
 from app.services import project_manager as pm
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+def _format_sse_event(event_type: str, payload: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @router.post("/sessions/{session_id}/messages", response_model=ChatTurnResult)
@@ -37,6 +46,41 @@ async def list_events(session_id: str, limit: int = 200):
     if not session:
         raise HTTPException(404, "Session not found")
     return await get_event_collection().find({"session_id": session_id}).sort("created_at", 1).to_list(length=limit)
+
+
+@router.get("/sessions/{session_id}/stream")
+async def stream_session(session_id: str, request: Request):
+    session = await get_session_collection().find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    queue = await session_stream_broker.subscribe(session_id)
+
+    async def event_stream():
+        try:
+            yield _format_sse_event("session.ready", {"session_id": session_id})
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    envelope = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+
+                yield _format_sse_event(envelope["type"], envelope["payload"])
+        finally:
+            await session_stream_broker.unsubscribe(session_id, queue)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/sessions/{session_id}/uploads", response_model=ProjectInfo)

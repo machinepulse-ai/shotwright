@@ -1,5 +1,7 @@
 import axios, { InternalAxiosRequestConfig } from "axios";
 
+import { ChatMessage, ChatMessageDeletedEvent, Session, SessionContextRefreshEvent, SessionEvent } from "../types";
+
 const api = axios.create({
   baseURL: "/api",
   timeout: 30000,
@@ -45,6 +47,68 @@ export const getAgentMessages = (sessionId: string) => api.get(`/agent/sessions/
 export const getAgentEvents = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/events`);
 export const sendChatTurn = (sessionId: string, content: string) =>
   api.post(`/agent/sessions/${sessionId}/messages`, { content });
+
+function parseStreamPayload<T>(event: MessageEvent<string>): T | null {
+  try {
+    return JSON.parse(event.data) as T;
+  } catch {
+    return null;
+  }
+}
+
+export type AgentSessionStreamHandlers = {
+  onOpen?: () => void;
+  onError?: (event: Event) => void;
+  onSessionUpdated?: (session: Session) => void;
+  onMessageUpsert?: (message: ChatMessage) => void;
+  onMessageDeleted?: (payload: ChatMessageDeletedEvent) => void;
+  onTimelineEvent?: (event: SessionEvent) => void;
+  onContextRefresh?: (payload: SessionContextRefreshEvent) => void;
+};
+
+export function openAgentSessionStream(sessionId: string, handlers: AgentSessionStreamHandlers): EventSource {
+  const streamUrl = new URL(`/api/agent/sessions/${sessionId}/stream`, window.location.origin);
+  const stream = new EventSource(streamUrl.toString());
+
+  if (handlers.onOpen) {
+    stream.addEventListener("open", () => handlers.onOpen?.());
+  }
+  if (handlers.onError) {
+    stream.addEventListener("error", handlers.onError);
+  }
+  if (handlers.onSessionUpdated) {
+    stream.addEventListener("session.updated", (event) => {
+      const payload = parseStreamPayload<Session>(event as MessageEvent<string>);
+      if (payload) handlers.onSessionUpdated?.(payload);
+    });
+  }
+  if (handlers.onMessageUpsert) {
+    stream.addEventListener("message.upsert", (event) => {
+      const payload = parseStreamPayload<ChatMessage>(event as MessageEvent<string>);
+      if (payload) handlers.onMessageUpsert?.(payload);
+    });
+  }
+  if (handlers.onMessageDeleted) {
+    stream.addEventListener("message.deleted", (event) => {
+      const payload = parseStreamPayload<ChatMessageDeletedEvent>(event as MessageEvent<string>);
+      if (payload) handlers.onMessageDeleted?.(payload);
+    });
+  }
+  if (handlers.onTimelineEvent) {
+    stream.addEventListener("timeline.event", (event) => {
+      const payload = parseStreamPayload<SessionEvent>(event as MessageEvent<string>);
+      if (payload) handlers.onTimelineEvent?.(payload);
+    });
+  }
+  if (handlers.onContextRefresh) {
+    stream.addEventListener("context.refresh", (event) => {
+      const payload = parseStreamPayload<SessionContextRefreshEvent>(event as MessageEvent<string>);
+      if (payload) handlers.onContextRefresh?.(payload);
+    });
+  }
+
+  return stream;
+}
 
 // --- Admin ---
 export const adminLogin = (password: string) => api.post("/admin/login", { password });
