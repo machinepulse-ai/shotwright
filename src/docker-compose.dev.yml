@@ -52,9 +52,6 @@ services:
       - ./backend/app:C:/workspace/src/backend/app
       - ./frontend/src:C:/workspace/src/frontend/src
       - ./frontend/public:C:/workspace/src/frontend/public
-      - ./frontend/package.json:C:/workspace/src/frontend/package.json
-      - ./frontend/webpack.config.js:C:/workspace/src/frontend/webpack.config.js
-      - ./frontend/tsconfig.json:C:/workspace/src/frontend/tsconfig.json
       - ./scripts:C:/workspace/src/scripts
       - uploads:C:/data/uploads
       - exports:C:/data/exports
