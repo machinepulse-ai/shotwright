@@ -106,13 +106,37 @@ function basename(value: string | null | undefined, fallback: string) {
   return parts[parts.length - 1] || value;
 }
 
-function shortenId(value: string | null | undefined, fallback: string, size = 12) {
-  if (!value) return fallback;
-  return value.length <= size ? value : `${value.slice(0, size)}...`;
-}
-
 function hasEventData(event: SessionEvent) {
   return Boolean(event.data && Object.keys(event.data).length);
+}
+
+function formatTimelineEventLabel(value: string) {
+  return value
+    .split(/[._]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function getTimelinePreviewText(event: SessionEvent) {
+  return event.summary === event.type ? "" : event.summary;
+}
+
+function getTimelineExpandedSummary(event: SessionEvent) {
+  return event.summary === event.type ? formatTimelineEventLabel(event.type) : event.summary;
+}
+
+function getReasoningSelectLabel(effort: ReasoningEffort, locale: string, copy: TranslationCopy) {
+  if (locale === "en-US") {
+    return {
+      low: "Low",
+      medium: "Medium",
+      high: "High",
+      xhigh: "Extreme",
+    }[effort];
+  }
+
+  return copy.common.reasoningEfforts[effort];
 }
 
 function buildModelFallbackOption(session: Session): CopilotModelOption {
@@ -139,6 +163,7 @@ export default function AgentPanel() {
   const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
   const [draftModel, setDraftModel] = useState("");
   const [draftReasoning, setDraftReasoning] = useState<ReasoningEffort | null>(null);
+  const [expandedTimelineEventIds, setExpandedTimelineEventIds] = useState<string[]>([]);
   const [savingSessionSettings, setSavingSessionSettings] = useState(false);
   const [sessionsError, setSessionsError] = useState<UiError | null>(null);
   const [panelError, setPanelError] = useState<UiError | null>(null);
@@ -344,6 +369,10 @@ export default function AgentPanel() {
   }, [messages.length]);
 
   useEffect(() => {
+    setExpandedTimelineEventIds([]);
+  }, [currentSession?._id]);
+
+  useEffect(() => {
     if (!currentSession) {
       setContext(null);
       setMessages([]);
@@ -376,6 +405,12 @@ export default function AgentPanel() {
       setSessionsError(buildUiError(err, "failedCreateSession"));
       return null;
     }
+  };
+
+  const toggleTimelineEvent = (eventId: string) => {
+    setExpandedTimelineEventIds((previous) =>
+      previous.includes(eventId) ? previous.filter((id) => id !== eventId) : [...previous, eventId]
+    );
   };
 
   const handleNewSession = async () => {
@@ -709,107 +744,111 @@ export default function AgentPanel() {
                   <p className="panel-description">{copy.agent.sessionPanelDescription}</p>
                 </div>
               </div>
-              <div className="session-settings-block" data-testid="session-settings-card">
-                <div className="session-settings-heading">
-                  <div>
-                    <span className="eyebrow">{copy.agent.sessionSettingsEyebrow}</span>
-                    <h4>{copy.agent.sessionSettingsTitle}</h4>
-                    <p className="panel-description">{copy.agent.sessionSettingsDescription}</p>
+              <div className="session-overview-scroll">
+                <div className="session-settings-block" data-testid="session-settings-card">
+                  <div className="session-settings-heading">
+                    <div>
+                      <span className="eyebrow">{copy.agent.sessionSettingsEyebrow}</span>
+                      <h4>{copy.agent.sessionSettingsTitle}</h4>
+                      <p className="panel-description">{copy.agent.sessionSettingsDescription}</p>
+                    </div>
+                  </div>
+                  <div className="session-settings-grid">
+                    <label className="settings-field settings-field-model">
+                      <span className="settings-label">{copy.agent.sessionSettingsFields.model}</span>
+                      <div className={`settings-control-shell${modelOptionsLoading || !sessionModelOptions.length ? " is-disabled" : ""}`}>
+                        <select
+                          className="settings-select"
+                          data-testid="session-model-select"
+                          value={draftModel}
+                          onChange={handleModelChange}
+                          disabled={modelOptionsLoading || !sessionModelOptions.length}
+                        >
+                          {sessionModelOptions.length ? (
+                            sessionModelOptions.map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {option.name}
+                              </option>
+                            ))
+                          ) : (
+                            <option value="">{copy.agent.sessionSettingsNoOptions}</option>
+                          )}
+                        </select>
+                      </div>
+                    </label>
+
+                    <label className="settings-field settings-field-reasoning">
+                      <span className="settings-label">{copy.agent.sessionSettingsFields.reasoning}</span>
+                      <div className={`settings-control-shell${!reasoningSupported ? " is-disabled" : ""}`}>
+                        <select
+                          className="settings-select"
+                          data-testid="session-reasoning-select"
+                          value={draftReasoning ?? ""}
+                          onChange={handleReasoningChange}
+                          disabled={!reasoningSupported}
+                        >
+                          {reasoningSupported ? (
+                            selectedReasoningOptions.map((effort) => (
+                              <option key={effort} value={effort}>
+                                {getReasoningSelectLabel(effort, locale, copy)}
+                              </option>
+                            ))
+                          ) : (
+                            <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
+                          )}
+                        </select>
+                      </div>
+                    </label>
+                  </div>
+                  <p className="settings-help">
+                    {modelOptionsLoading ? copy.agent.sessionSettingsLoading : copy.agent.sessionSettingsHint}
+                  </p>
+                  {sessionSettingsErrorMessage && <div className="inline-alert">{sessionSettingsErrorMessage}</div>}
+                  <div className="session-settings-actions">
+                    <button
+                      className="btn-primary btn-sm"
+                      data-testid="session-settings-save"
+                      onClick={handleSaveSessionSettings}
+                      disabled={savingSessionSettings || !draftModel || !sessionSettingsDirty}
+                    >
+                      {savingSessionSettings ? copy.common.saving : copy.common.save}
+                    </button>
                   </div>
                 </div>
-                <div className="session-settings-grid">
-                  <label className="settings-field">
-                    <span className="settings-label">{copy.agent.sessionSettingsFields.model}</span>
-                    <div className={`settings-control-shell${modelOptionsLoading || !sessionModelOptions.length ? " is-disabled" : ""}`}>
-                      <select
-                        className="settings-select"
-                        data-testid="session-model-select"
-                        value={draftModel}
-                        onChange={handleModelChange}
-                        disabled={modelOptionsLoading || !sessionModelOptions.length}
-                      >
-                        {sessionModelOptions.length ? (
-                          sessionModelOptions.map((option) => (
-                            <option key={option.id} value={option.id}>
-                              {option.name}
-                            </option>
-                          ))
-                        ) : (
-                          <option value="">{copy.agent.sessionSettingsNoOptions}</option>
-                        )}
-                      </select>
-                    </div>
-                  </label>
-
-                  <label className="settings-field">
-                    <span className="settings-label">{copy.agent.sessionSettingsFields.reasoning}</span>
-                    <div className={`settings-control-shell${!reasoningSupported ? " is-disabled" : ""}`}>
-                      <select
-                        className="settings-select"
-                        data-testid="session-reasoning-select"
-                        value={draftReasoning ?? ""}
-                        onChange={handleReasoningChange}
-                        disabled={!reasoningSupported}
-                      >
-                        {reasoningSupported ? (
-                          selectedReasoningOptions.map((effort) => (
-                            <option key={effort} value={effort}>
-                              {copy.common.reasoningEfforts[effort]}
-                            </option>
-                          ))
-                        ) : (
-                          <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
-                        )}
-                      </select>
-                    </div>
-                  </label>
+                <dl className="fact-list">
+                  <div className="fact-row">
+                    <dt>{copy.agent.sessionPanelFields.status}</dt>
+                    <dd>{sessionStatusLabels[sessionStatus]}</dd>
+                  </div>
+                  <div className="fact-row">
+                    <dt>{copy.agent.sessionPanelFields.activeProject}</dt>
+                    <dd>{activeProject?.filename || copy.common.notSpecified}</dd>
+                  </div>
+                  <div className="fact-row">
+                    <dt>{copy.agent.sessionPanelFields.container}</dt>
+                    <dd>{context?.container ? containerStatusLabels[context.container.status] : copy.common.notStarted}</dd>
+                  </div>
+                  <div className="fact-row">
+                    <dt>{copy.agent.sessionPanelFields.lastReply}</dt>
+                    <dd>{latestMessage ? formatDateTime(latestMessage.created_at, locale, copy.common.notStarted) : copy.common.none}</dd>
+                  </div>
+                  <div className="fact-row">
+                    <dt>{copy.agent.sessionPanelFields.latestRender}</dt>
+                    <dd>{basename(context?.latest_render_path, copy.common.notGenerated)}</dd>
+                  </div>
+                  <div className="fact-row">
+                    <dt>{copy.agent.sessionPanelFields.lastSync}</dt>
+                    <dd>{formatDateTime(currentSession.updated_at, locale, copy.common.notStarted)}</dd>
+                  </div>
+                </dl>
+                <div className="session-runtime-meta">
+                  <span className="eyebrow">{copy.agent.sessionPanelFields.runtime}</span>
+                  <span className="mono" data-testid="session-runtime-id">
+                    {context?.session.copilot_session_id || copy.common.notStarted}
+                  </span>
                 </div>
-                <p className="settings-help">
-                  {modelOptionsLoading ? copy.agent.sessionSettingsLoading : copy.agent.sessionSettingsHint}
-                </p>
-                {sessionSettingsErrorMessage && <div className="inline-alert">{sessionSettingsErrorMessage}</div>}
-                <div className="session-settings-actions">
-                  <button
-                    className="btn-primary btn-sm"
-                    data-testid="session-settings-save"
-                    onClick={handleSaveSessionSettings}
-                    disabled={savingSessionSettings || !draftModel || !sessionSettingsDirty}
-                  >
-                    {savingSessionSettings ? copy.common.saving : copy.common.save}
-                  </button>
-                </div>
+                {currentSession.last_error && <div className="inline-alert">{currentSession.last_error}</div>}
               </div>
-              <dl className="fact-list">
-                <div className="fact-row">
-                  <dt>{copy.agent.sessionPanelFields.status}</dt>
-                  <dd>{sessionStatusLabels[sessionStatus]}</dd>
-                </div>
-                <div className="fact-row">
-                  <dt>{copy.agent.sessionPanelFields.activeProject}</dt>
-                  <dd>{activeProject?.filename || copy.common.notSpecified}</dd>
-                </div>
-                <div className="fact-row">
-                  <dt>{copy.agent.sessionPanelFields.container}</dt>
-                  <dd>{context?.container ? containerStatusLabels[context.container.status] : copy.common.notStarted}</dd>
-                </div>
-                <div className="fact-row">
-                  <dt>{copy.agent.sessionPanelFields.lastReply}</dt>
-                  <dd>{latestMessage ? formatDateTime(latestMessage.created_at, locale, copy.common.notStarted) : copy.common.none}</dd>
-                </div>
-                <div className="fact-row">
-                  <dt>{copy.agent.sessionPanelFields.latestRender}</dt>
-                  <dd>{basename(context?.latest_render_path, copy.common.notGenerated)}</dd>
-                </div>
-                <div className="fact-row">
-                  <dt>{copy.agent.sessionPanelFields.lastSync}</dt>
-                  <dd>{formatDateTime(currentSession.updated_at, locale, copy.common.notStarted)}</dd>
-                </div>
-              </dl>
-              <div className="session-runtime-meta">
-                <span className="eyebrow">{copy.agent.sessionPanelFields.runtime}</span>
-                <span className="mono">{shortenId(context?.session.copilot_session_id, copy.common.notStarted)}</span>
-              </div>
-              {currentSession.last_error && <div className="inline-alert">{currentSession.last_error}</div>}
             </div>
 
             <ContainerManager containers={context?.container ? [context.container] : []} onStop={handleStopContainer} />
@@ -866,24 +905,45 @@ export default function AgentPanel() {
               </div>
               {sortedEvents.length ? (
                 <div className="timeline-list panel-list-scroll" data-testid="session-timeline">
-                  {sortedEvents.map((event) => (
-                    <details key={event._id} className="timeline-entry" data-testid="timeline-entry">
-                      <summary className="timeline-entry-summary">
-                        <span className="timeline-chevron" aria-hidden="true" />
-                        <div className="timeline-summary-stack">
-                          <div className="timeline-summary-topline">
-                            <span className="timeline-type">{event.type}</span>
-                            <span className="timeline-time">{formatClockTime(event.created_at, locale, copy.common.notStarted)}</span>
+                  {sortedEvents.map((event) => {
+                    const isExpanded = expandedTimelineEventIds.includes(event._id);
+                    const eventLabel = formatTimelineEventLabel(event.type);
+                    const previewText = getTimelinePreviewText(event);
+
+                    return (
+                    <div
+                      key={event._id}
+                      className={`timeline-entry ${isExpanded ? "expanded" : ""}`}
+                      data-testid="timeline-entry"
+                    >
+                      <button
+                        type="button"
+                        className="timeline-entry-summary"
+                        data-testid="timeline-entry-toggle"
+                        aria-expanded={isExpanded}
+                        onClick={() => toggleTimelineEvent(event._id)}
+                      >
+                        <div className="timeline-entry-summary-layout">
+                          <span className="timeline-chevron" aria-hidden="true" />
+                          <div className="timeline-summary-stack">
+                            <div className="timeline-summary-topline">
+                              <span className="timeline-type">{eventLabel}</span>
+                              <span className="timeline-time">{formatClockTime(event.created_at, locale, copy.common.notStarted)}</span>
+                            </div>
+                            {previewText ? <div className="timeline-summary-preview">{previewText}</div> : null}
                           </div>
-                          <div className="timeline-summary-preview">{event.summary}</div>
                         </div>
-                      </summary>
-                      <div className="timeline-entry-body">
-                        <p className="timeline-summary-full">{event.summary}</p>
-                        {hasEventData(event) && <pre className="timeline-event-data">{JSON.stringify(event.data, null, 2)}</pre>}
-                      </div>
-                    </details>
-                  ))}
+                      </button>
+                      {isExpanded ? (
+                        <div className="timeline-entry-body">
+                          <div className="timeline-event-code">{event.type}</div>
+                          <p className="timeline-summary-full">{getTimelineExpandedSummary(event)}</p>
+                          {hasEventData(event) && <pre className="timeline-event-data">{JSON.stringify(event.data, null, 2)}</pre>}
+                        </div>
+                      ) : null}
+                    </div>
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="empty-side">{copy.agent.executionEmpty}</p>

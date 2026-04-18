@@ -96,10 +96,16 @@ FROM base AS backend
 RUN $ProgressPreference = 'SilentlyContinue'; \
       & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT uv
 
-WORKDIR C:/app
+WORKDIR C:/workspace
 
-COPY src/backend/pyproject.toml src/backend/.python-version ./
-COPY src/backend/app/ ./app/
+COPY AGENTS.md C:/workspace/AGENTS.md
+COPY shotwright-config.json C:/workspace/shotwright-config.json
+COPY setup-versions.yml C:/workspace/setup-versions.yml
+COPY scripts/ C:/workspace/scripts/
+COPY .github/skills/ C:/workspace/.github/skills/
+COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
+COPY src/backend/app/ C:/workspace/src/backend/app/
+WORKDIR C:/workspace/src/backend
 RUN & python -m uv pip install --system .
 
 EXPOSE 8000

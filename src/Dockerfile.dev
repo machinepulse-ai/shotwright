@@ -35,8 +35,10 @@ SHELL ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
 
 WORKDIR C:/workspace
 
+COPY AGENTS.md C:/workspace/AGENTS.md
 COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
+COPY .github/skills/ C:/workspace/.github/skills/
 COPY scripts/ C:/workspace/scripts/
 
 RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \

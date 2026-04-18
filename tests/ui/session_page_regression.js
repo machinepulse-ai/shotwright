@@ -7,6 +7,13 @@ const sessionId = "session-ui-regression";
 const now = new Date().toISOString();
 const modelOptions = [
   {
+    id: "gpt-5.4-mini",
+    name: "GPT-5.4 mini",
+    supports_reasoning_effort: true,
+    supported_reasoning_efforts: ["low", "medium", "high", "xhigh"],
+    default_reasoning_effort: "high",
+  },
+  {
     id: "gpt-5.4",
     name: "GPT 5.4",
     supports_reasoning_effort: true,
@@ -26,8 +33,8 @@ let sessionState = {
   _id: sessionId,
   name: "Session Sidebar Regression",
   status: "error",
-  copilot_model: "gpt-5.4",
-  copilot_reasoning_effort: "high",
+  copilot_model: "gpt-5.4-mini",
+  copilot_reasoning_effort: "xhigh",
   copilot_session_id: "shotwright-session-ui-regression-with-a-very-long-runtime-identifier-for-layout-checks",
   container_id: null,
   active_project_id: null,
@@ -176,6 +183,62 @@ async function collectOverflowMetrics(page) {
   });
 }
 
+async function collectSidebarPanelMetrics(page) {
+  return page.locator('[data-testid="session-context-sidebar"]').evaluate((sidebar) => {
+    const overview = sidebar.querySelector('.session-overview-panel');
+    const resources = sidebar.querySelector('.resources-panel');
+    const timeline = sidebar.querySelector('.timeline-panel');
+    const modelSelect = sidebar.querySelector('[data-testid="session-model-select"]');
+    const reasoningSelect = sidebar.querySelector('[data-testid="session-reasoning-select"]');
+    const runtimeValue = sidebar.querySelector('[data-testid="session-runtime-id"]');
+    const emptyState = sidebar.querySelector('.resources-panel .empty-side');
+    const timelineSummary = sidebar.querySelector('.timeline-entry-summary');
+    const timelineEntry = sidebar.querySelector('.timeline-entry');
+    const rect = (element) => element ? element.getBoundingClientRect() : null;
+
+    return {
+      overviewRect: rect(overview),
+      resourcesRect: rect(resources),
+      timelineRect: rect(timeline),
+      timelineEntryRect: rect(timelineEntry),
+      timelineSummaryRect: rect(timelineSummary),
+      modelSelectRect: rect(modelSelect),
+      modelSelectText: modelSelect?.selectedOptions?.[0]?.textContent?.trim() || null,
+      reasoningSelectRect: rect(reasoningSelect),
+      reasoningSelectText: reasoningSelect?.selectedOptions?.[0]?.textContent?.trim() || null,
+      runtimeValueRect: rect(runtimeValue),
+      runtimeValueText: runtimeValue?.textContent?.trim() || null,
+      resourcesEmptyText: emptyState?.textContent?.trim() || null,
+    };
+  });
+}
+
+async function collectTimelineEntryMetrics(page, index = 0) {
+  return page.locator('[data-testid="timeline-entry"]').nth(index).evaluate((entry) => {
+    const summary = entry.querySelector('.timeline-entry-summary');
+    const body = entry.querySelector('.timeline-entry-body');
+    const chevron = entry.querySelector('.timeline-chevron');
+    const type = entry.querySelector('.timeline-type');
+    const time = entry.querySelector('.timeline-time');
+    const preview = entry.querySelector('.timeline-summary-preview');
+    const rect = (element) => element ? element.getBoundingClientRect() : null;
+
+    return {
+      isOpen: entry.classList.contains('expanded'),
+      entryRect: rect(entry),
+      summaryRect: rect(summary),
+      bodyRect: rect(body),
+      chevronRect: rect(chevron),
+      typeRect: rect(type),
+      timeRect: rect(time),
+      previewRect: rect(preview),
+      labelInset: type ? type.getBoundingClientRect().left - entry.getBoundingClientRect().left : null,
+      chevronInset: chevron ? chevron.getBoundingClientRect().left - entry.getBoundingClientRect().left : null,
+      bodyDisplay: body ? getComputedStyle(body).display : null,
+    };
+  });
+}
+
 async function collectTitlebarMetrics(page) {
   return page.evaluate(() => {
     const titlebar = document.querySelector(".titlebar");
@@ -217,18 +280,54 @@ async function collectTitlebarMetrics(page) {
     const previewBadge = page.locator(".video-source-badge");
     const previewVideo = page.locator(".video-element");
 
-    assert.equal(await modelSelect.inputValue(), "gpt-5.4");
-    assert.equal(await reasoningSelect.inputValue(), "high");
+    assert.equal(await modelSelect.inputValue(), "gpt-5.4-mini");
+    assert.equal(await reasoningSelect.inputValue(), "xhigh");
 
     const titlebarMetrics = await collectTitlebarMetrics(page);
     assert.ok(titlebarMetrics, "Titlebar center metrics should be available");
     assert.ok(titlebarMetrics.delta < 8, `Workspace title is not visually centered: ${JSON.stringify(titlebarMetrics)}`);
 
     assert.equal(await timelineEntries.count(), 2, "Timeline entries should render as separate accordion panels");
-    assert.equal(await timelineEntries.nth(0).evaluate((entry) => entry.hasAttribute("open")), false, "Timeline entries should be collapsed by default");
+    assert.equal(await timelineEntries.nth(0).evaluate((entry) => entry.classList.contains("expanded")), false, "Timeline entries should be collapsed by default");
 
-    await timelineEntries.nth(0).locator("summary").click();
-    assert.equal(await timelineEntries.nth(0).evaluate((entry) => entry.hasAttribute("open")), true, "Clicking a timeline summary should expand the entry");
+    const collapsedTimelineMetrics = await collectTimelineEntryMetrics(page, 0);
+    assert.equal(collapsedTimelineMetrics.isOpen, false, `Timeline entry should start collapsed: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`);
+    assert.equal(collapsedTimelineMetrics.bodyDisplay, null, `Collapsed timeline body should stay unmounted: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`);
+    assert.ok(
+      collapsedTimelineMetrics.entryRect && collapsedTimelineMetrics.entryRect.height >= 72,
+      `Collapsed timeline entry should keep a readable closed height: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
+    );
+    assert.ok(
+      collapsedTimelineMetrics.entryRect && collapsedTimelineMetrics.entryRect.height <= 116,
+      `Collapsed timeline entry should stay visually compact: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
+    );
+    assert.ok(
+      collapsedTimelineMetrics.typeRect &&
+        collapsedTimelineMetrics.timeRect &&
+        Math.abs(collapsedTimelineMetrics.typeRect.top - collapsedTimelineMetrics.timeRect.top) <= 6,
+      `Timeline title row should keep event label and time aligned on the same row: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
+    );
+    assert.ok(
+      collapsedTimelineMetrics.labelInset !== null && collapsedTimelineMetrics.labelInset <= 28,
+      `Timeline label inset should stay visually aligned with the card edge: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
+    );
+    assert.ok(
+      collapsedTimelineMetrics.chevronInset !== null && collapsedTimelineMetrics.chevronInset <= 18,
+      `Timeline chevron should stay close to the left card edge: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
+    );
+
+    await timelineEntries.nth(0).locator('[data-testid="timeline-entry-toggle"]').click();
+    assert.equal(await timelineEntries.nth(0).evaluate((entry) => entry.classList.contains("expanded")), true, "Clicking a timeline summary should expand the entry");
+
+    const expandedTimelineMetrics = await collectTimelineEntryMetrics(page, 0);
+    assert.equal(expandedTimelineMetrics.isOpen, true, `Timeline entry should expand after clicking summary: ${JSON.stringify(expandedTimelineMetrics, null, 2)}`);
+    assert.equal(expandedTimelineMetrics.bodyDisplay, "flex", `Expanded timeline body should be visible: ${JSON.stringify(expandedTimelineMetrics, null, 2)}`);
+    assert.ok(
+      expandedTimelineMetrics.entryRect &&
+        collapsedTimelineMetrics.entryRect &&
+        expandedTimelineMetrics.entryRect.height > collapsedTimelineMetrics.entryRect.height + 40,
+      `Expanded timeline entry should clearly grow beyond its collapsed height: ${JSON.stringify({ collapsedTimelineMetrics, expandedTimelineMetrics }, null, 2)}`
+    );
 
     assert.ok(await assistantMessage.locator("strong").count(), "Assistant Markdown should render strong text");
     assert.ok(await assistantMessage.locator("code").count(), "Assistant Markdown should render code spans or blocks");
@@ -242,6 +341,30 @@ async function collectTitlebarMetrics(page) {
       0,
       `Initial session sidebar overflow detected: ${JSON.stringify(overflowMetrics, null, 2)}`
     );
+
+    const initialPanelMetrics = await collectSidebarPanelMetrics(page);
+    assert.equal(initialPanelMetrics.modelSelectText, "GPT-5.4 mini", "Model selector should show the full GPT-5.4 mini label");
+    assert.equal(initialPanelMetrics.reasoningSelectText, "Extreme", `Reasoning selector should use compact option labels in the session settings card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.modelSelectRect && initialPanelMetrics.modelSelectRect.width >= 120, `Model selector is still too narrow: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(
+      initialPanelMetrics.modelSelectRect &&
+        initialPanelMetrics.reasoningSelectRect &&
+        Math.abs(initialPanelMetrics.modelSelectRect.top - initialPanelMetrics.reasoningSelectRect.top) <= 2,
+      `Session settings selects should align on the same top edge: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+    );
+    assert.ok(
+      initialPanelMetrics.modelSelectRect &&
+        initialPanelMetrics.reasoningSelectRect &&
+        initialPanelMetrics.reasoningSelectRect.left - initialPanelMetrics.modelSelectRect.right >= 12,
+      `Session settings selects should keep enough horizontal gap instead of crowding together: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+    );
+    assert.equal(initialPanelMetrics.runtimeValueText, sessionState.copilot_session_id, `Runtime id should stay fully visible in the sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.runtimeValueRect && initialPanelMetrics.runtimeValueRect.height >= 30, `Runtime id row should have enough height to wrap long ids instead of truncating them: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.resourcesEmptyText, "No project files have been uploaded yet.", "Resources empty state should stay visible");
+    assert.ok(initialPanelMetrics.overviewRect && initialPanelMetrics.overviewRect.height <= 520, `Overview panel should not consume the whole sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.timelineRect && initialPanelMetrics.timelineRect.height >= 220, `Timeline panel collapsed unexpectedly: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.timelineEntryRect && initialPanelMetrics.timelineEntryRect.height >= 72, `Timeline entry container collapsed unexpectedly: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.timelineSummaryRect && initialPanelMetrics.timelineSummaryRect.height >= 48, `Timeline summaries should remain readable: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
 
     await modelSelect.selectOption("gpt-4.1");
     assert.equal(await reasoningSelect.isDisabled(), true, "Reasoning selector should disable for models without reasoning support");
@@ -257,6 +380,8 @@ async function collectTitlebarMetrics(page) {
     await reasoningSelect.selectOption("medium");
     await saveButton.click();
     await page.waitForFunction(() => document.body.textContent.includes("Medium reasoning"));
+
+    assert.equal((await reasoningSelect.locator('option:checked').textContent())?.trim(), "Medium");
 
     assert.equal(await reasoningSelect.isDisabled(), false, "Reasoning selector should re-enable for models that support it");
 

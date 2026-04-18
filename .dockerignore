@@ -1,10 +1,13 @@
 node_modules/
 *
 !.dockerignore
+!AGENTS.md
 !Dockerfile
 !keepalive.ps1
 !shotwright-config.json
 !setup-versions.yml
+!.github/skills/
+!.github/skills/**
 !scripts/
 !scripts/**
 !src/backend/pyproject.toml

@@ -52,6 +52,7 @@ services:
       - ./backend/app:C:/workspace/src/backend/app
       - ./frontend:C:/workspace/src/frontend
       - frontend-node-modules:C:/workspace/src/frontend/node_modules
+      - ../.github:C:/workspace/.github
       - ./scripts:C:/workspace/src/scripts
       - uploads:C:/data/uploads
       - exports:C:/data/exports
