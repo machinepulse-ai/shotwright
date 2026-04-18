@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from time import monotonic
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -20,6 +21,7 @@ from app.database import (
     get_message_collection,
     get_session_collection,
 )
+from app.models.session import ReasoningEffort
 from app.services.agent_tools import build_shotwright_tools
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,8 @@ class ShotwrightCopilotRuntimeManager:
     def __init__(self) -> None:
         self._runtimes: dict[str, _RuntimeHandle] = {}
         self._setup_lock = asyncio.Lock()
+        self._models_cache: tuple[float, list[dict]] | None = None
+        self._models_lock = asyncio.Lock()
 
     async def _resolve_github_token(self) -> str | None:
         if settings.github_token:
@@ -109,12 +113,6 @@ class ShotwrightCopilotRuntimeManager:
     async def _resolve_runtime_settings(self) -> dict[str, str | bool]:
         doc = await get_admin_collection().find_one({"_id": "settings"}) or {}
         return {
-            "copilot_model": _first_non_empty(doc.get("copilot_model"), settings.copilot_model) or "gpt-5.4",
-            "copilot_reasoning_effort": _first_non_empty(
-                doc.get("copilot_reasoning_effort"),
-                settings.copilot_reasoning_effort,
-            )
-            or "high",
             "copilot_cli_path": _first_non_empty(doc.get("copilot_cli_path"), settings.copilot_cli_path),
             "copilot_workspace_root": _first_non_empty(
                 doc.get("copilot_workspace_root"),
@@ -161,6 +159,107 @@ class ShotwrightCopilotRuntimeManager:
 
     async def get_runtime_settings(self) -> dict[str, str | bool]:
         return await self._resolve_runtime_settings()
+
+    def _build_client(self, github_token: str | None, runtime_settings: dict[str, str | bool]) -> CopilotClient:
+        return CopilotClient(
+            SubprocessConfig(
+                github_token=github_token,
+                cli_path=(runtime_settings["copilot_cli_path"] or None),
+                cwd=str(runtime_settings["copilot_workspace_root"]),
+                env=self._build_subprocess_env(runtime_settings),
+                use_logged_in_user=bool(runtime_settings["copilot_use_logged_in_user"]),
+            )
+        )
+
+    async def list_available_models(self, force_refresh: bool = False) -> list[dict]:
+        if not force_refresh and self._models_cache and monotonic() - self._models_cache[0] < 300:
+            return self._models_cache[1]
+
+        async with self._models_lock:
+            if not force_refresh and self._models_cache and monotonic() - self._models_cache[0] < 300:
+                return self._models_cache[1]
+
+            runtime_settings = await self._resolve_runtime_settings()
+            github_token = await self._resolve_github_token()
+            if not github_token and not runtime_settings["copilot_use_logged_in_user"]:
+                raise ValueError("GitHub token is not configured for Copilot SDK")
+
+            client = self._build_client(github_token, runtime_settings)
+            await client.start()
+            try:
+                models = await client.list_models()
+            finally:
+                await client.stop()
+
+            normalized_models = []
+            for model in models:
+                supported_reasoning_efforts = [
+                    effort
+                    for effort in (model.supported_reasoning_efforts or [])
+                    if effort in {"low", "medium", "high", "xhigh"}
+                ]
+                normalized_models.append(
+                    {
+                        "id": model.id,
+                        "name": model.name,
+                        "supports_reasoning_effort": bool(model.capabilities.supports.reasoning_effort),
+                        "supported_reasoning_efforts": supported_reasoning_efforts,
+                        "default_reasoning_effort": model.default_reasoning_effort,
+                    }
+                )
+
+            self._models_cache = (monotonic(), normalized_models)
+            return normalized_models
+
+    async def validate_model_choice(
+        self,
+        model_id: str,
+        reasoning_effort: str | None,
+    ) -> tuple[str, ReasoningEffort | None]:
+        models = await self.list_available_models()
+        selected = next((model for model in models if model["id"] == model_id), None)
+        if not selected:
+            raise ValueError(f"Unknown Copilot model: {model_id}")
+
+        supported_reasoning_efforts = selected.get("supports_reasoning_effort") and selected.get(
+            "supported_reasoning_efforts"
+        ) or []
+
+        if not supported_reasoning_efforts:
+            return selected["id"], None
+
+        if reasoning_effort is None:
+            default_effort = selected.get("default_reasoning_effort")
+            if default_effort in supported_reasoning_efforts:
+                return selected["id"], default_effort
+            return selected["id"], supported_reasoning_efforts[0]
+
+        if reasoning_effort not in supported_reasoning_efforts:
+            raise ValueError(
+                f"Model {model_id} does not support reasoning effort {reasoning_effort}"
+            )
+
+        return selected["id"], reasoning_effort
+
+    async def apply_session_settings(
+        self,
+        app_session_id: str,
+        model_id: str,
+        reasoning_effort: ReasoningEffort | None,
+    ) -> None:
+        runtime = self._runtimes.get(app_session_id)
+        if not runtime:
+            return
+
+        async with runtime.lock:
+            await runtime.session.set_model(model_id, reasoning_effort=reasoning_effort)
+            runtime.track_task(
+                self._persist_event(
+                    app_session_id,
+                    "session.model_updated",
+                    {"model": model_id, "reasoning_effort": reasoning_effort},
+                )
+            )
 
     def _system_prompt(self) -> str:
         return (
@@ -236,22 +335,20 @@ class ShotwrightCopilotRuntimeManager:
         if not github_token and not runtime_settings["copilot_use_logged_in_user"]:
             raise ValueError("GitHub token is not configured for Copilot SDK")
 
-        client = CopilotClient(
-            SubprocessConfig(
-                github_token=github_token,
-                cli_path=(runtime_settings["copilot_cli_path"] or None),
-                cwd=str(runtime_settings["copilot_workspace_root"]),
-                env=self._build_subprocess_env(runtime_settings),
-                use_logged_in_user=bool(runtime_settings["copilot_use_logged_in_user"]),
-            )
-        )
+        client = self._build_client(github_token, runtime_settings)
         await client.start()
 
         copilot_session_id = session_doc.get("copilot_session_id") or f"shotwright-{app_session_id}"
+        session_model = session_doc.get("copilot_model") or settings.copilot_model
+        session_reasoning_effort = (
+            session_doc["copilot_reasoning_effort"]
+            if "copilot_reasoning_effort" in session_doc
+            else settings.copilot_reasoning_effort
+        )
         session_kwargs = {
             "on_permission_request": PermissionHandler.approve_all,
-            "model": runtime_settings["copilot_model"],
-            "reasoning_effort": runtime_settings["copilot_reasoning_effort"],
+            "model": session_model,
+            "reasoning_effort": session_reasoning_effort,
             "streaming": True,
             "available_tools": [],
             "tools": build_shotwright_tools(app_session_id),

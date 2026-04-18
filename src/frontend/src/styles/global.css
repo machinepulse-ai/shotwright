@@ -32,10 +32,10 @@
   --warning: #9a6700;
   --radius-lg: 8px;
   --radius-md: 6px;
-  --layout-gap: 12px;
-  --shell-pad: 14px;
-  --page-pad: 18px;
-  --card-pad: 14px;
+  --layout-gap: 10px;
+  --shell-pad: 10px;
+  --page-pad: 14px;
+  --card-pad: 12px;
   --shadow-sm: none;
   --shadow-lg: none;
   --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
@@ -74,12 +74,12 @@ a {
 }
 
 .titlebar {
-  height: 40px;
-  display: flex;
-  justify-content: space-between;
+  height: 44px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, auto) minmax(0, 1fr);
   align-items: center;
-  gap: 1rem;
-  padding: 0 var(--page-pad);
+  gap: 0.9rem;
+  padding: 0 12px;
   background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);
 }
@@ -93,13 +93,15 @@ a {
 }
 
 .titlebar-left {
-  min-width: 320px;
-  gap: 0.55rem;
+  min-width: 0;
+  gap: 0.7rem;
+  justify-self: start;
 }
 
 .titlebar-right {
-  min-width: 110px;
+  min-width: 0;
   justify-content: flex-end;
+  justify-self: end;
 }
 
 .titlebar-brand-mark {
@@ -128,24 +130,31 @@ a {
 }
 
 .titlebar-center {
-  flex: 1;
   text-align: center;
   letter-spacing: 0.18em;
+  justify-self: center;
+  white-space: nowrap;
 }
 
 .titlebar-nav {
   display: inline-flex;
   align-items: center;
-  gap: 0.16rem;
-  padding: 0.18rem;
+  gap: 0.18rem;
+  min-height: 34px;
+  padding: 0.2rem;
   border-radius: 999px;
   background: linear-gradient(180deg, #efefef, #e8e8e8);
-  box-shadow: inset 0 0 0 1px rgba(31, 35, 40, 0.06);
+  border: 1px solid rgba(31, 35, 40, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
 }
 
 .titlebar-tab {
-  min-width: 70px;
-  padding: 0.34rem 0.82rem;
+  min-width: 72px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.34rem 0.88rem;
   border-radius: 999px;
   color: var(--text-secondary);
   text-decoration: none;
@@ -162,7 +171,7 @@ a {
 .titlebar-tab.active {
   background: linear-gradient(180deg, #ffffff, #f9f9f9);
   color: var(--text);
-  box-shadow: inset 0 0 0 1px rgba(31, 35, 40, 0.08), 0 1px 2px rgba(31, 35, 40, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(31, 35, 40, 0.08), 0 1px 3px rgba(31, 35, 40, 0.08);
 }
 
 .titlebar-language {
@@ -187,9 +196,9 @@ a {
 .titlebar-language select {
   appearance: none;
   -webkit-appearance: none;
-  min-width: 102px;
+  min-width: 96px;
   height: 34px;
-  padding: 0 2.2rem 0 0.95rem;
+  padding: 0 2.2rem 0 0.9rem;
   border: 1px solid rgba(31, 35, 40, 0.08);
   border-radius: 999px;
   background: linear-gradient(180deg, #ffffff, #f6f6f6);
@@ -246,6 +255,8 @@ button,
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
+  line-height: 1;
+  white-space: nowrap;
   background: var(--panel-bg-alt);
   color: var(--text);
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
@@ -289,28 +300,35 @@ button:disabled {
 }
 
 input,
-textarea {
+textarea,
+select {
   font-family: inherit;
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: var(--radius-md);
-  padding: 0.85rem 0.95rem;
+  padding: 0.72rem 0.82rem;
   color: var(--text);
-  font-size: 0.86rem;
+  font-size: 0.84rem;
   width: 100%;
   box-shadow: none;
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   outline: none;
   border-color: var(--primary);
   box-shadow: inset 0 0 0 1px var(--primary);
 }
 
+select {
+  min-height: 38px;
+  padding-right: 2.15rem;
+}
+
 textarea {
   resize: vertical;
-  min-height: 120px;
+  min-height: 108px;
 }
 
 .status-badge {
@@ -363,7 +381,7 @@ textarea {
   align-items: center;
   gap: 0.35rem;
   color: var(--text-secondary);
-  font-size: 0.72rem;
+  font-size: 0.69rem;
   text-transform: uppercase;
   letter-spacing: 0.14em;
 }
@@ -373,12 +391,12 @@ textarea {
   justify-content: space-between;
   align-items: flex-start;
   gap: 1rem;
-  margin-bottom: 0.85rem;
+  margin-bottom: 0.7rem;
 }
 
 .panel-heading h3 {
-  font-size: 0.98rem;
-  margin-top: 0.22rem;
+  font-size: 0.94rem;
+  margin-top: 0.18rem;
   font-weight: 600;
 }
 
@@ -409,7 +427,7 @@ textarea {
 }
 
 .btn-sm {
-  padding: 0.32rem 0.58rem;
+  padding: 0.3rem 0.54rem;
   font-size: 0.74rem;
 }
 
@@ -436,7 +454,7 @@ textarea {
   }
 
   .titlebar-right {
-    min-width: 84px;
+    min-width: 0;
   }
 
   .titlebar-product {

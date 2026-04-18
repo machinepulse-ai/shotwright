@@ -2,10 +2,36 @@
   overflow: hidden;
 }
 
+.video-player-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.video-source-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  background: var(--panel-bg-soft);
+  color: var(--text-secondary);
+}
+
+.video-source-badge.format-mp4 {
+  border-color: rgba(0, 120, 212, 0.18);
+  color: var(--primary);
+}
+
 .video-element {
   width: 100%;
   aspect-ratio: 16 / 9;
-  max-height: 480px;
+  max-height: 420px;
   border-radius: 6px;
   background: #000;
   border: 1px solid var(--border);

@@ -31,7 +31,6 @@ async def get_admin_settings():
 async def update_admin_settings(body: CopilotSettingsUpdate):
     col = get_admin_collection()
     payload = body.model_dump()
-    payload["copilot_model"] = payload["copilot_model"].strip()
     payload["copilot_cli_path"] = payload["copilot_cli_path"].strip()
     payload["copilot_workspace_root"] = payload["copilot_workspace_root"].strip()
     payload["copilot_http_proxy"] = payload["copilot_http_proxy"].strip()

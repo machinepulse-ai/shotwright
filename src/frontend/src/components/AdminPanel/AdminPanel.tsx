@@ -16,8 +16,6 @@ import "./AdminPanel.css";
 
 const defaultAdminSettings: AdminSettings = {
   github_token_set: false,
-  copilot_model: "gpt-5.4",
-  copilot_reasoning_effort: "high",
   copilot_cli_path: "",
   copilot_workspace_root: "C:/workspace",
   copilot_use_logged_in_user: false,
@@ -109,8 +107,6 @@ export default function AdminPanel() {
     setSavingSettings(true);
     try {
       const response = await updateAdminSettings({
-        copilot_model: runtimeSettings.copilot_model,
-        copilot_reasoning_effort: runtimeSettings.copilot_reasoning_effort,
         copilot_cli_path: runtimeSettings.copilot_cli_path,
         copilot_workspace_root: runtimeSettings.copilot_workspace_root,
         copilot_use_logged_in_user: runtimeSettings.copilot_use_logged_in_user,
@@ -121,7 +117,6 @@ export default function AdminPanel() {
       setRuntimeSettings(response.data);
       setTokenSet(response.data.github_token_set);
       setActionMessage(copy.common.saved);
-      window.dispatchEvent(new CustomEvent("shotwright-runtime-settings-updated"));
     } catch {
       setActionError(copy.errors.failedUpdateAdminSettings);
     } finally {
@@ -245,27 +240,6 @@ export default function AdminPanel() {
 
           <div className="admin-config-grid">
             <label className="form-field">
-              <span className="field-label">{copy.admin.fields.model}</span>
-              <input
-                value={runtimeSettings.copilot_model}
-                onChange={(event) => handleRuntimeSettingChange("copilot_model", event.target.value)}
-              />
-            </label>
-
-            <label className="form-field">
-              <span className="field-label">{copy.admin.fields.reasoning}</span>
-              <select
-                value={runtimeSettings.copilot_reasoning_effort}
-                onChange={(event) => handleRuntimeSettingChange("copilot_reasoning_effort", event.target.value as AdminSettings["copilot_reasoning_effort"])}
-              >
-                <option value="low">{copy.common.reasoningEfforts.low}</option>
-                <option value="medium">{copy.common.reasoningEfforts.medium}</option>
-                <option value="high">{copy.common.reasoningEfforts.high}</option>
-                <option value="xhigh">{copy.common.reasoningEfforts.xhigh}</option>
-              </select>
-            </label>
-
-            <label className="form-field">
               <span className="field-label">{copy.admin.fields.workspaceRoot}</span>
               <input
                 value={runtimeSettings.copilot_workspace_root}
@@ -324,7 +298,7 @@ export default function AdminPanel() {
 
           <p className="field-help">{copy.admin.configHint}</p>
           <div className="admin-actions">
-            <button className="btn-primary" onClick={handleSaveSettings} disabled={savingSettings || !runtimeSettings.copilot_model.trim() || !runtimeSettings.copilot_workspace_root.trim()}>
+            <button className="btn-primary" onClick={handleSaveSettings} disabled={savingSettings || !runtimeSettings.copilot_workspace_root.trim()}>
               {savingSettings ? copy.common.saving : copy.common.save}
             </button>
           </div>

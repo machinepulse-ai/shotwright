@@ -73,6 +73,13 @@ No `.done` marker files are required for the local smoke test.
 - `scripts/validate/validation_nexrender_job.json` contains absolute container paths. Update it if JSX file names or locations change.
 - `scripts/runtime_entrypoint.ps1` and `scripts/install/install_after_effects_in_container.ps1` must stay aligned on shared container paths.
 
+## UI Testing Workflow
+
+- For frontend layout or interaction regressions, use the documented Playwright flow in `tests/test.md` instead of creating new ad hoc `tmp-playwright-*.js` files.
+- Reusable UI scripts live under `tests/ui/`.
+- Screenshot artifacts belong under `tests/artifacts/`, not `validation-data/output/`.
+- The session-page regression script is `tests/ui/session_page_regression.js`; use it before and after changing the right sidebar or session-level Copilot controls.
+
 ## Validated Configuration
 
 Last validated on **2026-04-17**:

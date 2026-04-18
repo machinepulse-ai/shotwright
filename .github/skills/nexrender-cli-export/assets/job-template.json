@@ -1,0 +1,29 @@
+{
+  "template": {
+    "src": "file:///C:/data/uploads/example/project.aep",
+    "composition": "Main"
+  },
+  "assets": [
+    {
+      "type": "script",
+      "src": "file:///C:/data/patches/update_project.jsx"
+    }
+  ],
+  "actions": {
+    "postrender": [
+      {
+        "module": "@nexrender/action-encode",
+        "preset": "mp4",
+        "output": "encoded.mp4"
+      },
+      {
+        "module": "@nexrender/action-copy",
+        "input": "encoded.mp4",
+        "output": "C:\\data\\output\\result.mp4"
+      }
+    ]
+  },
+  "ae_render": {
+    "legacy": false
+  }
+}

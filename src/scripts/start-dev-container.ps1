@@ -28,13 +28,33 @@ function Show-ProcessLogs {
     }
 }
 
+function Get-FrontendDependencyFingerprint {
+    param(
+        [string[]]$Paths
+    )
+
+    $hashes = foreach ($path in $Paths) {
+        if (Test-Path $path) {
+            (Get-FileHash -Algorithm SHA256 -Path $path).Hash
+        }
+        else {
+            "missing:$path"
+        }
+    }
+
+    return ($hashes -join '|')
+}
+
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 $backendStdout = Join-Path $logRoot 'backend.stdout.log'
 $backendStderr = Join-Path $logRoot 'backend.stderr.log'
 $frontendStdout = Join-Path $logRoot 'frontend.stdout.log'
 $frontendStderr = Join-Path $logRoot 'frontend.stderr.log'
+$frontendPackageJson = Join-Path $frontendRoot 'package.json'
+$frontendPackageLock = Join-Path $frontendRoot 'package-lock.json'
 $frontendNodeModules = Join-Path $frontendRoot 'node_modules'
+$frontendDependencyStamp = Join-Path $frontendNodeModules '.shotwright-deps.sha256'
 
 @($backendStdout, $backendStderr, $frontendStdout, $frontendStderr) | ForEach-Object {
     if (Test-Path $_) {
@@ -62,12 +82,30 @@ $backendProcess = Start-Process -FilePath 'python' `
     -RedirectStandardError $backendStderr
 
 if (-not (Test-Path (Join-Path $frontendNodeModules '.bin\webpack.cmd'))) {
-    Write-Host '[dev-container] Installing frontend dependencies into node_modules volume ...' -ForegroundColor Yellow
-    & 'C:\Program Files\nodejs\npm.cmd' install --no-package-lock --no-progress --fetch-retries 5 --fetch-timeout 120000 --prefix $frontendRoot
+    $frontendDependenciesNeedSync = $true
+}
+else {
+    $expectedDependencyFingerprint = Get-FrontendDependencyFingerprint -Paths @($frontendPackageJson, $frontendPackageLock)
+    $cachedDependencyFingerprint = if (Test-Path $frontendDependencyStamp) {
+        (Get-Content -Path $frontendDependencyStamp -Raw -ErrorAction SilentlyContinue).Trim()
+    }
+    else {
+        ''
+    }
+    $frontendDependenciesNeedSync = $expectedDependencyFingerprint -ne $cachedDependencyFingerprint
+}
+
+if ($frontendDependenciesNeedSync) {
+    Write-Host '[dev-container] Syncing frontend dependencies into the node_modules volume ...' -ForegroundColor Yellow
+    New-Item -ItemType Directory -Force -Path $frontendNodeModules | Out-Null
+    & 'C:\Program Files\nodejs\npm.cmd' install --no-progress --fetch-retries 5 --fetch-timeout 120000 --prefix $frontendRoot
     if ($LASTEXITCODE -ne 0) {
         Show-ProcessLogs -Name 'backend' -StdoutPath $backendStdout -StderrPath $backendStderr
         throw 'Failed to install frontend dependencies inside the dev container.'
     }
+
+    $currentDependencyFingerprint = Get-FrontendDependencyFingerprint -Paths @($frontendPackageJson, $frontendPackageLock)
+    Set-Content -Path $frontendDependencyStamp -Value $currentDependencyFingerprint -NoNewline
 }
 
 $frontendProcess = Start-Process -FilePath 'C:\Program Files\nodejs\npm.cmd' `

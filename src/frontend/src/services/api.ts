@@ -17,7 +17,9 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 // --- Sessions ---
 export const getSessions = () => api.get("/sessions");
 export const createSession = (name: string) => api.post("/sessions", { name });
+export const updateSession = (id: string, payload: Record<string, unknown>) => api.patch(`/sessions/${id}`, payload);
 export const deleteSession = (id: string) => api.delete(`/sessions/${id}`);
+export const getCopilotModelOptions = () => api.get("/sessions/model-options");
 
 // --- Containers ---
 export const getContainers = (sessionId?: string) =>
@@ -43,7 +45,6 @@ export const getAgentMessages = (sessionId: string) => api.get(`/agent/sessions/
 export const getAgentEvents = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/events`);
 export const sendChatTurn = (sessionId: string, content: string) =>
   api.post(`/agent/sessions/${sessionId}/messages`, { content });
-export const getPublicRuntimeSettings = () => api.get("/agent/runtime-settings");
 
 // --- Admin ---
 export const adminLogin = (password: string) => api.post("/admin/login", { password });

@@ -1,44 +1,12 @@
-import { useEffect, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import AgentPanel from "./components/AgentPanel/AgentPanel";
 import AdminPanel from "./components/AdminPanel/AdminPanel";
 import { useI18n } from "./i18n";
-import { getPublicRuntimeSettings } from "./services/api";
-import { PublicRuntimeSettings } from "./types";
 
 function WorkbenchApp() {
   const location = useLocation();
   const { locale, setLocale, copy } = useI18n();
   const currentSection = location.pathname === "/admin" ? copy.app.admin : copy.app.chat;
-  const [runtimeSettings, setRuntimeSettings] = useState<PublicRuntimeSettings | null>(null);
-
-  const loadRuntimeSettings = () => {
-    getPublicRuntimeSettings()
-      .then((response) => {
-        setRuntimeSettings(response.data);
-      })
-      .catch(() => {
-        setRuntimeSettings(null);
-      });
-  };
-
-  useEffect(() => {
-    loadRuntimeSettings();
-
-    const handleRuntimeSettingsUpdated = () => {
-      loadRuntimeSettings();
-    };
-
-    window.addEventListener("shotwright-runtime-settings-updated", handleRuntimeSettingsUpdated);
-
-    return () => {
-      window.removeEventListener("shotwright-runtime-settings-updated", handleRuntimeSettingsUpdated);
-    };
-  }, []);
-
-  const runtimeLabel = runtimeSettings
-    ? `${runtimeSettings.copilot_model} · ${copy.common.reasoningEfforts[runtimeSettings.copilot_reasoning_effort]}`
-    : copy.common.copilot;
 
   return (
     <div className="workbench">
@@ -83,7 +51,7 @@ function WorkbenchApp() {
         </div>
         <div className="statusbar-group">
           <span>{copy.app.agent}</span>
-          <span>{runtimeLabel}</span>
+          <span>{copy.common.copilot}</span>
           <span>{currentSection}</span>
         </div>
       </footer>

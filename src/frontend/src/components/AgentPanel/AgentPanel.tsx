@@ -1,4 +1,6 @@
 import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   createSession,
   deleteSession,
@@ -6,12 +8,14 @@ import {
   getAgentContext,
   getAgentEvents,
   getAgentMessages,
+  getCopilotModelOptions,
   getSessions,
   sendChatTurn,
   stopContainer,
+  updateSession,
   uploadProject,
 } from "../../services/api";
-import { AgentContext, ChatMessage, ProjectInfo, Session, SessionEvent } from "../../types";
+import { AgentContext, ChatMessage, CopilotModelOption, ProjectInfo, ReasoningEffort, Session, SessionEvent } from "../../types";
 import { TranslationCopy, useI18n } from "../../i18n";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
@@ -21,7 +25,9 @@ type UiErrorKey =
   | "failedLoadSessions"
   | "failedLoadSessionData"
   | "failedCreateSession"
+  | "failedLoadModelOptions"
   | "failedSendPrompt"
+  | "failedSaveSessionSettings"
   | "uploadFailed"
   | "exportFailed"
   | "failedStopContainer"
@@ -30,6 +36,13 @@ type UiErrorKey =
 type UiError =
   | { type: "api"; message: string }
   | { type: "key"; key: UiErrorKey };
+
+type MetaChip = {
+  key: string;
+  label: string;
+  value: string;
+  tone: "primary" | "accent" | "neutral" | "muted" | "danger" | "success";
+};
 
 function buildUiError(err: any, fallbackKey: UiErrorKey): UiError {
   const detail = err?.response?.data?.detail;
@@ -45,10 +58,20 @@ function getUiErrorMessage(error: UiError | null, copy: TranslationCopy) {
   return error.type === "api" ? error.message : copy.errors[error.key];
 }
 
+function parseDateValue(value: string) {
+  const normalizedValue = /(?:[zZ]|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
+  return new Date(normalizedValue);
+}
+
+function getPreferredTimeZone(locale: string) {
+  if (locale === "zh-CN") return "Asia/Shanghai";
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
 function formatDateTime(value: string | null | undefined, locale: string, fallback: string) {
   if (!value) return fallback;
 
-  const date = new Date(value);
+  const date = parseDateValue(value);
   if (Number.isNaN(date.getTime())) return value;
 
   return new Intl.DateTimeFormat(locale, {
@@ -56,6 +79,23 @@ function formatDateTime(value: string | null | undefined, locale: string, fallba
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
+    timeZone: getPreferredTimeZone(locale),
+  }).format(date);
+}
+
+function formatClockTime(value: string | null | undefined, locale: string, fallback: string) {
+  if (!value) return fallback;
+
+  const date = parseDateValue(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat(locale, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZone: getPreferredTimeZone(locale),
   }).format(date);
 }
 
@@ -71,6 +111,20 @@ function shortenId(value: string | null | undefined, fallback: string, size = 12
   return value.length <= size ? value : `${value.slice(0, size)}...`;
 }
 
+function hasEventData(event: SessionEvent) {
+  return Boolean(event.data && Object.keys(event.data).length);
+}
+
+function buildModelFallbackOption(session: Session): CopilotModelOption {
+  return {
+    id: session.copilot_model,
+    name: session.copilot_model,
+    supports_reasoning_effort: Boolean(session.copilot_reasoning_effort),
+    supported_reasoning_efforts: session.copilot_reasoning_effort ? [session.copilot_reasoning_effort] : [],
+    default_reasoning_effort: session.copilot_reasoning_effort,
+  };
+}
+
 export default function AgentPanel() {
   const { copy, locale } = useI18n();
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -81,8 +135,14 @@ export default function AgentPanel() {
   const [prompt, setPrompt] = useState("");
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
+  const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
+  const [draftModel, setDraftModel] = useState("");
+  const [draftReasoning, setDraftReasoning] = useState<ReasoningEffort | null>(null);
+  const [savingSessionSettings, setSavingSessionSettings] = useState(false);
   const [sessionsError, setSessionsError] = useState<UiError | null>(null);
   const [panelError, setPanelError] = useState<UiError | null>(null);
+  const [sessionSettingsError, setSessionSettingsError] = useState<UiError | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const sessionStatusLabels = copy.status.session;
   const projectStatusLabels = copy.status.project;
@@ -90,6 +150,7 @@ export default function AgentPanel() {
   const starterPrompts = copy.agent.prompts;
   const sessionsErrorMessage = getUiErrorMessage(sessionsError, copy);
   const panelErrorMessage = getUiErrorMessage(panelError, copy);
+  const sessionSettingsErrorMessage = getUiErrorMessage(sessionSettingsError, copy);
 
   const sortedEvents = useMemo(
     () => [...events].sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime()),
@@ -102,10 +163,107 @@ export default function AgentPanel() {
     return context.projects.find((project) => project._id === context.session.active_project_id) ?? null;
   }, [context?.projects, context?.session.active_project_id]);
 
+  const sessionModelOptions = useMemo(() => {
+    if (!currentSession) return modelOptions;
+    if (modelOptions.some((option) => option.id === currentSession.copilot_model)) return modelOptions;
+    return [buildModelFallbackOption(currentSession), ...modelOptions];
+  }, [currentSession, modelOptions]);
+
+  const selectedModelOption = useMemo(() => {
+    if (!draftModel) return null;
+    return sessionModelOptions.find((option) => option.id === draftModel) ?? null;
+  }, [draftModel, sessionModelOptions]);
+
+  const currentModelLabel = useMemo(() => {
+    if (!currentSession) return copy.common.copilot;
+    return sessionModelOptions.find((option) => option.id === currentSession.copilot_model)?.name || currentSession.copilot_model;
+  }, [copy.common.copilot, currentSession, sessionModelOptions]);
+
+  const selectedReasoningOptions = selectedModelOption?.supported_reasoning_efforts ?? [];
+  const reasoningSupported = Boolean(selectedModelOption?.supports_reasoning_effort && selectedReasoningOptions.length);
+  const effectiveDraftReasoning = reasoningSupported ? draftReasoning : null;
+  const previewVideoSrc = context?.latest_render_url || context?.latest_stream_url || null;
+  const previewVideoFormat = context?.latest_render_url ? "mp4" : context?.latest_stream_url ? "hls" : null;
+  const sessionSettingsDirty = Boolean(currentSession) && (
+    draftModel !== (currentSession?.copilot_model ?? "") ||
+    effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
+  );
+
   const sessionStatus = context?.session.status || currentSession?.status || "idle";
   const latestMessage = messages.length ? messages[messages.length - 1] : null;
   const showStarterCards = Boolean(currentSession) && messages.length === 0;
   const showComposerSuggestions = Boolean(currentSession) && messages.length > 0;
+  const metaChips = useMemo((): MetaChip[] => {
+    if (!currentSession) {
+      return [
+        {
+          key: "session",
+          label: copy.agent.sessionPanelFields.status,
+          value: copy.agent.noActiveSession,
+          tone: "muted",
+        },
+      ];
+    }
+
+    const chips: MetaChip[] = [];
+
+    chips.push({
+      key: "model",
+      label: copy.agent.sessionSettingsFields.model,
+      value: currentModelLabel,
+      tone: "primary",
+    });
+
+    if (currentSession.copilot_reasoning_effort) {
+      chips.push({
+        key: "reasoning",
+        label: copy.agent.sessionSettingsFields.reasoning,
+        value: copy.common.reasoningEfforts[currentSession.copilot_reasoning_effort],
+        tone: "accent",
+      });
+    }
+
+    chips.push({
+      key: "status",
+      label: copy.agent.sessionPanelFields.status,
+      value: sessionStatusLabels[sessionStatus],
+      tone: sessionStatus === "error" ? "danger" : sessionStatus === "running" ? "success" : "neutral",
+    });
+
+    chips.push({
+      key: "project",
+      label: copy.agent.sessionPanelFields.activeProject,
+      value: activeProject?.filename || copy.common.notSpecified,
+      tone: "muted",
+    });
+
+    if (context?.container) {
+      chips.push({
+        key: "container",
+        label: copy.agent.containerPrefix,
+        value: containerStatusLabels[context.container.status],
+        tone: "neutral",
+      });
+    }
+
+    return chips;
+  }, [
+    activeProject?.filename,
+    containerStatusLabels,
+    context?.container,
+    copy.agent.containerPrefix,
+    copy.agent.noActiveSession,
+    copy.agent.sessionPanelFields.activeProject,
+    copy.agent.sessionPanelFields.status,
+    copy.agent.sessionSettingsFields.model,
+    copy.agent.sessionSettingsFields.reasoning,
+    copy.common.notSpecified,
+    copy.common.reasoningEfforts,
+    currentModelLabel,
+    currentSession,
+    sessionStatus,
+    sessionStatusLabels,
+  ]);
 
   const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -133,6 +291,19 @@ export default function AgentPanel() {
     }
   };
 
+  const loadModelOptions = async () => {
+    setModelOptionsLoading(true);
+    try {
+      const res = await getCopilotModelOptions();
+      setModelOptions(res.data);
+      setSessionSettingsError(null);
+    } catch (err: any) {
+      setSessionSettingsError(buildUiError(err, "failedLoadModelOptions"));
+    } finally {
+      setModelOptionsLoading(false);
+    }
+  };
+
   const loadCurrentSession = async (sessionId: string) => {
     const [contextRes, messageRes, eventRes] = await Promise.all([
       getAgentContext(sessionId),
@@ -142,12 +313,29 @@ export default function AgentPanel() {
     setContext(contextRes.data);
     setMessages(messageRes.data);
     setEvents(eventRes.data);
+    setCurrentSession((previous) =>
+      previous && previous._id === contextRes.data.session._id ? contextRes.data.session : previous
+    );
     setPanelError(null);
   };
 
   useEffect(() => {
     fetchSessions();
+    loadModelOptions();
   }, []);
+
+  useEffect(() => {
+    if (!currentSession) {
+      setDraftModel("");
+      setDraftReasoning(null);
+      setSessionSettingsError(null);
+      return;
+    }
+
+    setDraftModel(currentSession.copilot_model);
+    setDraftReasoning(currentSession.copilot_reasoning_effort);
+    setSessionSettingsError(null);
+  }, [currentSession?._id, currentSession?.copilot_model, currentSession?.copilot_reasoning_effort]);
 
   useEffect(() => {
     if (!messages.length) return;
@@ -217,6 +405,47 @@ export default function AgentPanel() {
       setPanelError(buildUiError(err, "failedSendPrompt"));
     }
     setSending(false);
+  };
+
+  const handleModelChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextModel = event.target.value;
+    const nextModelOption = sessionModelOptions.find((option) => option.id === nextModel) ?? null;
+
+    let nextReasoning: ReasoningEffort | null = draftReasoning;
+    if (!nextModelOption?.supports_reasoning_effort || !nextModelOption.supported_reasoning_efforts.length) {
+      nextReasoning = null;
+    } else if (!nextReasoning || !nextModelOption.supported_reasoning_efforts.includes(nextReasoning)) {
+      nextReasoning = nextModelOption.default_reasoning_effort ?? nextModelOption.supported_reasoning_efforts[0] ?? null;
+    }
+
+    setDraftModel(nextModel);
+    setDraftReasoning(nextReasoning);
+    setSessionSettingsError(null);
+  };
+
+  const handleReasoningChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextValue = event.target.value as ReasoningEffort | "";
+    setDraftReasoning(nextValue || null);
+    setSessionSettingsError(null);
+  };
+
+  const handleSaveSessionSettings = async () => {
+    if (!currentSession || !draftModel) return;
+
+    setSavingSessionSettings(true);
+    try {
+      const response = await updateSession(currentSession._id, {
+        copilot_model: draftModel,
+        copilot_reasoning_effort: effectiveDraftReasoning,
+      });
+      setCurrentSession(response.data);
+      await Promise.all([loadCurrentSession(response.data._id), fetchSessions()]);
+      setSessionSettingsError(null);
+    } catch (err: any) {
+      setSessionSettingsError(buildUiError(err, "failedSaveSessionSettings"));
+    } finally {
+      setSavingSessionSettings(false);
+    }
   };
 
   const handleUpload = async (file: File) => {
@@ -320,12 +549,12 @@ export default function AgentPanel() {
 
       <section className="chat-stage">
         <header className="chat-stage-header">
-          <div>
+          <div className="chat-stage-heading">
             <span className="eyebrow">{copy.agent.eyebrow}</span>
             <h1>{currentSession ? currentSession.name : copy.agent.title.empty}</h1>
           </div>
           <div className="chat-stage-actions">
-            <label className="toolbar-button file-action">
+            <label className="toolbar-button chat-stage-action-button file-action">
               {uploading ? copy.common.uploading : copy.common.uploadProject}
               <input
                 type="file"
@@ -335,7 +564,7 @@ export default function AgentPanel() {
               />
             </label>
             {currentSession && (
-              <button className="btn-danger" onClick={() => handleDeleteSession(currentSession._id)}>
+              <button className="btn-danger chat-stage-action-button" onClick={() => handleDeleteSession(currentSession._id)}>
                 {copy.common.deleteSession}
               </button>
             )}
@@ -343,11 +572,12 @@ export default function AgentPanel() {
         </header>
 
         <div className="chat-stage-meta">
-          <span className="meta-chip">{copy.app.agent}</span>
-          <span className="meta-chip">{copy.common.copilot}</span>
-          <span className="meta-chip">{currentSession ? sessionStatusLabels[sessionStatus] : copy.agent.noActiveSession}</span>
-          <span className="meta-chip">{activeProject?.filename || copy.agent.noActiveProject}</span>
-          {context?.container && <span className="meta-chip">{copy.agent.containerPrefix} · {containerStatusLabels[context.container.status]}</span>}
+          {metaChips.map((chip) => (
+            <span key={chip.key} className={`meta-chip tone-${chip.tone}`}>
+              <span className="meta-chip-label">{chip.label}</span>
+              <span className="meta-chip-value">{chip.value}</span>
+            </span>
+          ))}
         </div>
 
         <div className="chat-transcript">
@@ -360,8 +590,12 @@ export default function AgentPanel() {
                     <span className="chat-message-author">{message.role === "user" ? copy.agent.you : copy.agent.assistant}</span>
                     <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
                   </div>
-                  <div className="chat-message-body">
-                    <p>{message.content || copy.common.emptyResponse}</p>
+                  <div className="chat-message-body markdown-content">
+                    {message.content ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                    ) : (
+                      <p>{copy.common.emptyResponse}</p>
+                    )}
                   </div>
                 </article>
               ))
@@ -433,43 +667,116 @@ export default function AgentPanel() {
             </div>
           )}
 
-          <textarea
-            id="agent-prompt"
-            rows={5}
-            placeholder={
-              currentSession
-                ? copy.agent.textareaActive
-                : copy.agent.textareaInactive
-            }
-            value={prompt}
-            disabled={!currentSession}
-            onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
-            onKeyDown={handlePromptKeyDown}
-          />
+          <div className="composer-card">
+            <textarea
+              id="agent-prompt"
+              rows={5}
+              className="composer-textarea"
+              placeholder={
+                currentSession
+                  ? copy.agent.textareaActive
+                  : copy.agent.textareaInactive
+              }
+              value={prompt}
+              disabled={!currentSession}
+              onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
+              onKeyDown={handlePromptKeyDown}
+            />
 
-          <div className="composer-footer">
-            <div className="composer-meta">
-              <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
-              <span className="composer-hint">{copy.common.autoRefreshHint}</span>
-            </div>
-            <div className="composer-actions">
-              <button className="btn-primary send-button" onClick={handleSend} disabled={!currentSession || sending || !prompt.trim()}>
-                {sending ? copy.common.working : copy.common.send}
-              </button>
+            <div className="composer-footer">
+              <div className="composer-meta">
+                <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
+                <span className="composer-hint">{copy.common.autoRefreshHint}</span>
+              </div>
+              <div className="composer-actions">
+                <button className="btn-primary send-button" onClick={handleSend} disabled={!currentSession || sending || !prompt.trim()}>
+                  {sending ? copy.common.working : copy.common.send}
+                </button>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      <aside className="context-sidebar">
+      <aside className="context-sidebar" data-testid="session-context-sidebar">
         {currentSession ? (
           <>
-            <div className="card context-panel">
+            <div className="card context-panel session-overview-panel">
               <div className="panel-heading">
                 <div>
                   <span className="eyebrow">{copy.agent.sessionPanelEyebrow}</span>
                   <h3>{currentSession.name}</h3>
                   <p className="panel-description">{copy.agent.sessionPanelDescription}</p>
+                </div>
+              </div>
+              <div className="session-settings-block" data-testid="session-settings-card">
+                <div className="session-settings-heading">
+                  <div>
+                    <span className="eyebrow">{copy.agent.sessionSettingsEyebrow}</span>
+                    <h4>{copy.agent.sessionSettingsTitle}</h4>
+                    <p className="panel-description">{copy.agent.sessionSettingsDescription}</p>
+                  </div>
+                </div>
+                <div className="session-settings-grid">
+                  <label className="settings-field">
+                    <span className="settings-label">{copy.agent.sessionSettingsFields.model}</span>
+                    <div className={`settings-control-shell${modelOptionsLoading || !sessionModelOptions.length ? " is-disabled" : ""}`}>
+                      <select
+                        className="settings-select"
+                        data-testid="session-model-select"
+                        value={draftModel}
+                        onChange={handleModelChange}
+                        disabled={modelOptionsLoading || !sessionModelOptions.length}
+                      >
+                        {sessionModelOptions.length ? (
+                          sessionModelOptions.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.name}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="">{copy.agent.sessionSettingsNoOptions}</option>
+                        )}
+                      </select>
+                    </div>
+                  </label>
+
+                  <label className="settings-field">
+                    <span className="settings-label">{copy.agent.sessionSettingsFields.reasoning}</span>
+                    <div className={`settings-control-shell${!reasoningSupported ? " is-disabled" : ""}`}>
+                      <select
+                        className="settings-select"
+                        data-testid="session-reasoning-select"
+                        value={draftReasoning ?? ""}
+                        onChange={handleReasoningChange}
+                        disabled={!reasoningSupported}
+                      >
+                        {reasoningSupported ? (
+                          selectedReasoningOptions.map((effort) => (
+                            <option key={effort} value={effort}>
+                              {copy.common.reasoningEfforts[effort]}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
+                        )}
+                      </select>
+                    </div>
+                  </label>
+                </div>
+                <p className="settings-help">
+                  {modelOptionsLoading ? copy.agent.sessionSettingsLoading : copy.agent.sessionSettingsHint}
+                </p>
+                {sessionSettingsErrorMessage && <div className="inline-alert">{sessionSettingsErrorMessage}</div>}
+                <div className="session-settings-actions">
+                  <button
+                    className="btn-primary btn-sm"
+                    data-testid="session-settings-save"
+                    onClick={handleSaveSessionSettings}
+                    disabled={savingSessionSettings || !draftModel || !sessionSettingsDirty}
+                  >
+                    {savingSessionSettings ? copy.common.saving : copy.common.save}
+                  </button>
                 </div>
               </div>
               <dl className="fact-list">
@@ -507,9 +814,15 @@ export default function AgentPanel() {
 
             <ContainerManager containers={context?.container ? [context.container] : []} onStop={handleStopContainer} />
 
-            {context?.latest_stream_url && <VideoPlayer src={context.latest_stream_url} />}
+            {previewVideoSrc && previewVideoFormat && (
+              <VideoPlayer
+                src={previewVideoSrc}
+                format={previewVideoFormat}
+                downloadUrl={context?.latest_render_url}
+              />
+            )}
 
-            <div className="card context-panel">
+            <div className="card context-panel resources-panel">
               <div className="panel-heading">
                 <div>
                   <span className="eyebrow">{copy.agent.assetsEyebrow}</span>
@@ -519,7 +832,7 @@ export default function AgentPanel() {
               </div>
 
               {context?.projects.length ? (
-                <div className="project-list">
+                <div className="project-list panel-list-scroll">
                   {context.projects.map((project) => (
                     <div key={project._id} className="project-item">
                       <div className="project-copy">
@@ -543,7 +856,7 @@ export default function AgentPanel() {
               )}
             </div>
 
-            <div className="card context-panel">
+            <div className="card context-panel timeline-panel">
               <div className="panel-heading">
                 <div>
                   <span className="eyebrow">{copy.agent.executionEyebrow}</span>
@@ -552,13 +865,24 @@ export default function AgentPanel() {
                 <span className="panel-count">{sortedEvents.length}</span>
               </div>
               {sortedEvents.length ? (
-                <div className="timeline-list">
+                <div className="timeline-list panel-list-scroll" data-testid="session-timeline">
                   {sortedEvents.map((event) => (
-                    <div key={event._id} className="timeline-item">
-                      <div className="timeline-type">{event.type}</div>
-                      <div className="timeline-summary">{event.summary}</div>
-                      <div className="timeline-time">{new Date(event.created_at).toLocaleTimeString(locale)}</div>
-                    </div>
+                    <details key={event._id} className="timeline-entry" data-testid="timeline-entry">
+                      <summary className="timeline-entry-summary">
+                        <span className="timeline-chevron" aria-hidden="true" />
+                        <div className="timeline-summary-stack">
+                          <div className="timeline-summary-topline">
+                            <span className="timeline-type">{event.type}</span>
+                            <span className="timeline-time">{formatClockTime(event.created_at, locale, copy.common.notStarted)}</span>
+                          </div>
+                          <div className="timeline-summary-preview">{event.summary}</div>
+                        </div>
+                      </summary>
+                      <div className="timeline-entry-body">
+                        <p className="timeline-summary-full">{event.summary}</p>
+                        {hasEventData(event) && <pre className="timeline-event-data">{JSON.stringify(event.data, null, 2)}</pre>}
+                      </div>
+                    </details>
                   ))}
                 </div>
               ) : (

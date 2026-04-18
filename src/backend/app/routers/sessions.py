@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
+from pymongo import ReturnDocument
 
+from app.config import settings
 from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
-from app.models.session import SessionCreate, SessionInDB, SessionStatus, SessionUpdate
+from app.models.session import CopilotModelOption, SessionCreate, SessionInDB, SessionStatus, SessionUpdate
 from app.services import container_manager as cm
 from app.services.copilot_runtime import runtime_manager
 
@@ -20,6 +22,8 @@ async def create_session(body: SessionCreate):
         "_id": str(uuid4()),
         "name": body.name,
         "status": SessionStatus.idle.value,
+        "copilot_model": settings.copilot_model,
+        "copilot_reasoning_effort": settings.copilot_reasoning_effort,
         "copilot_session_id": None,
         "container_id": None,
         "active_project_id": None,
@@ -32,6 +36,11 @@ async def create_session(body: SessionCreate):
     col = get_session_collection()
     await col.insert_one(doc)
     return doc
+
+
+@router.get("/model-options", response_model=list[CopilotModelOption])
+async def list_model_options():
+    return await runtime_manager.list_available_models()
 
 
 @router.get("", response_model=list[SessionInDB])
@@ -52,14 +61,39 @@ async def get_session(session_id: str):
 @router.patch("/{session_id}", response_model=SessionInDB)
 async def update_session(session_id: str, body: SessionUpdate):
     col = get_session_collection()
-    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    current = await col.find_one({"_id": session_id})
+    if not current:
+        raise HTTPException(404, "Session not found")
+
+    updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(400, "Nothing to update")
+
+    if "copilot_model" in updates or "copilot_reasoning_effort" in updates:
+        requested_model = (updates.get("copilot_model") or current.get("copilot_model") or settings.copilot_model).strip()
+        requested_reasoning = (
+            updates["copilot_reasoning_effort"]
+            if "copilot_reasoning_effort" in updates
+            else current.get("copilot_reasoning_effort")
+        )
+
+        try:
+            normalized_model, normalized_reasoning = await runtime_manager.validate_model_choice(
+                requested_model,
+                requested_reasoning,
+            )
+            await runtime_manager.apply_session_settings(session_id, normalized_model, normalized_reasoning)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+        updates["copilot_model"] = normalized_model
+        updates["copilot_reasoning_effort"] = normalized_reasoning
+
     updates["updated_at"] = datetime.now(timezone.utc)
     result = await col.find_one_and_update(
         {"_id": session_id},
         {"$set": updates},
-        return_document=True,
+        return_document=ReturnDocument.AFTER,
     )
     if not result:
         raise HTTPException(404, "Session not found")

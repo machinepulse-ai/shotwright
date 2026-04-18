@@ -2,6 +2,8 @@ export interface Session {
   _id: string;
   name: string;
   status: "idle" | "running" | "awaiting_input" | "error" | "closed";
+  copilot_model: string;
+  copilot_reasoning_effort: ReasoningEffort | null;
   copilot_session_id: string | null;
   container_id: string | null;
   active_project_id: string | null;
@@ -13,6 +15,14 @@ export interface Session {
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
+export interface CopilotModelOption {
+  id: string;
+  name: string;
+  supports_reasoning_effort: boolean;
+  supported_reasoning_efforts: ReasoningEffort[];
+  default_reasoning_effort: ReasoningEffort | null;
+}
 
 export interface Container {
   _id: string;
@@ -64,6 +74,7 @@ export interface AgentContext {
   container: Container | null;
   projects: ProjectInfo[];
   latest_render_path: string | null;
+  latest_render_url: string | null;
   latest_stream_url: string | null;
 }
 
@@ -81,17 +92,10 @@ export interface DashboardData {
 
 export interface AdminSettings {
   github_token_set: boolean;
-  copilot_model: string;
-  copilot_reasoning_effort: ReasoningEffort;
   copilot_cli_path: string;
   copilot_workspace_root: string;
   copilot_use_logged_in_user: boolean;
   copilot_http_proxy: string;
   copilot_https_proxy: string;
   copilot_no_proxy: string;
-}
-
-export interface PublicRuntimeSettings {
-  copilot_model: string;
-  copilot_reasoning_effort: ReasoningEffort;
 }

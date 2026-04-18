@@ -5,15 +5,31 @@ import "./VideoPlayer.css";
 
 interface VideoPlayerProps {
   src: string;
+  format: "mp4" | "hls";
+  downloadUrl?: string | null;
 }
 
-export default function VideoPlayer({ src }: VideoPlayerProps) {
+export default function VideoPlayer({ src, format, downloadUrl }: VideoPlayerProps) {
   const { copy } = useI18n();
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return;
+
+    const resetVideo = () => {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    };
+
+    resetVideo();
+
+    if (format === "mp4") {
+      video.src = src;
+      video.load();
+      return () => resetVideo();
+    }
 
     if (Hls.isSupported()) {
       const hls = new Hls();
@@ -22,15 +38,21 @@ export default function VideoPlayer({ src }: VideoPlayerProps) {
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         video.play().catch(() => {});
       });
-      return () => hls.destroy();
+      return () => {
+        hls.destroy();
+        resetVideo();
+      };
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       // Safari native HLS
       video.src = src;
       video.addEventListener("loadedmetadata", () => {
         video.play().catch(() => {});
       });
+      return () => resetVideo();
     }
-  }, [src]);
+
+    return () => resetVideo();
+  }, [format, src]);
 
   return (
     <div className="video-player card">
@@ -39,8 +61,14 @@ export default function VideoPlayer({ src }: VideoPlayerProps) {
           <span className="eyebrow">{copy.video.eyebrow}</span>
           <h3>{copy.video.title}</h3>
         </div>
+        <div className="video-player-actions">
+          <span className={`video-source-badge format-${format}`}>{format === "mp4" ? copy.video.sourceMp4 : copy.video.sourceHls}</span>
+          <a className="ghost-button btn-sm" href={downloadUrl || src} target="_blank" rel="noreferrer">
+            {copy.video.open}
+          </a>
+        </div>
       </div>
-      <video ref={videoRef} controls className="video-element" />
+      <video ref={videoRef} controls preload="metadata" className="video-element" />
     </div>
   );
 }
