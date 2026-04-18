@@ -26,6 +26,7 @@ Write-Host '[dev] Starting frontend (webpack-dev-server) ...' -ForegroundColor G
 $frontendJob = Start-Job -ScriptBlock {
     param($dir)
     Set-Location $dir
+    $env:SHOTWRIGHT_API_PROXY_TARGET = 'http://127.0.0.1:8000'
     & npm run dev
 } -ArgumentList "$root\frontend"
 

@@ -25,10 +25,14 @@ class Settings(BaseSettings):
 
     # --- Copilot ---
     github_token: str = ""
-    copilot_model: str = "gpt-5"
+    copilot_model: str = "gpt-5.4"
     copilot_reasoning_effort: str = "high"
     copilot_cli_path: str = ""
     copilot_workspace_root: str = "C:\\workspace"
+    copilot_use_logged_in_user: bool = False
+    copilot_http_proxy: str = ""
+    copilot_https_proxy: str = ""
+    copilot_no_proxy: str = ""
 
     # --- Paths ---
     upload_dir: str = "C:\\data\\uploads"

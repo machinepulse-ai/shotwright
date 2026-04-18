@@ -43,12 +43,15 @@ export const getAgentMessages = (sessionId: string) => api.get(`/agent/sessions/
 export const getAgentEvents = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/events`);
 export const sendChatTurn = (sessionId: string, content: string) =>
   api.post(`/agent/sessions/${sessionId}/messages`, { content });
+export const getPublicRuntimeSettings = () => api.get("/agent/runtime-settings");
 
 // --- Admin ---
 export const adminLogin = (password: string) => api.post("/admin/login", { password });
 export const getAdminSettings = () => api.get("/admin/settings");
 export const updateGithubToken = (token: string) =>
   api.put("/admin/github-token", { github_token: token });
+export const updateAdminSettings = (settings: Record<string, unknown>) =>
+  api.put("/admin/settings", settings);
 export const getAdminDashboard = () => api.get("/admin/dashboard");
 
 export default api;

@@ -1,15 +1,12 @@
 .video-player {
-  margin-top: 1rem;
-}
-
-.video-player h3 {
-  font-size: 0.9rem;
-  margin-bottom: 0.75rem;
+  overflow: hidden;
 }
 
 .video-element {
   width: 100%;
+  aspect-ratio: 16 / 9;
   max-height: 480px;
   border-radius: 6px;
   background: #000;
+  border: 1px solid var(--border);
 }

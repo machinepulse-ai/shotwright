@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -71,6 +72,13 @@ def _event_summary(event_type: str, data: dict) -> str:
     return event_type
 
 
+def _first_non_empty(*values: str | None) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 class _RuntimeHandle:
     def __init__(self, app_session_id: str, client: CopilotClient, session, unsubscribe) -> None:
         self.app_session_id = app_session_id
@@ -97,6 +105,62 @@ class ShotwrightCopilotRuntimeManager:
         doc = await get_admin_collection().find_one({"_id": "settings"})
         token = doc.get("github_token") if doc else None
         return token or None
+
+    async def _resolve_runtime_settings(self) -> dict[str, str | bool]:
+        doc = await get_admin_collection().find_one({"_id": "settings"}) or {}
+        return {
+            "copilot_model": _first_non_empty(doc.get("copilot_model"), settings.copilot_model) or "gpt-5.4",
+            "copilot_reasoning_effort": _first_non_empty(
+                doc.get("copilot_reasoning_effort"),
+                settings.copilot_reasoning_effort,
+            )
+            or "high",
+            "copilot_cli_path": _first_non_empty(doc.get("copilot_cli_path"), settings.copilot_cli_path),
+            "copilot_workspace_root": _first_non_empty(
+                doc.get("copilot_workspace_root"),
+                settings.copilot_workspace_root,
+            )
+            or "C:\\workspace",
+            "copilot_use_logged_in_user": bool(
+                doc.get("copilot_use_logged_in_user", settings.copilot_use_logged_in_user)
+            ),
+            "copilot_http_proxy": _first_non_empty(
+                doc.get("copilot_http_proxy"),
+                settings.copilot_http_proxy,
+                os.environ.get("HTTP_PROXY"),
+                os.environ.get("http_proxy"),
+            ),
+            "copilot_https_proxy": _first_non_empty(
+                doc.get("copilot_https_proxy"),
+                settings.copilot_https_proxy,
+                os.environ.get("HTTPS_PROXY"),
+                os.environ.get("https_proxy"),
+            ),
+            "copilot_no_proxy": _first_non_empty(
+                doc.get("copilot_no_proxy"),
+                settings.copilot_no_proxy,
+                os.environ.get("NO_PROXY"),
+                os.environ.get("no_proxy"),
+            ),
+        }
+
+    def _build_subprocess_env(self, runtime_settings: dict[str, str | bool]) -> dict[str, str]:
+        env = dict(os.environ)
+        proxy_map = {
+            "http_proxy": runtime_settings["copilot_http_proxy"],
+            "HTTP_PROXY": runtime_settings["copilot_http_proxy"],
+            "https_proxy": runtime_settings["copilot_https_proxy"],
+            "HTTPS_PROXY": runtime_settings["copilot_https_proxy"],
+            "no_proxy": runtime_settings["copilot_no_proxy"],
+            "NO_PROXY": runtime_settings["copilot_no_proxy"],
+        }
+        for key, value in proxy_map.items():
+            if isinstance(value, str) and value.strip():
+                env[key] = value.strip()
+        return env
+
+    async def get_runtime_settings(self) -> dict[str, str | bool]:
+        return await self._resolve_runtime_settings()
 
     def _system_prompt(self) -> str:
         return (
@@ -167,16 +231,18 @@ class ShotwrightCopilotRuntimeManager:
         if not session_doc:
             raise ValueError("Session not found")
 
+        runtime_settings = await self._resolve_runtime_settings()
         github_token = await self._resolve_github_token()
-        if not github_token:
+        if not github_token and not runtime_settings["copilot_use_logged_in_user"]:
             raise ValueError("GitHub token is not configured for Copilot SDK")
 
         client = CopilotClient(
             SubprocessConfig(
                 github_token=github_token,
-                cli_path=settings.copilot_cli_path or None,
-                cwd=settings.copilot_workspace_root,
-                use_logged_in_user=False,
+                cli_path=(runtime_settings["copilot_cli_path"] or None),
+                cwd=str(runtime_settings["copilot_workspace_root"]),
+                env=self._build_subprocess_env(runtime_settings),
+                use_logged_in_user=bool(runtime_settings["copilot_use_logged_in_user"]),
             )
         )
         await client.start()
@@ -184,8 +250,8 @@ class ShotwrightCopilotRuntimeManager:
         copilot_session_id = session_doc.get("copilot_session_id") or f"shotwright-{app_session_id}"
         session_kwargs = {
             "on_permission_request": PermissionHandler.approve_all,
-            "model": settings.copilot_model,
-            "reasoning_effort": settings.copilot_reasoning_effort,
+            "model": runtime_settings["copilot_model"],
+            "reasoning_effort": runtime_settings["copilot_reasoning_effort"],
             "streaming": True,
             "available_tools": [],
             "tools": build_shotwright_tools(app_session_id),

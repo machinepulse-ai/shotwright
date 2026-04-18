@@ -4,7 +4,7 @@ const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 
 const isProd = process.env.NODE_ENV === "production";
 const devServerPort = Number(process.env.PORT || 3000);
-const apiProxyTarget = process.env.SHOTWRIGHT_API_PROXY_TARGET || "http://backend:8000";
+const apiProxyTarget = process.env.SHOTWRIGHT_API_PROXY_TARGET || "http://127.0.0.1:8000";
 
 module.exports = {
   entry: "./src/index.tsx",

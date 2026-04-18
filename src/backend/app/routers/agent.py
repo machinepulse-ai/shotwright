@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile
 
 from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
+from app.models.admin import PublicRuntimeSettings
 from app.models.chat import ChatMessage, ChatTurnCreate, ChatTurnResult, SessionEvent
 from app.models.container import ContainerInfo
 from app.models.project import ProjectInfo
@@ -12,6 +13,15 @@ from app.services import container_manager as cm
 from app.services import project_manager as pm
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+@router.get("/runtime-settings", response_model=PublicRuntimeSettings)
+async def get_runtime_settings():
+    runtime_settings = await runtime_manager.get_runtime_settings()
+    return PublicRuntimeSettings(
+        copilot_model=runtime_settings["copilot_model"],
+        copilot_reasoning_effort=runtime_settings["copilot_reasoning_effort"],
+    )
 
 
 @router.post("/sessions/{session_id}/messages", response_model=ChatTurnResult)

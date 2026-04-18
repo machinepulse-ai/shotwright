@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import Hls from "hls.js";
+import { useI18n } from "../../i18n";
 import "./VideoPlayer.css";
 
 interface VideoPlayerProps {
@@ -7,6 +8,7 @@ interface VideoPlayerProps {
 }
 
 export default function VideoPlayer({ src }: VideoPlayerProps) {
+  const { copy } = useI18n();
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -32,7 +34,12 @@ export default function VideoPlayer({ src }: VideoPlayerProps) {
 
   return (
     <div className="video-player card">
-      <h3>Render Preview</h3>
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">{copy.video.eyebrow}</span>
+          <h3>{copy.video.title}</h3>
+        </div>
+      </div>
       <video ref={videoRef} controls className="video-element" />
     </div>
   );

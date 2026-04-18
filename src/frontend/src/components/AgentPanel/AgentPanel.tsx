@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   createSession,
   deleteSession,
@@ -12,11 +12,67 @@ import {
   uploadProject,
 } from "../../services/api";
 import { AgentContext, ChatMessage, ProjectInfo, Session, SessionEvent } from "../../types";
+import { TranslationCopy, useI18n } from "../../i18n";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
 import "./AgentPanel.css";
 
+type UiErrorKey =
+  | "failedLoadSessions"
+  | "failedLoadSessionData"
+  | "failedCreateSession"
+  | "failedSendPrompt"
+  | "uploadFailed"
+  | "exportFailed"
+  | "failedStopContainer"
+  | "failedDeleteSession";
+
+type UiError =
+  | { type: "api"; message: string }
+  | { type: "key"; key: UiErrorKey };
+
+function buildUiError(err: any, fallbackKey: UiErrorKey): UiError {
+  const detail = err?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) {
+    return { type: "api", message: detail };
+  }
+
+  return { type: "key", key: fallbackKey };
+}
+
+function getUiErrorMessage(error: UiError | null, copy: TranslationCopy) {
+  if (!error) return null;
+  return error.type === "api" ? error.message : copy.errors[error.key];
+}
+
+function formatDateTime(value: string | null | undefined, locale: string, fallback: string) {
+  if (!value) return fallback;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return new Intl.DateTimeFormat(locale, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function basename(value: string | null | undefined, fallback: string) {
+  if (!value) return fallback;
+
+  const parts = value.split(/[\\/]/);
+  return parts[parts.length - 1] || value;
+}
+
+function shortenId(value: string | null | undefined, fallback: string, size = 12) {
+  if (!value) return fallback;
+  return value.length <= size ? value : `${value.slice(0, size)}...`;
+}
+
 export default function AgentPanel() {
+  const { copy, locale } = useI18n();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [context, setContext] = useState<AgentContext | null>(null);
@@ -25,18 +81,55 @@ export default function AgentPanel() {
   const [prompt, setPrompt] = useState("");
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [sessionsError, setSessionsError] = useState<UiError | null>(null);
+  const [panelError, setPanelError] = useState<UiError | null>(null);
+  const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const sessionStatusLabels = copy.status.session;
+  const projectStatusLabels = copy.status.project;
+  const containerStatusLabels = copy.status.container;
+  const starterPrompts = copy.agent.prompts;
+  const sessionsErrorMessage = getUiErrorMessage(sessionsError, copy);
+  const panelErrorMessage = getUiErrorMessage(panelError, copy);
 
   const sortedEvents = useMemo(
     () => [...events].sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime()),
     [events]
   );
 
+  const activeProject = useMemo(() => {
+    if (!context?.projects.length || !context?.session.active_project_id) return null;
+
+    return context.projects.find((project) => project._id === context.session.active_project_id) ?? null;
+  }, [context?.projects, context?.session.active_project_id]);
+
+  const sessionStatus = context?.session.status || currentSession?.status || "idle";
+  const latestMessage = messages.length ? messages[messages.length - 1] : null;
+  const showStarterCards = Boolean(currentSession) && messages.length === 0;
+  const showComposerSuggestions = Boolean(currentSession) && messages.length > 0;
+
+  const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      handleSend();
+    }
+  };
+
   const fetchSessions = async () => {
-    const res = await getSessions();
-    setSessions(res.data);
-    if (!currentSession && res.data.length > 0) {
-      setCurrentSession(res.data[0]);
+    try {
+      const res = await getSessions();
+      setSessions(res.data);
+      setSessionsError(null);
+      if (res.data.length === 0) {
+        setCurrentSession(null);
+        return;
+      }
+
+      setCurrentSession((previous) => {
+        if (!previous) return res.data[0];
+        return res.data.find((session: Session) => session._id === previous._id) ?? res.data[0];
+      });
+    } catch (err: any) {
+      setSessionsError(buildUiError(err, "failedLoadSessions"));
     }
   };
 
@@ -49,7 +142,7 @@ export default function AgentPanel() {
     setContext(contextRes.data);
     setMessages(messageRes.data);
     setEvents(eventRes.data);
-    setError(null);
+    setPanelError(null);
   };
 
   useEffect(() => {
@@ -57,15 +150,22 @@ export default function AgentPanel() {
   }, []);
 
   useEffect(() => {
+    if (!messages.length) return;
+
+    messageEndRef.current?.scrollIntoView({ block: "end" });
+  }, [messages.length]);
+
+  useEffect(() => {
     if (!currentSession) {
       setContext(null);
       setMessages([]);
       setEvents([]);
+      setPanelError(null);
       return;
     }
 
     loadCurrentSession(currentSession._id).catch((err) => {
-      setError(err?.response?.data?.detail || "Failed to load session data.");
+      setPanelError(buildUiError(err, "failedLoadSessionData"));
     });
 
     const timer = window.setInterval(() => {
@@ -76,11 +176,31 @@ export default function AgentPanel() {
     return () => window.clearInterval(timer);
   }, [currentSession?._id]);
 
+  const createNewSession = async () => {
+    try {
+      const name = `${copy.common.sessionPrefix} ${sessions.length + 1}`;
+      const res = await createSession(name);
+      setSessions((prev: Session[]) => [res.data, ...prev]);
+      setCurrentSession(res.data);
+      setSessionsError(null);
+      return res.data;
+    } catch (err: any) {
+      setSessionsError(buildUiError(err, "failedCreateSession"));
+      return null;
+    }
+  };
+
   const handleNewSession = async () => {
-    const name = `Session ${sessions.length + 1}`;
-    const res = await createSession(name);
-    setSessions((prev: Session[]) => [res.data, ...prev]);
-    setCurrentSession(res.data);
+    await createNewSession();
+  };
+
+  const handleStarterPrompt = async (starterPrompt: string) => {
+    if (!currentSession) {
+      const session = await createNewSession();
+      if (!session) return;
+    }
+
+    setPrompt(starterPrompt);
   };
 
   const handleSend = async () => {
@@ -92,8 +212,9 @@ export default function AgentPanel() {
       await sendChatTurn(currentSession._id, content);
       await loadCurrentSession(currentSession._id);
       await fetchSessions();
+      setPanelError(null);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Failed to send prompt to Copilot agent.");
+      setPanelError(buildUiError(err, "failedSendPrompt"));
     }
     setSending(false);
   };
@@ -105,8 +226,9 @@ export default function AgentPanel() {
       await uploadProject(currentSession._id, file);
       await loadCurrentSession(currentSession._id);
       await fetchSessions();
+      setPanelError(null);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Upload failed.");
+      setPanelError(buildUiError(err, "uploadFailed"));
     }
     setUploading(false);
   };
@@ -122,8 +244,9 @@ export default function AgentPanel() {
       anchor.download = `${project.filename.replace(/\.zip$/i, "")}-export.zip`;
       anchor.click();
       URL.revokeObjectURL(href);
+      setPanelError(null);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Export failed.");
+      setPanelError(buildUiError(err, "exportFailed"));
     }
   };
 
@@ -134,190 +257,332 @@ export default function AgentPanel() {
         await loadCurrentSession(currentSession._id);
         await fetchSessions();
       }
+      setPanelError(null);
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Failed to stop container.");
+      setPanelError(buildUiError(err, "failedStopContainer"));
     }
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    await deleteSession(sessionId);
-    const remaining = sessions.filter((session: Session) => session._id !== sessionId);
-    setSessions(remaining);
-    setCurrentSession(remaining[0] ?? null);
+    try {
+      await deleteSession(sessionId);
+      const remaining = sessions.filter((session: Session) => session._id !== sessionId);
+      setSessions(remaining);
+      setCurrentSession(remaining[0] ?? null);
+      setSessionsError(null);
+    } catch (err: any) {
+      setSessionsError(buildUiError(err, "failedDeleteSession"));
+    }
   };
 
   return (
-    <div className="agent-panel">
-      <div className="agent-sidebar">
-        <div className="sidebar-header">
-          <h2>Sessions</h2>
-          <button className="btn-primary" onClick={handleNewSession}>
-            + New
+    <div className="agent-workbench">
+      <aside className="secondary-sidebar">
+        <div className="sidebar-section">
+          <div className="sidebar-section-header">
+            <span>{copy.agent.sidebarTitle}</span>
+            <span>{sessions.length}</span>
+          </div>
+          <button className="ghost-button sidebar-new-button" onClick={handleNewSession}>
+            {copy.common.newChat}
           </button>
-        </div>
-        <ul className="session-list">
-          {sessions.map((s) => (
-            <li
-              key={s._id}
-              className={`session-item ${currentSession?._id === s._id ? "active" : ""}`}
-              onClick={() => setCurrentSession(s)}
-            >
-              <div className="session-meta">
-                <span className="session-name">{s.name}</span>
-                {s.active_project_id && <span className="session-project">project linked</span>}
-              </div>
-              <span className={`status-badge status-${s.status}`}>{s.status}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
+          {sessionsErrorMessage && <div className="sidebar-alert">{sessionsErrorMessage}</div>}
 
-      <div className="agent-content">
-        {currentSession ? (
-          <>
-            <div className="content-header">
-              <div>
-                <h2>{currentSession.name}</h2>
-                <p className="session-subtitle">直接和 Copilot agent 对话，资源操作通过后端 custom tools 执行。</p>
+          <ul className="session-list">
+            {sessions.length ? (
+              sessions.map((session) => (
+                <li key={session._id}>
+                  <button
+                    type="button"
+                    className={`session-item ${currentSession?._id === session._id ? "active" : ""}`}
+                    onClick={() => setCurrentSession(session)}
+                  >
+                    <div className="session-item-top">
+                      <div className="session-title-group">
+                        <span className={`status-dot status-${session.status}`} />
+                        <span className="session-name">{session.name}</span>
+                      </div>
+                      <span className={`status-badge status-${session.status}`}>{sessionStatusLabels[session.status]}</span>
+                    </div>
+                    <div className="session-footline">
+                      <span>{session.active_project_id ? copy.common.yesBoundProject : copy.common.noProjectUploaded}</span>
+                      <time>{formatDateTime(session.updated_at, locale, copy.common.notStarted)}</time>
+                    </div>
+                  </button>
+                </li>
+              ))
+            ) : (
+              <li className="sidebar-empty">{copy.agent.sidebarEmpty}</li>
+            )}
+          </ul>
+        </div>
+      </aside>
+
+      <section className="chat-stage">
+        <header className="chat-stage-header">
+          <div>
+            <span className="eyebrow">{copy.agent.eyebrow}</span>
+            <h1>{currentSession ? currentSession.name : copy.agent.title.empty}</h1>
+          </div>
+          <div className="chat-stage-actions">
+            <label className="toolbar-button file-action">
+              {uploading ? copy.common.uploading : copy.common.uploadProject}
+              <input
+                type="file"
+                accept=".zip"
+                hidden
+                onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files?.[0] && handleUpload(e.target.files[0])}
+              />
+            </label>
+            {currentSession && (
+              <button className="btn-danger" onClick={() => handleDeleteSession(currentSession._id)}>
+                {copy.common.deleteSession}
+              </button>
+            )}
+          </div>
+        </header>
+
+        <div className="chat-stage-meta">
+          <span className="meta-chip">{copy.app.agent}</span>
+          <span className="meta-chip">{copy.common.copilot}</span>
+          <span className="meta-chip">{currentSession ? sessionStatusLabels[sessionStatus] : copy.agent.noActiveSession}</span>
+          <span className="meta-chip">{activeProject?.filename || copy.agent.noActiveProject}</span>
+          {context?.container && <span className="meta-chip">{copy.agent.containerPrefix} · {containerStatusLabels[context.container.status]}</span>}
+        </div>
+
+        <div className="chat-transcript">
+          {panelErrorMessage && <div className="notice-banner transcript-notice">{panelErrorMessage}</div>}
+          {currentSession ? (
+            messages.length ? (
+              messages.map((message) => (
+                <article key={message._id} className={`chat-message role-${message.role}`}>
+                  <div className="chat-message-meta">
+                    <span className="chat-message-author">{message.role === "user" ? copy.agent.you : copy.agent.assistant}</span>
+                    <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
+                  </div>
+                  <div className="chat-message-body">
+                    <p>{message.content || copy.common.emptyResponse}</p>
+                  </div>
+                </article>
+              ))
+            ) : showStarterCards ? (
+              <div className="chat-welcome">
+                <span className="eyebrow">{copy.agent.starterEyebrow}</span>
+                <h2>{copy.agent.starterTitle}</h2>
+                <p>{copy.agent.starterDescription}</p>
+                <div className="welcome-prompts">
+                  {starterPrompts.map((starter, index) => (
+                    <button
+                      key={starter.prompt}
+                      type="button"
+                      className="starter-card"
+                      onClick={() => handleStarterPrompt(starter.prompt)}
+                    >
+                      <span className="starter-card-index">0{index + 1}</span>
+                      <strong className="starter-card-title">{starter.title}</strong>
+                      <span className="starter-card-description">{starter.description}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="header-actions">
-                <label className="btn-primary upload-btn">
-                  {uploading ? "Uploading..." : "Upload AEP Zip"}
-                  <input
-                    type="file"
-                    accept=".zip"
-                    hidden
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files?.[0] && handleUpload(e.target.files[0])}
-                  />
-                </label>
-                <button className="btn-danger" onClick={() => handleDeleteSession(currentSession._id)}>
-                  Delete Session
+            ) : (
+              <div className="chat-empty-transcript" />
+            )
+          ) : (
+            <div className="chat-welcome empty">
+              <span className="eyebrow">{copy.agent.emptyEyebrow}</span>
+              <h2>{copy.agent.emptyTitle}</h2>
+              <p>{copy.agent.emptyDescription}</p>
+              <div className="welcome-actions">
+                <button className="btn-primary" onClick={handleNewSession}>
+                  {copy.common.createSession}
                 </button>
               </div>
+              <div className="welcome-prompts compact-prompts">
+                {starterPrompts.map((starter, index) => (
+                  <button
+                    key={starter.prompt}
+                    type="button"
+                    className="starter-card"
+                    onClick={() => handleStarterPrompt(starter.prompt)}
+                  >
+                    <span className="starter-card-index">0{index + 1}</span>
+                    <strong className="starter-card-title">{starter.title}</strong>
+                    <span className="starter-card-description">{starter.description}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div ref={messageEndRef} />
+        </div>
+
+        <div className="composer-shell">
+          {showComposerSuggestions && (
+            <div className="composer-toolbar">
+              {starterPrompts.map((starter) => (
+                <button
+                  key={starter.prompt}
+                  type="button"
+                  className="composer-suggestion"
+                  onClick={() => setPrompt(starter.prompt)}
+                >
+                  {starter.title}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <textarea
+            id="agent-prompt"
+            rows={5}
+            placeholder={
+              currentSession
+                ? copy.agent.textareaActive
+                : copy.agent.textareaInactive
+            }
+            value={prompt}
+            disabled={!currentSession}
+            onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
+            onKeyDown={handlePromptKeyDown}
+          />
+
+          <div className="composer-footer">
+            <div className="composer-meta">
+              <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
+              <span className="composer-hint">{copy.common.autoRefreshHint}</span>
+            </div>
+            <div className="composer-actions">
+              <button className="btn-primary send-button" onClick={handleSend} disabled={!currentSession || sending || !prompt.trim()}>
+                {sending ? copy.common.working : copy.common.send}
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside className="context-sidebar">
+        {currentSession ? (
+          <>
+            <div className="card context-panel">
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">{copy.agent.sessionPanelEyebrow}</span>
+                  <h3>{currentSession.name}</h3>
+                  <p className="panel-description">{copy.agent.sessionPanelDescription}</p>
+                </div>
+              </div>
+              <dl className="fact-list">
+                <div className="fact-row">
+                  <dt>{copy.agent.sessionPanelFields.status}</dt>
+                  <dd>{sessionStatusLabels[sessionStatus]}</dd>
+                </div>
+                <div className="fact-row">
+                  <dt>{copy.agent.sessionPanelFields.activeProject}</dt>
+                  <dd>{activeProject?.filename || copy.common.notSpecified}</dd>
+                </div>
+                <div className="fact-row">
+                  <dt>{copy.agent.sessionPanelFields.container}</dt>
+                  <dd>{context?.container ? containerStatusLabels[context.container.status] : copy.common.notStarted}</dd>
+                </div>
+                <div className="fact-row">
+                  <dt>{copy.agent.sessionPanelFields.lastReply}</dt>
+                  <dd>{latestMessage ? formatDateTime(latestMessage.created_at, locale, copy.common.notStarted) : copy.common.none}</dd>
+                </div>
+                <div className="fact-row">
+                  <dt>{copy.agent.sessionPanelFields.latestRender}</dt>
+                  <dd>{basename(context?.latest_render_path, copy.common.notGenerated)}</dd>
+                </div>
+                <div className="fact-row">
+                  <dt>{copy.agent.sessionPanelFields.lastSync}</dt>
+                  <dd>{formatDateTime(currentSession.updated_at, locale, copy.common.notStarted)}</dd>
+                </div>
+              </dl>
+              <div className="session-runtime-meta">
+                <span className="eyebrow">{copy.agent.sessionPanelFields.runtime}</span>
+                <span className="mono">{shortenId(context?.session.copilot_session_id, copy.common.notStarted)}</span>
+              </div>
+              {currentSession.last_error && <div className="inline-alert">{currentSession.last_error}</div>}
             </div>
 
-            {error && <div className="card error-banner">{error}</div>}
+            <ContainerManager containers={context?.container ? [context.container] : []} onStop={handleStopContainer} />
 
-            <div className="agent-grid">
-              <section className="chat-column card">
-                <div className="chat-header">
-                  <h3>Copilot Agent</h3>
-                  <span className={`status-badge status-${context?.session.status || currentSession.status}`}>
-                    {context?.session.status || currentSession.status}
-                  </span>
+            {context?.latest_stream_url && <VideoPlayer src={context.latest_stream_url} />}
+
+            <div className="card context-panel">
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">{copy.agent.assetsEyebrow}</span>
+                  <h3>{copy.agent.assetsTitle}</h3>
                 </div>
+                <span className="panel-count">{context?.projects.length ?? 0}</span>
+              </div>
 
-                <div className="chat-messages">
-                  {messages.length === 0 ? (
-                    <div className="empty-chat">
-                      <p>先上传 AEP 压缩包，然后直接告诉 agent 你的目标。</p>
-                      <p>例如：请启动容器，检查我上传的工程，并渲染一版 H.264 预览。</p>
+              {context?.projects.length ? (
+                <div className="project-list">
+                  {context.projects.map((project) => (
+                    <div key={project._id} className="project-item">
+                      <div className="project-copy">
+                        <div className="project-name">{project.filename}</div>
+                        <div className="project-meta">{project.aep_files.length ? project.aep_files.join(", ") : copy.common.noDetectedAep}</div>
+                        <div className="project-submeta">{formatDateTime(project.created_at, locale, copy.common.notStarted)}</div>
+                      </div>
+                      <div className="project-actions">
+                        <span className={`status-badge status-${project.status === "active" ? "running" : "idle"}`}>
+                          {projectStatusLabels[project.status]}
+                        </span>
+                        <button className="ghost-button btn-sm" onClick={() => handleDownload(project)}>
+                          {copy.common.export}
+                        </button>
+                      </div>
                     </div>
-                  ) : (
-                    messages.map((message) => (
-                      <article key={message._id} className={`chat-bubble chat-${message.role}`}>
-                        <header>{message.role === "user" ? "You" : "Copilot Agent"}</header>
-                        <p>{message.content || "(empty response)"}</p>
-                      </article>
-                    ))
-                  )}
+                  ))}
                 </div>
+              ) : (
+                <p className="empty-side">{copy.agent.assetsEmpty}</p>
+              )}
+            </div>
 
-                <div className="chat-composer">
-                  <textarea
-                    rows={4}
-                    placeholder="告诉 agent 你要对 After Effects 工程做什么，比如：把标题改成白色描边并渲染 1080p 预览。"
-                    value={prompt}
-                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
-                  />
-                  <div className="composer-actions">
-                    <span className="composer-hint">Agent 会自行决定何时启动容器、选择工程、执行 JSX 和渲染。</span>
-                    <button className="btn-primary" onClick={handleSend} disabled={sending || !prompt.trim()}>
-                      {sending ? "Sending..." : "Send"}
-                    </button>
-                  </div>
+            <div className="card context-panel">
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">{copy.agent.executionEyebrow}</span>
+                  <h3>{copy.agent.executionTitle}</h3>
                 </div>
-              </section>
-
-              <aside className="workspace-column">
-                <div className="card workspace-card">
-                  <h3>Workspace</h3>
-                  <div className="workspace-summary">
-                    <div>
-                      <span className="label">Active Project</span>
-                      <strong>{context?.session.active_project_id || "None"}</strong>
+                <span className="panel-count">{sortedEvents.length}</span>
+              </div>
+              {sortedEvents.length ? (
+                <div className="timeline-list">
+                  {sortedEvents.map((event) => (
+                    <div key={event._id} className="timeline-item">
+                      <div className="timeline-type">{event.type}</div>
+                      <div className="timeline-summary">{event.summary}</div>
+                      <div className="timeline-time">{new Date(event.created_at).toLocaleTimeString(locale)}</div>
                     </div>
-                    <div>
-                      <span className="label">Latest Render</span>
-                      <strong>{context?.latest_render_path || "None"}</strong>
-                    </div>
-                    <div>
-                      <span className="label">Copilot Session</span>
-                      <strong>{context?.session.copilot_session_id || "Not started"}</strong>
-                    </div>
-                  </div>
+                  ))}
                 </div>
-
-                <ContainerManager
-                  containers={context?.container ? [context.container] : []}
-                  onStop={handleStopContainer}
-                />
-
-                <div className="card project-card">
-                  <h3>Uploaded Projects</h3>
-                  {context?.projects.length ? (
-                    <div className="project-list">
-                      {context.projects.map((project) => (
-                        <div key={project._id} className="project-item">
-                          <div>
-                            <div className="project-name">{project.filename}</div>
-                            <div className="project-meta">
-                              {project.aep_files.length ? project.aep_files.join(", ") : "No .aep detected"}
-                            </div>
-                          </div>
-                          <div className="project-actions">
-                            <span className={`status-badge status-${project.status === "active" ? "running" : "idle"}`}>
-                              {project.status}
-                            </span>
-                            <button className="btn-primary btn-sm" onClick={() => handleDownload(project)}>
-                              Export Zip
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty-side">还没有上传工程文件。</p>
-                  )}
-                </div>
-
-                {context?.latest_stream_url && <VideoPlayer src={context.latest_stream_url} />}
-
-                <div className="card timeline-card">
-                  <h3>Agent Timeline</h3>
-                  {sortedEvents.length ? (
-                    <div className="timeline-list">
-                      {sortedEvents.map((event) => (
-                        <div key={event._id} className="timeline-item">
-                          <div className="timeline-type">{event.type}</div>
-                          <div className="timeline-summary">{event.summary}</div>
-                          <div className="timeline-time">{new Date(event.created_at).toLocaleTimeString()}</div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="empty-side">Agent 还没有执行任何工具。</p>
-                  )}
-                </div>
-              </aside>
+              ) : (
+                <p className="empty-side">{copy.agent.executionEmpty}</p>
+              )}
             </div>
           </>
         ) : (
-          <div className="empty-state">
-            <p>Create a session to start collaborating with Copilot agent.</p>
+          <div className="card context-panel onboarding-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">{copy.agent.workflowEyebrow}</span>
+                <h3>{copy.agent.workflowTitle}</h3>
+                <p className="panel-description">{copy.agent.workflowDescription}</p>
+              </div>
+            </div>
+            <ol className="onboarding-list">
+              {copy.agent.workflowSteps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
           </div>
         )}
-      </div>
+      </aside>
     </div>
   );
 }

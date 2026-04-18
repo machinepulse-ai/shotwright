@@ -1,11 +1,11 @@
-"""Admin panel router — login, token management, dashboard."""
+"""Admin panel router — login, token management, and runtime settings."""
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.config import settings
 from app.database import get_admin_collection, get_container_collection, get_session_collection
 from app.middleware.auth import create_access_token, require_admin, verify_password
-from app.models.admin import AdminLogin, AdminSettings, GithubTokenUpdate, TokenResponse
+from app.models.admin import AdminLogin, AdminSettings, CopilotSettingsUpdate, GithubTokenUpdate, TokenResponse
 from app.services.copilot_runtime import runtime_manager
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -22,8 +22,26 @@ async def admin_login(body: AdminLogin):
 @router.get("/settings", response_model=AdminSettings, dependencies=[Depends(require_admin)])
 async def get_admin_settings():
     col = get_admin_collection()
-    doc = await col.find_one({"_id": "settings"})
-    return AdminSettings(github_token_set=bool(doc and doc.get("github_token")))
+    doc = await col.find_one({"_id": "settings"}) or {}
+    runtime_settings = await runtime_manager.get_runtime_settings()
+    return AdminSettings(github_token_set=bool(doc.get("github_token")), **runtime_settings)
+
+
+@router.put("/settings", response_model=AdminSettings, dependencies=[Depends(require_admin)])
+async def update_admin_settings(body: CopilotSettingsUpdate):
+    col = get_admin_collection()
+    payload = body.model_dump()
+    payload["copilot_model"] = payload["copilot_model"].strip()
+    payload["copilot_cli_path"] = payload["copilot_cli_path"].strip()
+    payload["copilot_workspace_root"] = payload["copilot_workspace_root"].strip()
+    payload["copilot_http_proxy"] = payload["copilot_http_proxy"].strip()
+    payload["copilot_https_proxy"] = payload["copilot_https_proxy"].strip()
+    payload["copilot_no_proxy"] = payload["copilot_no_proxy"].strip()
+    await col.update_one({"_id": "settings"}, {"$set": payload}, upsert=True)
+    await runtime_manager.shutdown()
+    doc = await col.find_one({"_id": "settings"}) or {}
+    runtime_settings = await runtime_manager.get_runtime_settings()
+    return AdminSettings(github_token_set=bool(doc.get("github_token")), **runtime_settings)
 
 
 @router.put("/github-token", dependencies=[Depends(require_admin)])
@@ -31,7 +49,7 @@ async def update_github_token(body: GithubTokenUpdate):
     col = get_admin_collection()
     await col.update_one(
         {"_id": "settings"},
-        {"$set": {"github_token": body.github_token}},
+        {"$set": {"github_token": body.github_token.strip()}},
         upsert=True,
     )
     await runtime_manager.shutdown()

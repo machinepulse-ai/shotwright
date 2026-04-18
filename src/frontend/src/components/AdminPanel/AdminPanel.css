@@ -1,53 +1,98 @@
+.admin-shell {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: linear-gradient(180deg, #fbfbfc 0%, #f4f7fb 100%);
+}
+
+.admin-shell-login {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
 .admin-login {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 60vh;
+  width: min(460px, 100%);
+  margin: 0 auto;
+  min-height: 100%;
 }
 
 .login-card {
-  width: 360px;
+  width: min(420px, 100%);
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  padding: 1.8rem;
 }
 
 .login-card h2 {
-  text-align: center;
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
+  font-size: 1.8rem;
+  line-height: 1.05;
+}
+
+.login-copy {
+  color: var(--text-secondary);
 }
 
 .login-error {
   color: var(--danger);
   font-size: 0.85rem;
-  text-align: center;
 }
 
 .admin-panel {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: var(--shell-pad) var(--page-pad) calc(var(--page-pad) + 10px);
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: var(--layout-gap);
+  min-width: 0;
 }
 
 .admin-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 1rem;
+  padding-bottom: 0.25rem;
+}
+
+.admin-header h2 {
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
+  font-size: 2rem;
+  line-height: 1.05;
+  margin-top: 0.35rem;
+}
+
+.admin-header p {
+  margin-top: 0.55rem;
+  color: var(--text-secondary);
 }
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--layout-gap);
 }
 
 .stat-card {
-  text-align: center;
+  text-align: left;
+  min-height: 116px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 248, 252, 0.92));
 }
 
 .stat-value {
   font-size: 2rem;
   font-weight: 700;
-  color: var(--primary);
+  color: var(--text);
+  font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
 }
 
 .stat-label {
@@ -56,43 +101,174 @@
 }
 
 .token-status {
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.4rem;
   font-size: 0.9rem;
 }
 
 .token-input {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.75rem;
 }
 
 .token-input input {
   flex: 1;
 }
 
+.admin-section {
+  overflow: hidden;
+  padding: var(--card-pad);
+}
+
+.admin-section-hero {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(245, 249, 253, 0.95));
+}
+
+.admin-section-copy {
+  margin-top: 0.35rem;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--layout-gap);
+}
+
+.admin-feedback {
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-md);
+  font-size: 0.84rem;
+  border: 1px solid var(--border);
+}
+
+.admin-feedback.success {
+  color: var(--success);
+  background: rgba(26, 127, 55, 0.08);
+  border-color: rgba(26, 127, 55, 0.18);
+}
+
+.admin-feedback.error {
+  color: var(--danger);
+  background: rgba(207, 34, 46, 0.06);
+  border-color: rgba(207, 34, 46, 0.18);
+}
+
+.admin-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.95rem 1rem;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+.form-field-wide {
+  grid-column: 1 / -1;
+}
+
+.field-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.field-help {
+  margin-top: 0.75rem;
+  color: var(--text-secondary);
+  font-size: 0.79rem;
+  line-height: 1.55;
+}
+
+.checkbox-field {
+  padding: 0.15rem 0;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  padding: 0;
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.admin-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.form-field select {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 0.95rem;
+}
+
+.form-field select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
 .admin-table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 0.75rem;
+  margin-top: 0.35rem;
 }
 
 .admin-table th,
 .admin-table td {
-  padding: 0.5rem 0.75rem;
+  padding: 0.7rem 0.75rem;
   text-align: left;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid rgba(24, 33, 44, 0.08);
   font-size: 0.85rem;
 }
 
 .admin-table th {
   color: var(--text-secondary);
   font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
-.mono {
-  font-family: "Consolas", monospace;
-}
+@media (max-width: 900px) {
+  .admin-panel {
+    padding: var(--shell-pad);
+  }
 
-.btn-sm {
-  padding: 0.25rem 0.5rem;
-  font-size: 0.75rem;
+  .admin-header,
+  .token-input {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .admin-config-grid,
+  .stats-grid,
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
 }

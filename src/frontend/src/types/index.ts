@@ -12,6 +12,8 @@ export interface Session {
   updated_at: string;
 }
 
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
 export interface Container {
   _id: string;
   docker_id: string;
@@ -75,4 +77,21 @@ export interface DashboardData {
   active_sessions: number;
   total_containers: number;
   running_containers: number;
+}
+
+export interface AdminSettings {
+  github_token_set: boolean;
+  copilot_model: string;
+  copilot_reasoning_effort: ReasoningEffort;
+  copilot_cli_path: string;
+  copilot_workspace_root: string;
+  copilot_use_logged_in_user: boolean;
+  copilot_http_proxy: string;
+  copilot_https_proxy: string;
+  copilot_no_proxy: string;
+}
+
+export interface PublicRuntimeSettings {
+  copilot_model: string;
+  copilot_reasoning_effort: ReasoningEffort;
 }
