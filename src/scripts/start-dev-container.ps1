@@ -34,6 +34,7 @@ $backendStdout = Join-Path $logRoot 'backend.stdout.log'
 $backendStderr = Join-Path $logRoot 'backend.stderr.log'
 $frontendStdout = Join-Path $logRoot 'frontend.stdout.log'
 $frontendStderr = Join-Path $logRoot 'frontend.stderr.log'
+$frontendNodeModules = Join-Path $frontendRoot 'node_modules'
 
 @($backendStdout, $backendStderr, $frontendStdout, $frontendStderr) | ForEach-Object {
     if (Test-Path $_) {
@@ -59,6 +60,15 @@ $backendProcess = Start-Process -FilePath 'python' `
     -PassThru `
     -RedirectStandardOutput $backendStdout `
     -RedirectStandardError $backendStderr
+
+if (-not (Test-Path (Join-Path $frontendNodeModules '.bin\webpack.cmd'))) {
+    Write-Host '[dev-container] Installing frontend dependencies into node_modules volume ...' -ForegroundColor Yellow
+    & 'C:\Program Files\nodejs\npm.cmd' install --no-package-lock --no-progress --fetch-retries 5 --fetch-timeout 120000 --prefix $frontendRoot
+    if ($LASTEXITCODE -ne 0) {
+        Show-ProcessLogs -Name 'backend' -StdoutPath $backendStdout -StderrPath $backendStderr
+        throw 'Failed to install frontend dependencies inside the dev container.'
+    }
+}
 
 $frontendProcess = Start-Process -FilePath 'C:\Program Files\nodejs\npm.cmd' `
     -ArgumentList @('run', 'dev') `

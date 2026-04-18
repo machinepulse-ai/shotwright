@@ -121,7 +121,7 @@ docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:dev .
 <summary><strong>带代理的构建示例</strong></summary>
 
 ```powershell
-$proxy = 'http://192.168.1.80:8080'
+$proxy = 'http://proxy.example.com:8080'
 docker build `
 	--build-arg http_proxy=$proxy `
 	--build-arg https_proxy=$proxy `

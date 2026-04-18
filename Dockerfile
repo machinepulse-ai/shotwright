@@ -1,8 +1,8 @@
 ARG BASE_IMAGE=mcr.microsoft.com/windows/server:ltsc2025
-ARG http_proxy=http://192.168.1.80:8080
-ARG https_proxy=http://192.168.1.80:8080
-ARG HTTP_PROXY=http://192.168.1.80:8080
-ARG HTTPS_PROXY=http://192.168.1.80:8080
+ARG http_proxy
+ARG https_proxy
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 ARG PIP_DEFAULT_TIMEOUT=120

@@ -475,7 +475,7 @@ class NetworkConstants:
     MAX_CONCURRENT_DOWNLOADS = 3
     PROGRESS_UPDATE_INTERVAL = 1.0
     APPLICATION_JSON_URL = "https://cdn-ffc.oobesaas.adobe.com/core/v3/applications"
-    DEFAULT_PROXY_URL = "http://192.168.1.80:8080"
+    DEFAULT_PROXY_URL: str | None = None
 
     @staticmethod
     def generate_cookie() -> str:

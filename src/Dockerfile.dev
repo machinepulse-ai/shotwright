@@ -1,9 +1,9 @@
 ARG DEV_BASE_IMAGE=shotwright:latest
 ARG AE_SETUP_IMAGE=ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2
-ARG http_proxy=http://192.168.1.80:8080
-ARG https_proxy=http://192.168.1.80:8080
-ARG HTTP_PROXY=http://192.168.1.80:8080
-ARG HTTPS_PROXY=http://192.168.1.80:8080
+ARG http_proxy
+ARG https_proxy
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
 ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 ARG PIP_DEFAULT_TIMEOUT=120
@@ -63,6 +63,9 @@ COPY src/scripts/start-dev-container.ps1 C:/workspace/src/scripts/start-dev-cont
 
 COPY --from=after-effects-setup C:/payload C:/data/payload
 RUN & 'C:/workspace/scripts/install/install_after_effects_in_container.ps1' -RequirePayload
+
+COPY src/frontend/webpack.config.js C:/workspace/src/frontend/webpack.config.js
+COPY src/frontend/tsconfig.json C:/workspace/src/frontend/tsconfig.json
 
 EXPOSE 3000 8000
 

@@ -35,10 +35,10 @@ services:
       dockerfile: Dockerfile
       target: backend
       args:
-        http_proxy: ${http_proxy:-http://192.168.1.80:8080}
-        https_proxy: ${https_proxy:-http://192.168.1.80:8080}
-        HTTP_PROXY: ${HTTP_PROXY:-http://192.168.1.80:8080}
-        HTTPS_PROXY: ${HTTPS_PROXY:-http://192.168.1.80:8080}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
@@ -79,10 +79,10 @@ services:
       dockerfile: Dockerfile
       target: frontend
       args:
-        http_proxy: ${http_proxy:-http://192.168.1.80:8080}
-        https_proxy: ${https_proxy:-http://192.168.1.80:8080}
-        HTTP_PROXY: ${HTTP_PROXY:-http://192.168.1.80:8080}
-        HTTPS_PROXY: ${HTTPS_PROXY:-http://192.168.1.80:8080}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
