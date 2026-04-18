@@ -1,0 +1,39 @@
+ARG DEV_BASE_IMAGE=shotwright:latest
+ARG AE_SETUP_IMAGE=ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2
+
+FROM ${AE_SETUP_IMAGE} AS after-effects-setup
+
+FROM ${DEV_BASE_IMAGE} AS dev
+
+ARG http_proxy
+ARG https_proxy
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
+ENV http_proxy=${http_proxy} \
+      https_proxy=${https_proxy} \
+      HTTP_PROXY=${HTTP_PROXY} \
+      HTTPS_PROXY=${HTTPS_PROXY}
+
+SHELL ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+
+WORKDIR C:/workspace
+
+COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
+COPY src/backend/app/ C:/workspace/src/backend/app/
+RUN & python -m pip install --no-cache-dir --quiet uv; \
+    Set-Location C:/workspace/src/backend; \
+    & python -m uv pip install --system .
+
+COPY src/frontend/package.json C:/workspace/src/frontend/package.json
+RUN Set-Location C:/workspace/src/frontend; \
+    & 'C:/Program Files/nodejs/npm.cmd' install --no-progress
+
+COPY src/scripts/start-dev-container.ps1 C:/workspace/src/scripts/start-dev-container.ps1
+
+COPY --from=after-effects-setup C:/payload C:/data/payload
+RUN & C:/workspace/scripts/install/install_after_effects_in_container.ps1 -RequirePayload
+
+EXPOSE 3000 8000
+
+CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/workspace/src/scripts/start-dev-container.ps1"]

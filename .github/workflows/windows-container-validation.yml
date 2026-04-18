@@ -59,6 +59,7 @@ jobs:
 
       - name: Resolve runtime base image
         id: base_image
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.dockerfile == 'true'
         shell: pwsh
         run: |
           $sourceImage = '${{ steps.config.outputs.runtime_base_image }}'
@@ -99,32 +100,6 @@ jobs:
 
           "resolved_image=$resolvedImage" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Restore Shotwright image cache
-        id: shotwright_cache
-        if: steps.changes.outputs.setup_versions == 'true' && steps.changes.outputs.dockerfile != 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/shotwright-ci.tar
-          key: ${{ runner.os }}-shotwright-ci-${{ hashFiles('Dockerfile') }}
-
-      - name: Load cached Shotwright image
-        if: steps.changes.outputs.setup_versions == 'true' && steps.changes.outputs.dockerfile != 'true'
-        shell: pwsh
-        run: |
-          $cacheArchive = Join-Path $env:RUNNER_TEMP 'shotwright-ci.tar'
-          if ('${{ steps.shotwright_cache.outputs.cache-hit }}' -ne 'true') {
-            throw 'Shotwright image cache was not found for the current Dockerfile hash. Build the image cache from a Dockerfile change or run workflow_dispatch first.'
-          }
-
-          if (-not (Test-Path $cacheArchive)) {
-            throw "Shotwright image cache archive not found at $cacheArchive"
-          }
-
-          docker load -i $cacheArchive
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Failed to load cached Shotwright image archive.'
-          }
-
       - name: Build Shotwright image
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.dockerfile == 'true'
         shell: pwsh
@@ -136,22 +111,10 @@ jobs:
 
           docker image inspect '${{ steps.config.outputs.ci_image_tag }}' --format '{{.Id}}'
 
-      - name: Export Shotwright image cache archive
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.dockerfile == 'true'
-        shell: pwsh
-        run: |
-          $cacheArchive = Join-Path $env:RUNNER_TEMP 'shotwright-ci.tar'
-          docker save -o $cacheArchive '${{ steps.config.outputs.ci_image_tag }}'
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Failed to export the Shotwright image cache archive.'
-          }
-
-      - name: Save Shotwright image cache
-        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.dockerfile == 'true'
-        uses: actions/cache/save@v4
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.setup_versions == 'true'
         with:
-          path: ${{ runner.temp }}/shotwright-ci.tar
-          key: ${{ runner.os }}-shotwright-ci-${{ hashFiles('Dockerfile') }}
+          node-version: '20'
 
       - uses: actions/setup-python@v5
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.setup_versions == 'true'
@@ -165,37 +128,93 @@ jobs:
         run: |
           $json = python scripts/install/setup_versions.py
           $parsed = $json | ConvertFrom-Json
+          "current=$($parsed.current)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "product_id=$($parsed.product_id)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "platform=$($parsed.platform)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "payload_dir_name=$($parsed.payload_dir_name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "helper_dir_name=$($parsed.helper_dir_name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "ghcr_image=$($parsed.ghcr_image)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Pull setup image from GHCR
+        id: setup_image
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.setup_versions == 'true'
         shell: pwsh
         run: |
           docker pull '${{ steps.versions.outputs.ghcr_image }}'
+          if ($LASTEXITCODE -eq 0) {
+            "available=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+          else {
+            "available=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Warning "Setup image ${{ steps.versions.outputs.ghcr_image }} not available in GHCR. Falling back to local payload download."
+          }
 
-      - name: Extract installer payload from setup image
+      - name: Resolve installer payload on runner
         id: payload
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.setup_versions == 'true'
         shell: pwsh
         run: |
           $payloadRoot = Join-Path $env:RUNNER_TEMP '${{ steps.config.outputs.payload_temp_dir_name }}'
-          docker create --name ae-setup-extract '${{ steps.versions.outputs.ghcr_image }}' cmd /c exit
-          docker cp 'ae-setup-extract:C:\payload' $payloadRoot
-          docker rm ae-setup-extract
+
+          Remove-Item $payloadRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
+
+          if ('${{ steps.setup_image.outputs.available }}' -eq 'true') {
+            docker create --name ae-setup-extract '${{ steps.versions.outputs.ghcr_image }}' cmd /c exit | Out-Null
+            try {
+              docker cp 'ae-setup-extract:C:\payload\.' $payloadRoot
+              if ($LASTEXITCODE -ne 0) {
+                throw 'Failed to extract installer payload from the setup image.'
+              }
+            }
+            finally {
+              docker rm -f ae-setup-extract | Out-Null
+            }
+          }
+          else {
+            python scripts/install/download_after_effects_payload.py `
+              --payload-root $payloadRoot `
+              --product-id '${{ steps.versions.outputs.product_id }}' `
+              --version '${{ steps.versions.outputs.current }}' `
+              --platform '${{ steps.versions.outputs.platform }}'
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to download the installer payload directly on the runner.'
+            }
+          }
+
+          $helperSetup = Join-Path $payloadRoot (Join-Path '${{ steps.versions.outputs.helper_dir_name }}' 'HDBox\Setup.exe')
+          python scripts/install/modify_setup_win.py $helperSetup
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to patch the Creative Cloud helper Setup.exe on the runner.'
+          }
+
           "root=$payloadRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Install After Effects and render validation mp4
+      - name: Install runner validation tools
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.setup_versions == 'true'
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
-            -ImageTag '${{ steps.config.outputs.ci_image_tag }}' `
+          npm install -g @nexrender/cli@1.63.3 @nexrender/action-copy@1.49.4 @nexrender/action-encode@1.46.8
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to install nexrender tooling on the runner.'
+          }
+
+          if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            choco install -y --no-progress ffmpeg
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to install ffmpeg on the runner.'
+            }
+          }
+
+      - name: Install After Effects and render validation mp4 on runner
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.setup_versions == 'true'
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation_on_runner.ps1 `
             -AfterEffectsPayloadRoot (Join-Path '${{ steps.payload.outputs.root }}' '${{ steps.versions.outputs.payload_dir_name }}') `
             -CreativeCloudHelperRoot (Join-Path '${{ steps.payload.outputs.root }}' '${{ steps.versions.outputs.helper_dir_name }}')
 
-      - name: Validate mp4 with ffprobe
+      - name: Validate mp4 with ffprobe on runner
         if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.setup_versions == 'true'
         shell: pwsh
         run: |
@@ -205,7 +224,7 @@ jobs:
             throw 'validation.mp4 was not produced.'
           }
 
-          $probeOutput = docker run --rm -v "${outputDir}:C:\output" '${{ steps.config.outputs.ci_image_tag }}' powershell -NoProfile -Command "ffprobe -v error -show_entries format=format_name,duration -of default=noprint_wrappers=1 'C:\output\validation.mp4'"
+          $probeOutput = ffprobe -v error -show_entries format=format_name,duration -of default=noprint_wrappers=1 $outputFile 2>&1
           if ($probeOutput -notmatch 'format_name=.*mp4' -or $probeOutput -notmatch 'duration=') {
             throw "ffprobe did not report a valid mp4 container.`n$probeOutput"
           }

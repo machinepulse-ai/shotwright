@@ -2,44 +2,62 @@
 # Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 #
 # Enables:
+#   - Single dev container based on shotwright:latest
+#   - After Effects 26.2 baked into the dev image from GHCR setup payload
 #   - Backend hot reload via uvicorn --reload with source mount
 #   - Frontend webpack-dev-server with HMR via source mount
-#   - Debug-friendly environment variables
 
 services:
   backend:
+    profiles: ["split-services"]
+
+  frontend:
+    profiles: ["split-services"]
+
+  dev:
+    image: shotwright-dev:latest
     build:
       context: ..
-      dockerfile: Dockerfile
-      target: backend
-    # Override CMD for hot-reload
-    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      dockerfile: src/Dockerfile.dev
+      args:
+        DEV_BASE_IMAGE: ${SHOTWRIGHT_DEV_BASE_IMAGE:-shotwright:latest}
+        AE_SETUP_IMAGE: ${SHOTWRIGHT_AE_SETUP_IMAGE:-ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2}
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+    container_name: shotwright-dev
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    ports:
+      - "3000:3000"
+      - "8000:8000"
+    environment:
+      SHOTWRIGHT_MONGO_URI: mongodb://mongo:27017
+      SHOTWRIGHT_MONGO_DB: shotwright
+      SHOTWRIGHT_SECRET_KEY: ${SHOTWRIGHT_SECRET_KEY:-change-me-in-production}
+      SHOTWRIGHT_ADMIN_PASSWORD: ${SHOTWRIGHT_ADMIN_PASSWORD:-admin}
+      SHOTWRIGHT_GITHUB_TOKEN: ${SHOTWRIGHT_GITHUB_TOKEN:-}
+      SHOTWRIGHT_COPILOT_MODEL: ${SHOTWRIGHT_COPILOT_MODEL:-gpt-5}
+      SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
+      SHOTWRIGHT_SHOTWRIGHT_IMAGE: ${SHOTWRIGHT_SHOTWRIGHT_IMAGE:-shotwright:latest}
+      SHOTWRIGHT_DEBUG: "true"
+      SHOTWRIGHT_API_PROXY_TARGET: http://127.0.0.1:8000
     volumes:
-      - ./backend/app:C:/app/app
+      - ./backend/app:C:/workspace/src/backend/app
+      - ./frontend/src:C:/workspace/src/frontend/src
+      - ./frontend/public:C:/workspace/src/frontend/public
+      - ./frontend/package.json:C:/workspace/src/frontend/package.json
+      - ./frontend/webpack.config.js:C:/workspace/src/frontend/webpack.config.js
+      - ./frontend/tsconfig.json:C:/workspace/src/frontend/tsconfig.json
+      - ./scripts:C:/workspace/src/scripts
       - uploads:C:/data/uploads
       - exports:C:/data/exports
       - hls:C:/data/hls
       - type: npipe
         source: \\.\pipe\docker_engine
         target: \\.\pipe\docker_engine
-    environment:
-      SHOTWRIGHT_DEBUG: "true"
-
-  frontend:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: frontend-build
-    # Override to use webpack-dev-server in dev
-    command: ["cmd", "/c", "npm", "run", "dev"]
-    volumes:
-      - ./frontend/src:C:/frontend/src
-      - ./frontend/public:C:/frontend/public
-      - ../src/frontend/package.json:C:/frontend/package.json
-      - ../src/frontend/webpack.config.js:C:/frontend/webpack.config.js
-      - ../src/frontend/tsconfig.json:C:/frontend/tsconfig.json
-    ports:
-      - "3000:3000"
 
 volumes:
   uploads:
