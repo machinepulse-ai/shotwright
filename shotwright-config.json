@@ -16,6 +16,7 @@
       "templatesDirName": "templates",
       "outputDirName": "output",
       "workDirName": "work",
+      "desktopCommonRoot": "C:\\Program Files\\Common Files\\Adobe\\Adobe Desktop Common",
       "adobeInstallBaseRoot": "C:\\Program Files\\Adobe"
     }
   },

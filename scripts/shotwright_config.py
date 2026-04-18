@@ -33,6 +33,7 @@ class ContainerPaths:
     templates_dir_name: str
     output_dir_name: str
     work_dir_name: str
+    desktop_common_root: str
     adobe_install_base_root: str
 
 
@@ -177,6 +178,7 @@ def load_config(config_path: Path) -> ShotwrightConfig:
                 templates_dir_name=p["windowsContainer"]["templatesDirName"],
                 output_dir_name=p["windowsContainer"]["outputDirName"],
                 work_dir_name=p["windowsContainer"]["workDirName"],
+                desktop_common_root=p["windowsContainer"]["desktopCommonRoot"],
                 adobe_install_base_root=p["windowsContainer"]["adobeInstallBaseRoot"],
             ),
         ),

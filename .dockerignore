@@ -3,6 +3,8 @@ node_modules/
 !.dockerignore
 !Dockerfile
 !keepalive.ps1
+!shotwright-config.json
+!setup-versions.yml
 !scripts/
 !scripts/**
 !src/backend/pyproject.toml

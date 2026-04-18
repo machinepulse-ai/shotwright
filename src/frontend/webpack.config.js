@@ -3,6 +3,8 @@ const HtmlWebpackPlugin = require("html-webpack-plugin");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 
 const isProd = process.env.NODE_ENV === "production";
+const devServerPort = Number(process.env.PORT || 3000);
+const apiProxyTarget = process.env.SHOTWRIGHT_API_PROXY_TARGET || "http://backend:8000";
 
 module.exports = {
   entry: "./src/index.tsx",
@@ -36,13 +38,14 @@ module.exports = {
     ...(isProd ? [new MiniCssExtractPlugin({ filename: "[name].[contenthash].css" })] : []),
   ],
   devServer: {
-    port: 3000,
+    host: "0.0.0.0",
+    port: devServerPort,
     hot: true,
     historyApiFallback: true,
     proxy: [
       {
         context: ["/api"],
-        target: "http://backend:8000",
+        target: apiProxyTarget,
         changeOrigin: true,
       },
     ],

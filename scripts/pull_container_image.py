@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import gzip
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tarfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib import error, parse, request
 
 
@@ -26,6 +27,7 @@ _RESOLVED = build_resolved_config(load_config(get_default_config_path()))
 DEFAULT_OUTPUT_DIR = _RESOLVED.host.image_archive_root
 
 DEFAULT_PROXY = os.environ.get("https_proxy") or os.environ.get("http_proxy") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
+DEFAULT_DOWNLOAD_JOBS = 4
 CHUNK_SIZE = 32 * 1024 * 1024
 PROGRESS_INTERVAL_SECONDS = 10
 MANIFEST_ACCEPT = ", ".join(
@@ -36,6 +38,22 @@ MANIFEST_ACCEPT = ", ".join(
         "application/vnd.docker.distribution.manifest.v2+json",
     ]
 )
+
+
+@dataclass(frozen=True)
+class LayerPlan:
+    index: int
+    total: int
+    layer_id: str
+    blob_url: str
+    compressed_digest: str
+    diff_id: str
+    media_type: str
+    compressed: bool
+
+    @property
+    def label(self) -> str:
+        return f"layer {self.index}/{self.total}"
 
 
 class HashingReader:
@@ -60,12 +78,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--platform-arch", default="amd64")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--archive-name", default=None)
+    parser.add_argument("--jobs", type=int, default=DEFAULT_DOWNLOAD_JOBS, help="Concurrent layer download workers. Default: 4.")
     parser.add_argument("--load", action="store_true", help="Run docker load after the archive is created.")
     return parser.parse_args()
 
 
 def sanitize_name(value: str) -> str:
     return "".join(character if character.isalnum() else "_" for character in value)
+
+
+def digest_hex(digest: str) -> str:
+    return digest.split(":", 1)[1]
 
 
 def parse_image_reference(image: str) -> tuple[str, str, str, str]:
@@ -107,7 +130,33 @@ def build_opener(proxy_url: str | None) -> request.OpenerDirector:
         handlers.append(request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
     else:
         handlers.append(request.ProxyHandler({}))
+    handlers.append(RegistryRedirectHandler())
     return request.build_opener(*handlers)
+
+
+def build_registry_client(registry: str, repository: str, proxy_url: str | None) -> "RegistryClient":
+    return RegistryClient(registry=registry, repository=repository, opener=build_opener(proxy_url))
+
+
+def remove_header_case_insensitive(headers: dict[str, str], header_name: str) -> None:
+    for existing_name in list(headers):
+        if existing_name.lower() == header_name.lower():
+            headers.pop(existing_name, None)
+
+
+class RegistryRedirectHandler(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+
+        source = parse.urlsplit(req.full_url)
+        target = parse.urlsplit(newurl)
+        if source.netloc.lower() != target.netloc.lower():
+            remove_header_case_insensitive(redirected.headers, "Authorization")
+            remove_header_case_insensitive(redirected.unredirected_hdrs, "Authorization")
+
+        return redirected
 
 
 def parse_www_authenticate(header_value: str) -> tuple[str, dict[str, str]]:
@@ -129,9 +178,9 @@ class RegistryClient:
         self.base_url = f"https://{registry}"
         self.token_cache: dict[tuple[str, str], str] = {}
 
-    def _get_token(self, realm: str, service: str, scope: str) -> str:
+    def _get_token(self, realm: str, service: str, scope: str, force_refresh: bool = False) -> str:
         cache_key = (service, scope)
-        if cache_key in self.token_cache:
+        if not force_refresh and cache_key in self.token_cache:
             return self.token_cache[cache_key]
 
         query = {"service": service}
@@ -148,28 +197,31 @@ class RegistryClient:
 
     def open(self, url: str, headers: dict[str, str] | None = None):
         request_headers = dict(headers or {})
-        req = request.Request(url, headers=request_headers)
-        try:
-            return self.opener.open(req)
-        except error.HTTPError as exc:
-            if exc.code != 401:
-                raise
+        for _ in range(3):
+            req = request.Request(url, headers=request_headers)
+            try:
+                return self.opener.open(req)
+            except error.HTTPError as exc:
+                if exc.code != 401:
+                    raise
 
-            auth_header = exc.headers.get("WWW-Authenticate")
-            if not auth_header:
-                raise
+                auth_header = exc.headers.get("WWW-Authenticate")
+                if not auth_header:
+                    raise
 
-            scheme, attributes = parse_www_authenticate(auth_header)
-            if scheme.lower() != "bearer":
-                raise RuntimeError(f"Unsupported registry auth scheme: {scheme}")
+                scheme, attributes = parse_www_authenticate(auth_header)
+                if scheme.lower() != "bearer":
+                    raise RuntimeError(f"Unsupported registry auth scheme: {scheme}")
 
-            token = self._get_token(
-                realm=attributes["realm"],
-                service=attributes.get("service", self.registry),
-                scope=attributes.get("scope", f"repository:{self.repository}:pull"),
-            )
-            request_headers["Authorization"] = f"Bearer {token}"
-            return self.opener.open(request.Request(url, headers=request_headers))
+                token = self._get_token(
+                    realm=attributes["realm"],
+                    service=attributes.get("service", self.registry),
+                    scope=attributes.get("scope", f"repository:{self.repository}:pull"),
+                    force_refresh=True,
+                )
+                request_headers["Authorization"] = f"Bearer {token}"
+
+        raise RuntimeError(f"Registry authentication failed after retries: {url}")
 
     def get_bytes(self, url: str, headers: dict[str, str] | None = None) -> bytes:
         with self.open(url, headers=headers) as response:
@@ -182,9 +234,7 @@ class RegistryClient:
         return json.loads(payload.decode("utf-8")), response_headers
 
 
-def ensure_empty_dir(path: Path) -> None:
-    if path.exists():
-        shutil.rmtree(path)
+def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -200,25 +250,179 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
 
 
-def stream_layer(
-    client: RegistryClient,
-    blob_url: str,
-    headers: dict[str, str],
-    compressed_digest: str,
-    expected_diff_id: str,
-    target_path: Path,
-    layer_label: str,
-    compressed: bool,
-) -> None:
-    with client.open(blob_url, headers=headers) as response:
-        compressed_hasher = hashlib.sha256()
-        wrapped = HashingReader(response, compressed_hasher)
-        source = gzip.GzipFile(fileobj=wrapped) if compressed else wrapped
-        uncompressed_hasher = hashlib.sha256()
-        bytes_written = 0
-        last_log = time.monotonic()
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
-        with target_path.open("wb") as out_handle:
+
+def compute_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def add_file_to_tar(tar: tarfile.TarFile, base_dir: Path, file_path: Path) -> None:
+    arcname = file_path.relative_to(base_dir).as_posix()
+    tar.add(file_path, arcname=arcname, recursive=False)
+
+
+def resolve_total_size(headers, status_code: int, existing_size: int) -> int | None:
+    content_range = headers.get("Content-Range") or headers.get("content-range")
+    if content_range:
+        _, _, total_text = content_range.partition("/")
+        if total_text.isdigit():
+            return int(total_text)
+
+    content_length = headers.get("Content-Length") or headers.get("content-length")
+    if content_length and content_length.isdigit():
+        reported = int(content_length)
+        if status_code == 206 and existing_size > 0:
+            return existing_size + reported
+        return reported
+
+    return None
+
+
+def format_progress(current_bytes: int, total_bytes: int | None) -> str:
+    gib = current_bytes / (1024 ** 3)
+    if total_bytes and total_bytes > 0:
+        percent = current_bytes / total_bytes * 100
+        total_gib = total_bytes / (1024 ** 3)
+        return f"{gib:.2f}/{total_gib:.2f} GiB ({percent:.1f}%)"
+    return f"{gib:.2f} GiB"
+
+
+def verify_completed_layer(layer_dir: Path, plan: LayerPlan) -> bool:
+    marker_path = layer_dir / ".layer.complete.json"
+    layer_tar = layer_dir / "layer.tar"
+    if not marker_path.exists() or not layer_tar.exists():
+        return False
+
+    try:
+        metadata = read_json(marker_path)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    return metadata.get("compressed_digest") == plan.compressed_digest and metadata.get("diff_id") == plan.diff_id
+
+
+def download_blob(
+    plan: LayerPlan,
+    layer_dir: Path,
+    client_factory: Callable[[], RegistryClient],
+) -> Path:
+    expected_compressed = digest_hex(plan.compressed_digest)
+    blob_path = layer_dir / "layer.blob"
+    partial_path = layer_dir / "layer.blob.part"
+
+    if blob_path.exists():
+        print(f"[{plan.label}] verifying cached blob {plan.compressed_digest}", flush=True)
+        if compute_sha256(blob_path) == expected_compressed:
+            print(f"[{plan.label}] reusing cached blob {plan.compressed_digest}", flush=True)
+            return blob_path
+        blob_path.unlink()
+
+    attempts = 0
+    while attempts < 2:
+        attempts += 1
+        existing_size = partial_path.stat().st_size if partial_path.exists() else 0
+        hasher = hashlib.sha256()
+        if existing_size > 0:
+            print(f"[{plan.label}] resuming blob at {format_progress(existing_size, None)}", flush=True)
+            with partial_path.open("rb") as existing_handle:
+                while True:
+                    chunk = existing_handle.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    hasher.update(chunk)
+
+        headers: dict[str, str] = {}
+        if existing_size > 0:
+            headers["Range"] = f"bytes={existing_size}-"
+
+        client = client_factory()
+        try:
+            response = client.open(plan.blob_url, headers=headers)
+        except error.HTTPError as exc:
+            if exc.code == 416 and partial_path.exists():
+                if compute_sha256(partial_path) != expected_compressed:
+                    partial_path.unlink(missing_ok=True)
+                    raise RuntimeError(f"[{plan.label}] cached partial blob is invalid and cannot be resumed") from exc
+                partial_path.replace(blob_path)
+                return blob_path
+            raise
+
+        with response:
+            status_code = response.getcode() or 200
+            if existing_size > 0 and status_code != 206:
+                print(f"[{plan.label}] registry ignored range request, restarting blob download", flush=True)
+                partial_path.unlink(missing_ok=True)
+                continue
+
+            if status_code == 206 and existing_size > 0:
+                mode = "ab"
+                bytes_written = existing_size
+            else:
+                mode = "wb"
+                bytes_written = 0
+                hasher = hashlib.sha256()
+
+            total_bytes = resolve_total_size(response.headers, status_code, bytes_written)
+            last_log = time.monotonic()
+
+            with partial_path.open(mode) as out_handle:
+                while True:
+                    chunk = response.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    out_handle.write(chunk)
+                    hasher.update(chunk)
+                    bytes_written += len(chunk)
+
+                    now = time.monotonic()
+                    if now - last_log >= PROGRESS_INTERVAL_SECONDS:
+                        print(f"[{plan.label}] downloaded {format_progress(bytes_written, total_bytes)}", flush=True)
+                        last_log = now
+
+        actual_compressed = hasher.hexdigest()
+        if actual_compressed != expected_compressed:
+            partial_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Compressed digest mismatch for {plan.label}: expected {expected_compressed} got {actual_compressed}"
+            )
+
+        partial_path.replace(blob_path)
+        print(f"[{plan.label}] blob ready {plan.compressed_digest}", flush=True)
+        return blob_path
+
+    raise RuntimeError(f"[{plan.label}] failed to resume blob download after retries")
+
+
+def materialize_layer(plan: LayerPlan, layer_dir: Path) -> None:
+    if verify_completed_layer(layer_dir, plan):
+        print(f"[{plan.label}] reusing materialized layer {plan.layer_id}", flush=True)
+        return
+
+    blob_path = layer_dir / "layer.blob"
+    layer_tar = layer_dir / "layer.tar"
+    marker_path = layer_dir / ".layer.complete.json"
+    expected_compressed = digest_hex(plan.compressed_digest)
+    expected_diff_id = digest_hex(plan.diff_id)
+
+    compressed_hasher = hashlib.sha256()
+    uncompressed_hasher = hashlib.sha256()
+    bytes_written = 0
+    last_log = time.monotonic()
+
+    with blob_path.open("rb") as blob_handle:
+        wrapped = HashingReader(blob_handle, compressed_hasher)
+        source = gzip.GzipFile(fileobj=wrapped) if plan.compressed else wrapped
+
+        with layer_tar.open("wb") as out_handle:
             while True:
                 chunk = source.read(CHUNK_SIZE)
                 if not chunk:
@@ -230,48 +434,45 @@ def stream_layer(
                 now = time.monotonic()
                 if now - last_log >= PROGRESS_INTERVAL_SECONDS:
                     gib = bytes_written / (1024 ** 3)
-                    print(f"[{layer_label}] wrote {gib:.2f} GiB", flush=True)
+                    print(f"[{plan.label}] materialized {gib:.2f} GiB", flush=True)
                     last_log = now
 
-    actual_compressed_digest = compressed_hasher.hexdigest()
+    actual_compressed = compressed_hasher.hexdigest()
     actual_diff_id = uncompressed_hasher.hexdigest()
-    expected_compressed = compressed_digest.split(":", 1)[1]
-    expected_uncompressed = expected_diff_id.split(":", 1)[1]
-
-    if actual_compressed_digest != expected_compressed:
+    if actual_compressed != expected_compressed:
+        layer_tar.unlink(missing_ok=True)
         raise RuntimeError(
-            f"Compressed digest mismatch for {layer_label}: expected {expected_compressed} got {actual_compressed_digest}"
+            f"Compressed digest mismatch for {plan.label}: expected {expected_compressed} got {actual_compressed}"
         )
-    if actual_diff_id != expected_uncompressed:
+    if actual_diff_id != expected_diff_id:
+        layer_tar.unlink(missing_ok=True)
         raise RuntimeError(
-            f"Diff ID mismatch for {layer_label}: expected {expected_uncompressed} got {actual_diff_id}"
+            f"Diff ID mismatch for {plan.label}: expected {expected_diff_id} got {actual_diff_id}"
         )
 
-
-def add_file_to_tar(tar: tarfile.TarFile, base_dir: Path, file_path: Path) -> None:
-    arcname = file_path.relative_to(base_dir).as_posix()
-    tar.add(file_path, arcname=arcname, recursive=False)
+    write_json(marker_path, {"compressed_digest": plan.compressed_digest, "diff_id": plan.diff_id})
 
 
-def pack_archive(staging_dir: Path, archive_path: Path) -> None:
+def write_layer_files(layer_dir: Path, layer_id: str, parent_id: str | None, created: str | None) -> None:
+    (layer_dir / "VERSION").write_text("1.0\n", encoding="ascii")
+    layer_json: dict[str, Any] = {"id": layer_id}
+    if parent_id:
+        layer_json["parent"] = parent_id
+    if created:
+        layer_json["created"] = created
+    write_json(layer_dir / "json", layer_json)
+
+
+def pack_archive(staging_dir: Path, archive_path: Path, config_file_name: str, layer_ids: list[str]) -> None:
     if archive_path.exists():
         archive_path.unlink()
 
     with tarfile.open(archive_path, mode="w", format=tarfile.PAX_FORMAT) as tar:
-        add_file_to_tar(tar, staging_dir, staging_dir / "manifest.json")
-        add_file_to_tar(tar, staging_dir, staging_dir / "repositories")
-
-        for path in sorted(staging_dir.iterdir()):
-            if path.name in {"manifest.json", "repositories"}:
-                continue
-            if path.is_file():
-                add_file_to_tar(tar, staging_dir, path)
-                continue
-
-            for root, _, files in os.walk(path):
-                root_path = Path(root)
-                for file_name in sorted(files):
-                    add_file_to_tar(tar, staging_dir, root_path / file_name)
+        for file_name in ["manifest.json", "repositories", config_file_name]:
+            add_file_to_tar(tar, staging_dir, staging_dir / file_name)
+        for layer_id in layer_ids:
+            for file_name in ["VERSION", "json", "layer.tar"]:
+                add_file_to_tar(tar, staging_dir, staging_dir / layer_id / file_name)
 
 
 def maybe_load_archive(archive_path: Path) -> None:
@@ -290,17 +491,11 @@ def maybe_load_archive(archive_path: Path) -> None:
 def main() -> int:
     args = parse_args()
     registry, repository, reference, _ = parse_image_reference(args.image)
-    opener = build_opener(args.proxy)
-    client = RegistryClient(registry=registry, repository=repository, opener=opener)
+    client = build_registry_client(registry=registry, repository=repository, proxy_url=args.proxy)
 
     image_name = f"{registry}/{repository}:{reference}"
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    archive_name = args.archive_name or f"{sanitize_name(image_name)}_docker.tar"
-    staging_dir = output_dir / f"{sanitize_name(image_name)}_staging"
-    archive_path = output_dir / archive_name
-    ensure_empty_dir(staging_dir)
+    ensure_dir(output_dir)
 
     manifest_url = f"{client.base_url}/v2/{repository}/manifests/{reference}"
     manifest_payload, manifest_headers = client.get_json(
@@ -325,48 +520,71 @@ def main() -> int:
     config_bytes = client.get_bytes(config_url)
     config = json.loads(config_bytes.decode("utf-8"))
 
+    manifest_digest = manifest_headers.get("docker-content-digest", config_digest)
+    archive_name = args.archive_name or f"{sanitize_name(image_name)}_docker.tar"
+    staging_dir = output_dir / f"{sanitize_name(image_name)}_{digest_hex(manifest_digest)}_staging"
+    archive_path = output_dir / archive_name
+    ensure_dir(staging_dir)
+
     diff_ids = config.get("rootfs", {}).get("diff_ids", [])
     layers = manifest_payload.get("layers", [])
     if len(diff_ids) != len(layers):
         raise RuntimeError("Layer count mismatch between config diff_ids and manifest layers")
 
-    config_file_name = f"{config_digest.split(':', 1)[1]}.json"
+    config_file_name = f"{digest_hex(config_digest)}.json"
     (staging_dir / config_file_name).write_bytes(config_bytes)
+    write_json(
+        staging_dir / ".staging.json",
+        {
+            "image": image_name,
+            "manifest_digest": manifest_digest,
+            "config_digest": config_digest,
+        },
+    )
 
-    layer_ids: list[str] = []
-    parent_id: str | None = None
+    layer_plans: list[LayerPlan] = []
     for index, (layer_info, diff_id) in enumerate(zip(layers, diff_ids), start=1):
-        layer_id = diff_id.split(":", 1)[1]
-        layer_ids.append(layer_id)
-        layer_dir = staging_dir / layer_id
-        layer_dir.mkdir(parents=True, exist_ok=True)
-        layer_tar = layer_dir / "layer.tar"
-
         blob_url = layer_info.get("urls", [None])[0]
         if not blob_url:
             blob_url = f"{client.base_url}/v2/{repository}/blobs/{layer_info['digest']}"
 
-        print(f"[layer {index}/{len(layers)}] downloading {layer_info['digest']}", flush=True)
-        stream_layer(
-            client=client,
+        plan = LayerPlan(
+            index=index,
+            total=len(layers),
+            layer_id=digest_hex(diff_id),
             blob_url=blob_url,
-            headers={},
             compressed_digest=layer_info["digest"],
-            expected_diff_id=diff_id,
-            target_path=layer_tar,
-            layer_label=f"layer {index}/{len(layers)}",
+            diff_id=diff_id,
+            media_type=layer_info.get("mediaType", ""),
             compressed=layer_info.get("mediaType", "").endswith("+gzip") or layer_info.get("mediaType", "").endswith(".tar.gzip"),
         )
+        layer_plans.append(plan)
+        ensure_dir(staging_dir / plan.layer_id)
 
-        (layer_dir / "VERSION").write_text("1.0\n", encoding="ascii")
-        layer_json: dict[str, Any] = {"id": layer_id}
-        if parent_id:
-            layer_json["parent"] = parent_id
-        created = config.get("created")
-        if created:
-            layer_json["created"] = created
-        write_json(layer_dir / "json", layer_json)
-        parent_id = layer_id
+    jobs = max(1, min(args.jobs, len(layer_plans) if layer_plans else 1))
+    print(f"Downloading {len(layer_plans)} layers with {jobs} worker(s)", flush=True)
+    client_factory = lambda: build_registry_client(registry=registry, repository=repository, proxy_url=args.proxy)
+    future_map: dict[concurrent.futures.Future[Path], LayerPlan] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        for plan in layer_plans:
+            layer_dir = staging_dir / plan.layer_id
+            future = executor.submit(download_blob, plan, layer_dir, client_factory)
+            future_map[future] = plan
+
+        for future in concurrent.futures.as_completed(future_map):
+            plan = future_map[future]
+            future.result()
+            print(f"[{plan.label}] download complete", flush=True)
+
+    layer_ids: list[str] = []
+    parent_id: str | None = None
+    created = config.get("created")
+    for plan in layer_plans:
+        layer_ids.append(plan.layer_id)
+        layer_dir = staging_dir / plan.layer_id
+        materialize_layer(plan, layer_dir)
+        write_layer_files(layer_dir, plan.layer_id, parent_id, created)
+        parent_id = plan.layer_id
 
     write_json(
         staging_dir / "manifest.json",
@@ -384,7 +602,7 @@ def main() -> int:
     )
 
     print(f"Packing {archive_path}", flush=True)
-    pack_archive(staging_dir, archive_path)
+    pack_archive(staging_dir, archive_path, config_file_name, layer_ids)
     archive_size_gib = archive_path.stat().st_size / (1024 ** 3)
     print(f"Archive ready: {archive_path} ({archive_size_gib:.2f} GiB)", flush=True)
 

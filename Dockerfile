@@ -56,6 +56,8 @@ RUN & 'C:/Program Files/nodejs/npm.cmd' install -g \
 
 WORKDIR C:/workspace
 COPY keepalive.ps1 C:/workspace/keepalive.ps1
+COPY shotwright-config.json C:/workspace/shotwright-config.json
+COPY setup-versions.yml C:/workspace/setup-versions.yml
 COPY scripts/ C:/workspace/scripts/
 
 CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/workspace/scripts/runtime_entrypoint.ps1"]
