@@ -1,5 +1,13 @@
 ARG DEV_BASE_IMAGE=shotwright:latest
 ARG AE_SETUP_IMAGE=ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2
+ARG http_proxy=http://192.168.1.80:8080
+ARG https_proxy=http://192.168.1.80:8080
+ARG HTTP_PROXY=http://192.168.1.80:8080
+ARG HTTPS_PROXY=http://192.168.1.80:8080
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+ARG PIP_DEFAULT_TIMEOUT=120
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 FROM ${AE_SETUP_IMAGE} AS after-effects-setup
 
@@ -9,30 +17,52 @@ ARG http_proxy
 ARG https_proxy
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG PIP_INDEX_URL
+ARG PIP_TRUSTED_HOST
+ARG PIP_DEFAULT_TIMEOUT
+ARG NPM_REGISTRY
 
 ENV http_proxy=${http_proxy} \
       https_proxy=${https_proxy} \
       HTTP_PROXY=${HTTP_PROXY} \
-      HTTPS_PROXY=${HTTPS_PROXY}
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
+    PIP_DEFAULT_TIMEOUT=${PIP_DEFAULT_TIMEOUT} \
+    NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
 
 SHELL ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
 
 WORKDIR C:/workspace
 
+COPY shotwright-config.json C:/workspace/shotwright-config.json
+COPY setup-versions.yml C:/workspace/setup-versions.yml
+COPY scripts/ C:/workspace/scripts/
+
+RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
+        & python -m pip config --global set global.index-url $env:PIP_INDEX_URL; \
+    }; \
+    if (-not [string]::IsNullOrWhiteSpace($env:PIP_TRUSTED_HOST)) { \
+        & python -m pip config --global set global.trusted-host $env:PIP_TRUSTED_HOST; \
+    }; \
+    if (-not [string]::IsNullOrWhiteSpace($env:NPM_CONFIG_REGISTRY)) { \
+        & 'C:/Program Files/nodejs/npm.cmd' config set registry $env:NPM_CONFIG_REGISTRY; \
+    }
+
 COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
 COPY src/backend/app/ C:/workspace/src/backend/app/
-RUN & python -m pip install --no-cache-dir --quiet uv; \
+RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT uv; \
     Set-Location C:/workspace/src/backend; \
-    & python -m uv pip install --system .
+    & python -m uv pip install --system --index-url $env:PIP_INDEX_URL .
 
 COPY src/frontend/package.json C:/workspace/src/frontend/package.json
 RUN Set-Location C:/workspace/src/frontend; \
-    & 'C:/Program Files/nodejs/npm.cmd' install --no-progress
+    & 'C:/Program Files/nodejs/npm.cmd' install --no-progress --fetch-retries 5 --fetch-timeout 120000
 
 COPY src/scripts/start-dev-container.ps1 C:/workspace/src/scripts/start-dev-container.ps1
 
 COPY --from=after-effects-setup C:/payload C:/data/payload
-RUN & C:/workspace/scripts/install/install_after_effects_in_container.ps1 -RequirePayload
+RUN & 'C:/workspace/scripts/install/install_after_effects_in_container.ps1' -RequirePayload
 
 EXPOSE 3000 8000
 

@@ -2,6 +2,8 @@
 
 前后端分离的 Copilot Agent 运行时平台，通过 Windows 容器访问 After Effects。
 
+验证渲染的 GIF 预览与 `validation.mp4` 产物说明见 [../README.md](../README.md) 和 [../README-cn.md](../README-cn.md)，本文件只覆盖 `src/` 下的平台层内容。
+
 ## 架构
 
 ```

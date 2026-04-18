@@ -22,10 +22,14 @@ services:
       args:
         DEV_BASE_IMAGE: ${SHOTWRIGHT_DEV_BASE_IMAGE:-shotwright:latest}
         AE_SETUP_IMAGE: ${SHOTWRIGHT_AE_SETUP_IMAGE:-ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2}
-        http_proxy: ${http_proxy:-}
-        https_proxy: ${https_proxy:-}
-        HTTP_PROXY: ${HTTP_PROXY:-}
-        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        http_proxy: ${http_proxy:-http://192.168.1.80:8080}
+        https_proxy: ${https_proxy:-http://192.168.1.80:8080}
+        HTTP_PROXY: ${HTTP_PROXY:-http://192.168.1.80:8080}
+        HTTPS_PROXY: ${HTTPS_PROXY:-http://192.168.1.80:8080}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+        PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     container_name: shotwright-dev
     restart: unless-stopped
     depends_on:

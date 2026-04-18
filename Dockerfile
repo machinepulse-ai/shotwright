@@ -1,4 +1,13 @@
 ARG BASE_IMAGE=mcr.microsoft.com/windows/server:ltsc2025
+ARG http_proxy=http://192.168.1.80:8080
+ARG https_proxy=http://192.168.1.80:8080
+ARG HTTP_PROXY=http://192.168.1.80:8080
+ARG HTTPS_PROXY=http://192.168.1.80:8080
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+ARG PIP_DEFAULT_TIMEOUT=120
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ARG CHOCO_SOURCE=https://mirrors.aliyun.com/chocolatey/
 
 # =============================================================================
 # Stage: base — shared toolchain for all targets
@@ -9,11 +18,21 @@ ARG http_proxy
 ARG https_proxy
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
+ARG PIP_INDEX_URL
+ARG PIP_TRUSTED_HOST
+ARG PIP_DEFAULT_TIMEOUT
+ARG NPM_REGISTRY
+ARG CHOCO_SOURCE
 
 ENV http_proxy=${http_proxy} \
       https_proxy=${https_proxy} \
       HTTP_PROXY=${HTTP_PROXY} \
-      HTTPS_PROXY=${HTTPS_PROXY}
+      HTTPS_PROXY=${HTTPS_PROXY} \
+      PIP_INDEX_URL=${PIP_INDEX_URL} \
+      PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
+      PIP_DEFAULT_TIMEOUT=${PIP_DEFAULT_TIMEOUT} \
+      NPM_CONFIG_REGISTRY=${NPM_REGISTRY} \
+      CHOCO_SOURCE=${CHOCO_SOURCE}
 
 SHELL ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
 
@@ -27,13 +46,20 @@ RUN Set-ExecutionPolicy Bypass -Scope Process -Force; \
     iex ($webClient.DownloadString('https://community.chocolatey.org/install.ps1'))
 
 # Common tools (--no-progress suppresses the progress-bar spam)
-RUN choco install -y --no-progress \
-      ffmpeg \
-      git \
-      nodejs \
-      python313 \
-      vcredist-all \
-      vim
+RUN $chocoArgs = @('install', '-y', '--no-progress'); \
+      if (-not [string]::IsNullOrWhiteSpace($env:CHOCO_SOURCE)) { $chocoArgs += @('--source', $env:CHOCO_SOURCE) }; \
+      $chocoArgs += @('ffmpeg', 'git', 'nodejs', 'python313', 'vcredist-all', 'vim'); \
+      & choco @chocoArgs
+
+RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
+            & python -m pip config --global set global.index-url $env:PIP_INDEX_URL; \
+      }; \
+      if (-not [string]::IsNullOrWhiteSpace($env:PIP_TRUSTED_HOST)) { \
+            & python -m pip config --global set global.trusted-host $env:PIP_TRUSTED_HOST; \
+      }; \
+      if (-not [string]::IsNullOrWhiteSpace($env:NPM_CONFIG_REGISTRY)) { \
+            & 'C:/Program Files/nodejs/npm.cmd' config set registry $env:NPM_CONFIG_REGISTRY; \
+      }
 
 # =============================================================================
 # Stage: shotwright — AE runtime container (default target)
@@ -68,7 +94,7 @@ CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/work
 FROM base AS backend
 
 RUN $ProgressPreference = 'SilentlyContinue'; \
-    & python -m pip install --no-cache-dir --quiet uv
+      & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT uv
 
 WORKDIR C:/app
 

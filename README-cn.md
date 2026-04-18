@@ -46,22 +46,15 @@
 ## ✨ 验证演示
 
 <p align="center">
-	<a href="./validation-data/output/validation.mp4">
-		<img src="./docs/assets/validation-preview.png" alt="Shotwright 验证渲染预览" width="960" />
-	</a>
+	<img src="./docs/assets/validation-preview.gif" alt="Shotwright 验证渲染 GIF 预览" width="640" />
 </p>
 
-<p align="center">
-	<a href="./validation-data/output/validation.mp4">
-		<img src="https://img.shields.io/badge/打开-validation.mp4-FF5A5F?style=for-the-badge&logo=adobeaftereffects&logoColor=white" alt="打开 validation.mp4" />
-	</a>
-</p>
-
-当前冒烟测试已经能够通过 Windows 容器、宿主机挂载的 After Effects 安装与 nexrender，稳定产出真实的 mp4 文件。
+上方 GIF 截取自 validation mp4，是一个 4 秒循环的仓库内演示预览。冒烟测试本身仍会通过 Windows 容器、宿主机挂载的 After Effects 安装与 nexrender，稳定产出真实的 mp4 文件。
 
 | 产物 | 状态 | 说明 |
 | --- | --- | --- |
-| `validation.mp4` | ✅ 已提交 | 当前仓库状态下的标准冒烟测试输出 |
+| `validation-preview.gif` | ✅ 已提交 | 由 `validation.mp4` 导出的 4 秒循环 README 演示资源 |
+| `validation.mp4` | 🟡 本地生成 | 冒烟测试运行时产出的真实渲染结果 |
 | `validation_motion.aep` | 🟡 本地生成 | 验证时重新生成，故意不纳入 Git，以避免不必要的二进制文件波动 |
 
 ## 🎬 为什么选择 Shotwright

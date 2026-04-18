@@ -18,3 +18,5 @@ node_modules/
 !src/frontend/public/**
 !src/frontend/src/
 !src/frontend/src/**
+!src/scripts/
+!src/scripts/**

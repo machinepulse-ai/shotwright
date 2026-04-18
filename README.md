@@ -55,22 +55,15 @@ Build Windows render workers, mount a real After Effects install or auto-install
 ## ✨ Validation Demo
 
 <p align="center">
-	<a href="./validation-data/output/validation.mp4">
-		<img src="./docs/assets/validation-preview.png" alt="Shotwright validation render preview" width="960" />
-	</a>
+	<img src="./docs/assets/validation-preview.gif" alt="Shotwright validation render GIF preview" width="640" />
 </p>
 
-<p align="center">
-	<a href="./validation-data/output/validation.mp4">
-		<img src="https://img.shields.io/badge/Open-validation.mp4-FF5A5F?style=for-the-badge&logo=adobeaftereffects&logoColor=white" alt="Open validation.mp4" />
-	</a>
-</p>
-
-The current smoke test renders a real mp4 through a Windows container, a mounted host After Effects installation, and nexrender.
+The GIF above is a short looping repository preview cut from the validation mp4. The smoke test itself still renders a real mp4 through a Windows container, a mounted host After Effects installation, and nexrender.
 
 | Artifact | Status | Notes |
 | --- | --- | --- |
-| `validation.mp4` | ✅ committed | Smoke-test render output for the current repository state |
+| `validation-preview.gif` | ✅ committed | 4-second looping README demo asset derived from `validation.mp4` |
+| `validation.mp4` | 🟡 generated locally | Smoke-test render output produced during validation runs |
 | `validation_motion.aep` | 🟡 generated locally | Recreated during validation and intentionally excluded from Git to avoid binary churn |
 
 ## 🎬 Why Shotwright
