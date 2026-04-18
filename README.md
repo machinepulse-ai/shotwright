@@ -31,10 +31,7 @@ Build Windows render workers, mount a real After Effects install or auto-install
 > Shotwright keeps After Effects at the center of the workflow. The goal is not generic AI video automation; it is reproducible AE runtime infrastructure that lets AI agents handle the repetitive execution work while designers keep taste and control.
 
 > [!NOTE]
-> In this README, installer cache means the After Effects package set used for container installation, either pulled from GHCR or prepared locally.
-
-> [!NOTE]
-> Shared defaults such as host and container paths, runner temp subdirectory names, base image tags, and nexrender package versions now live in [shotwright-config.json](shotwright-config.json). `setup-versions.yml` remains the source of truth for the selected AE setup version.
+> In this README, installer cache means the After Effects package set used for container installation, either pulled from GHCR or prepared locally. Shared defaults such as host and container paths, runner temp subdirectory names, base image tags, and nexrender package versions now live in [shotwright-config.json](shotwright-config.json). `setup-versions.yml` remains the source of truth for the selected AE setup version.
 
 <details>
 <summary><strong>Jump to section</strong></summary>
@@ -54,9 +51,7 @@ Build Windows render workers, mount a real After Effects install or auto-install
 
 ## ✨ Validation Demo
 
-<p align="center">
-	<img src="./docs/assets/validation-preview.gif" alt="Shotwright validation render GIF preview" width="640" />
-</p>
+![Shotwright validation render GIF preview](./docs/assets/validation-preview.gif)
 
 The GIF above is a short looping repository preview cut from the validation mp4. The smoke test itself still renders a real mp4 through a Windows container, a mounted host After Effects installation, and nexrender.
 
@@ -107,10 +102,7 @@ flowchart LR
 	- An installer payload obtained with the GHCR-first workflow in Step 3
 
 > [!TIP]
-> Pre-built installer payload images are published to GHCR. See [setup-versions.yml](setup-versions.yml) for available versions.
-
-> [!TIP]
-> Proxy-aware builds are already wired through the Dockerfile via `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` build args.
+> Pre-built installer payload images are published to GHCR, and proxy-aware builds are already wired through the Dockerfile via `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` build args. See [setup-versions.yml](setup-versions.yml) for available versions.
 
 ## 🚀 Quick Start
 

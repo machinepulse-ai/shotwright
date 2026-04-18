@@ -22,10 +22,7 @@
 > Shotwright 始终把 After Effects 放在工作流中心。它不是泛化的 AI 视频自动化工具，而是一套可复现、可审计的 AE 运行时基础设施：让 AI 智能体接手重复的执行动作，让设计师保留审美判断与最终控制权。
 
 > [!NOTE]
-> 本文约定如下：AI Agent 统一译为“AI 智能体”；proxy 统一译为“代理”；installer cache 统一称为“安装缓存”。
-
-> [!NOTE]
-> 宿主机路径、容器路径、runner 临时目录名、基础镜像标签和 nexrender 版本等共享默认值，现在统一放在 [shotwright-config.json](shotwright-config.json)；`setup-versions.yml` 仍然只负责当前选中的 AE setup 版本。
+> 本文约定如下：AI Agent 统一译为“AI 智能体”；proxy 统一译为“代理”；installer cache 统一称为“安装缓存”。宿主机路径、容器路径、runner 临时目录名、基础镜像标签和 nexrender 版本等共享默认值，现在统一放在 [shotwright-config.json](shotwright-config.json)；`setup-versions.yml` 仍然只负责当前选中的 AE setup 版本。
 
 <details>
 <summary><strong>目录</strong></summary>
@@ -45,9 +42,7 @@
 
 ## ✨ 验证演示
 
-<p align="center">
-	<img src="./docs/assets/validation-preview.gif" alt="Shotwright 验证渲染 GIF 预览" width="640" />
-</p>
+![Shotwright 验证渲染 GIF 预览](./docs/assets/validation-preview.gif)
 
 上方 GIF 截取自 validation mp4，是一个 4 秒循环的仓库内演示预览。冒烟测试本身仍会通过 Windows 容器、宿主机挂载的 After Effects 安装与 nexrender，稳定产出真实的 mp4 文件。
 
@@ -98,10 +93,7 @@ flowchart LR
 	- 按照第 3 步的 GHCR 优先流程获取安装载荷
 
 > [!TIP]
-> 预构建的安装载荷镜像已发布到 GHCR。可用版本见 [setup-versions.yml](setup-versions.yml)。
-
-> [!TIP]
-> Dockerfile 已通过 `http_proxy`、`https_proxy`、`HTTP_PROXY`、`HTTPS_PROXY` 构建参数内置代理支持。
+> 预构建的安装载荷镜像已发布到 GHCR，Dockerfile 也已经通过 `http_proxy`、`https_proxy`、`HTTP_PROXY`、`HTTPS_PROXY` 构建参数内置代理支持。可用版本见 [setup-versions.yml](setup-versions.yml)。
 
 ## 🚀 快速开始
 
