@@ -43,7 +43,7 @@ services:
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
-        CHOCO_SOURCE: ${CHOCO_SOURCE:-https://mirrors.aliyun.com/chocolatey/}
+        CHOCO_SOURCE: ${CHOCO_SOURCE:-}
     container_name: shotwright-api
     restart: unless-stopped
     ports:
@@ -87,7 +87,7 @@ services:
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
-        CHOCO_SOURCE: ${CHOCO_SOURCE:-https://mirrors.aliyun.com/chocolatey/}
+        CHOCO_SOURCE: ${CHOCO_SOURCE:-}
     container_name: shotwright-ui
     restart: unless-stopped
     ports:

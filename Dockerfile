@@ -7,7 +7,7 @@ ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 ARG PIP_DEFAULT_TIMEOUT=120
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-ARG CHOCO_SOURCE=https://mirrors.aliyun.com/chocolatey/
+ARG CHOCO_SOURCE
 
 # =============================================================================
 # Stage: base — shared toolchain for all targets
