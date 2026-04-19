@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     copilot_http_proxy: str = ""
     copilot_https_proxy: str = ""
     copilot_no_proxy: str = ""
+    copilot_turn_timeout_seconds: float = 900.0
 
     # --- Paths ---
     upload_dir: str = "C:\\data\\uploads"

@@ -45,11 +45,15 @@ RUN Set-ExecutionPolicy Bypass -Scope Process -Force; \
     if ($proxy) { $webClient.Proxy = New-Object System.Net.WebProxy($proxy, $true) }; \
     iex ($webClient.DownloadString('https://community.chocolatey.org/install.ps1'))
 
+COPY scripts/install/ensure_pwsh_compat.ps1 C:/bootstrap/ensure_pwsh_compat.ps1
+
 # Common tools (--no-progress suppresses the progress-bar spam)
 RUN $chocoArgs = @('install', '-y', '--no-progress'); \
       if (-not [string]::IsNullOrWhiteSpace($env:CHOCO_SOURCE)) { $chocoArgs += @('--source', $env:CHOCO_SOURCE) }; \
       $chocoArgs += @('ffmpeg', 'git', 'nodejs', 'python313', 'vcredist-all', 'vim'); \
       & choco @chocoArgs
+
+RUN & 'C:/bootstrap/ensure_pwsh_compat.ps1'
 
 RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
             & python -m pip config --global set global.index-url $env:PIP_INDEX_URL; \

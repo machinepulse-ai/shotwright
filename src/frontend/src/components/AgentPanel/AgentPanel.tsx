@@ -1,4 +1,15 @@
-import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  ClipboardEvent,
+  CSSProperties,
+  DragEvent,
+  KeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
@@ -17,7 +28,16 @@ import {
   updateSession,
   uploadProject,
 } from "../../services/api";
-import { AgentContext, ChatMessage, CopilotModelOption, ProjectInfo, ReasoningEffort, Session, SessionEvent } from "../../types";
+import {
+  AgentContext,
+  ChatImageAttachment,
+  ChatMessage,
+  CopilotModelOption,
+  ProjectInfo,
+  ReasoningEffort,
+  Session,
+  SessionEvent,
+} from "../../types";
 import { TranslationCopy, useI18n } from "../../i18n";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
@@ -47,6 +67,43 @@ type MetaChip = {
   tone: "primary" | "accent" | "neutral" | "muted" | "danger" | "success";
 };
 
+const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_COMPOSER_IMAGE_BYTES = 6 * 1024 * 1024;
+const MAX_COMPOSER_ATTACHMENTS = 4;
+const DEFAULT_COMPOSER_HEIGHT = 220;
+const MIN_COMPOSER_HEIGHT = 176;
+const MIN_TRANSCRIPT_HEIGHT = 220;
+const COMPOSER_SPLITTER_HEIGHT = 14;
+const COMPOSER_TEXTAREA_MIN_HEIGHT = 132;
+const COMPOSER_HEIGHT_STORAGE_KEY = "shotwright_composer_height";
+
+type TimelineTone = MetaChip["tone"];
+
+type TimelineDetailField = {
+  label: string;
+  value: string;
+  mono?: boolean;
+  tone?: TimelineTone;
+};
+
+type TimelineDetailBlock = {
+  label: string;
+  value: string;
+  kind: "text" | "code" | "error";
+};
+
+type TimelinePresentation = {
+  tone: TimelineTone;
+  stage: string;
+  fields: TimelineDetailField[];
+  blocks: TimelineDetailBlock[];
+  rawPayload: string | null;
+};
+
+type PendingImageAttachment = ChatImageAttachment & {
+  id: string;
+};
+
 function buildUiError(err: any, fallbackKey: UiErrorKey): UiError {
   const detail = err?.response?.data?.detail;
   if (typeof detail === "string" && detail.trim()) {
@@ -59,6 +116,18 @@ function buildUiError(err: any, fallbackKey: UiErrorKey): UiError {
 function getUiErrorMessage(error: UiError | null, copy: TranslationCopy) {
   if (!error) return null;
   return error.type === "api" ? error.message : copy.errors[error.key];
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function isScrolledNearBottom(element: HTMLElement, threshold = 32) {
+  return element.scrollTop + element.clientHeight >= element.scrollHeight - threshold;
+}
+
+function isScrolledNearTop(element: HTMLElement, threshold = 32) {
+  return element.scrollTop <= threshold;
 }
 
 function parseDateValue(value: string) {
@@ -109,8 +178,163 @@ function basename(value: string | null | undefined, fallback: string) {
   return parts[parts.length - 1] || value;
 }
 
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("image-read-failed"));
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error("image-read-failed"));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function measureImageDataUrl(dataUrl: string) {
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = () => reject(new Error("image-read-failed"));
+    image.src = dataUrl;
+  });
+}
+
+async function buildPendingImageAttachment(file: File): Promise<PendingImageAttachment> {
+  const mimeType = file.type.trim().toLowerCase();
+  if (!SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(mimeType)) {
+    throw new Error("unsupported-image");
+  }
+
+  if (file.size > MAX_COMPOSER_IMAGE_BYTES) {
+    throw new Error("image-too-large");
+  }
+
+  const dataUrl = await readFileAsDataUrl(file);
+  const dimensions = await measureImageDataUrl(dataUrl);
+  const extension = mimeType.split("/")[1] || "png";
+  const displayName = file.name?.trim() || `image-${Date.now()}.${extension}`;
+
+  return {
+    id: `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type: "image",
+    mime_type: mimeType,
+    data_url: dataUrl,
+    display_name: displayName,
+    width: dimensions.width,
+    height: dimensions.height,
+    size_bytes: file.size,
+  };
+}
+
+function getClipboardImageFiles(event: ClipboardEvent<HTMLTextAreaElement>) {
+  return Array.from(event.clipboardData?.items || [])
+    .filter((item) => item.kind === "file" && SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(item.type.toLowerCase()))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+}
+
+function getDroppedImageFiles(event: DragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer?.files || []).filter((file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()));
+}
+
+function getComposerAttachmentErrorMessage(error: unknown, copy: TranslationCopy) {
+  const code = error instanceof Error ? error.message : "";
+
+  switch (code) {
+    case "unsupported-image":
+      return copy.agent.attachmentErrorUnsupported;
+    case "image-too-large":
+      return copy.agent.attachmentErrorTooLarge;
+    default:
+      return copy.agent.attachmentErrorRead;
+  }
+}
+
 function hasEventData(event: SessionEvent) {
   return Boolean(event.data && Object.keys(event.data).length);
+}
+
+function compactEventPayload(value: unknown): unknown | null {
+  if (value == null) return null;
+
+  if (Array.isArray(value)) {
+    const nextValues = value.map((entry) => compactEventPayload(entry)).filter((entry) => entry !== null);
+    return nextValues.length ? nextValues : null;
+  }
+
+  if (typeof value === "object") {
+    const nextEntries = Object.entries(value as Record<string, unknown>)
+      .map(([key, entry]) => [key, compactEventPayload(entry)] as const)
+      .filter(([, entry]) => entry !== null);
+
+    return nextEntries.length ? Object.fromEntries(nextEntries) : null;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  return value;
+}
+
+function extractEventText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => extractEventText(entry)).filter(Boolean).join(", ");
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return (
+      [record.message, record.error, record.summary, record.content, record.reason]
+        .map((entry) => extractEventText(entry))
+        .find(Boolean) || ""
+    );
+  }
+
+  return "";
+}
+
+function formatEventFieldValue(value: unknown): string {
+  if (value == null) return "";
+
+  const textValue = extractEventText(value);
+  if (textValue) return textValue;
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => formatEventFieldValue(entry)).filter(Boolean).join(", ");
+  }
+
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+
+  return String(value);
+}
+
+function formatEventBlockValue(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  return JSON.stringify(value, null, 2);
+}
+
+function formatCommandValue(command: unknown, args: unknown): string {
+  const parts = [extractEventText(command)];
+
+  if (Array.isArray(args)) {
+    parts.push(...args.map((entry) => formatEventFieldValue(entry)).filter(Boolean));
+  } else if (args != null) {
+    parts.push(formatEventFieldValue(args));
+  }
+
+  return parts.filter(Boolean).join(" ").trim();
 }
 
 function formatTimelineEventLabel(value: string) {
@@ -122,11 +346,198 @@ function formatTimelineEventLabel(value: string) {
 }
 
 function getTimelinePreviewText(event: SessionEvent) {
-  return event.summary === event.type ? "" : event.summary;
+  if (event.summary !== event.type) {
+    return event.summary;
+  }
+
+  const compactData = compactEventPayload(event.data);
+  const payload = compactData && typeof compactData === "object" && !Array.isArray(compactData)
+    ? (compactData as Record<string, unknown>)
+    : {};
+
+  const preview = [
+    payload.tool_name,
+    payload.toolName,
+    event.type.startsWith("skill") ? payload.name : null,
+    payload.agent_display_name,
+    payload.agent_name,
+    payload.agentName,
+    payload.path,
+    payload.command,
+    payload.reason,
+    payload.message,
+    payload.error,
+  ]
+    .map((value) => extractEventText(value))
+    .find(Boolean);
+
+  if (!preview) return "";
+  return preview.length > 180 ? `${preview.slice(0, 177)}...` : preview;
 }
 
 function getTimelineExpandedSummary(event: SessionEvent) {
   return event.summary === event.type ? formatTimelineEventLabel(event.type) : event.summary;
+}
+
+function getTimelineEventTone(event: SessionEvent, payload: Record<string, unknown>): TimelineTone {
+  if (event.type.includes("error") || payload.success === false || Boolean(extractEventText(payload.error))) {
+    return "danger";
+  }
+
+  if (event.type.includes("complete") || event.type.endsWith("idle") || payload.success === true) {
+    return "success";
+  }
+
+  if (
+    event.type.includes("start") ||
+    event.type.includes("requested") ||
+    event.type.includes("submitted") ||
+    event.type.includes("invoked")
+  ) {
+    return "accent";
+  }
+
+  if (event.type.includes("usage") || event.type.includes("modified") || event.type.includes("info")) {
+    return "muted";
+  }
+
+  return "neutral";
+}
+
+function getTimelineEventStage(event: SessionEvent, copy: TranslationCopy): string {
+  const namespace = event.type.split(".")[0];
+
+  switch (namespace) {
+    case "session":
+      return copy.agent.timelineDetails.stage.session;
+    case "assistant":
+      return copy.agent.timelineDetails.stage.assistant;
+    case "tool":
+      return copy.agent.timelineDetails.stage.tool;
+    case "permission":
+      return copy.agent.timelineDetails.stage.permission;
+    case "skill":
+      return copy.agent.timelineDetails.stage.skill;
+    case "agent":
+    case "subagent":
+      return copy.agent.timelineDetails.stage.agent;
+    default:
+      return copy.agent.timelineDetails.stage.other;
+  }
+}
+
+function getTimelineResultLabel(event: SessionEvent, payload: Record<string, unknown>, copy: TranslationCopy): string | null {
+  if (typeof payload.success === "boolean") {
+    return payload.success
+      ? copy.agent.timelineDetails.result.success
+      : copy.agent.timelineDetails.result.failure;
+  }
+
+  if (event.summary.endsWith("(ok)")) {
+    return copy.agent.timelineDetails.result.success;
+  }
+
+  if (event.summary.endsWith("(failed)")) {
+    return copy.agent.timelineDetails.result.failure;
+  }
+
+  if (event.type.includes("start") || event.type.includes("requested") || event.type.includes("submitted")) {
+    return copy.agent.timelineDetails.result.pending;
+  }
+
+  return null;
+}
+
+function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): TimelinePresentation {
+  const compactData = compactEventPayload(event.data);
+  const payload = compactData && typeof compactData === "object" && !Array.isArray(compactData)
+    ? (compactData as Record<string, unknown>)
+    : {};
+  const tone = getTimelineEventTone(event, payload);
+  const fields: TimelineDetailField[] = [];
+  const blocks: TimelineDetailBlock[] = [];
+  const fieldKeys = new Set<string>();
+  const blockKeys = new Set<string>();
+
+  const addField = (label: string, value: unknown, options: Partial<TimelineDetailField> = {}) => {
+    const formattedValue = formatEventFieldValue(value).trim();
+    if (!formattedValue) return;
+
+    const key = `${label}:${formattedValue}`;
+    if (fieldKeys.has(key)) return;
+    fieldKeys.add(key);
+
+    fields.push({
+      label,
+      value: formattedValue,
+      mono: options.mono ?? false,
+      tone: options.tone ?? "neutral",
+    });
+  };
+
+  const addBlock = (label: string, value: unknown, kind: TimelineDetailBlock["kind"] = "text") => {
+    const formattedValue = formatEventBlockValue(value).trim();
+    if (!formattedValue) return;
+
+    const key = `${label}:${kind}:${formattedValue}`;
+    if (blockKeys.has(key)) return;
+    blockKeys.add(key);
+
+    blocks.push({ label, value: formattedValue, kind });
+  };
+
+  const resultLabel = getTimelineResultLabel(event, payload, copy);
+  if (resultLabel) {
+    addField(copy.agent.timelineDetails.labels.result, resultLabel, { tone });
+  }
+
+  addField(copy.agent.timelineDetails.labels.tool, payload.tool_name ?? payload.toolName);
+  if (event.type.startsWith("skill") || payload.name) {
+    addField(copy.agent.timelineDetails.labels.skill, payload.name);
+  }
+  addField(copy.agent.timelineDetails.labels.agent, payload.agent_display_name ?? payload.agent_name ?? payload.agentName);
+  addField(
+    copy.agent.timelineDetails.labels.model,
+    payload.model ?? payload.current_model ?? payload.new_model ?? payload.selected_model,
+  );
+  addField(copy.agent.timelineDetails.labels.status, payload.status);
+  addField(copy.agent.timelineDetails.labels.permission, (payload.permission_request as Record<string, unknown> | undefined)?.kind ?? payload.kind);
+  addField(copy.agent.timelineDetails.labels.phase, payload.phase);
+  addField(copy.agent.timelineDetails.labels.path, payload.path, { mono: true });
+  addField(copy.agent.timelineDetails.labels.reason, payload.reason);
+
+  const errorText = extractEventText(payload.error);
+  const messageText = extractEventText(payload.message);
+  if (errorText) {
+    addBlock(copy.agent.timelineDetails.labels.error, errorText, "error");
+  } else if (messageText) {
+    addBlock(copy.agent.timelineDetails.labels.message, messageText, tone === "danger" ? "error" : "text");
+  }
+
+  const commandValue = formatCommandValue(payload.command, payload.args);
+  if (commandValue) {
+    addBlock(copy.agent.timelineDetails.labels.command, commandValue, "code");
+  }
+
+  addBlock(copy.agent.timelineDetails.labels.arguments, payload.arguments, "code");
+  addBlock(copy.agent.timelineDetails.labels.input, payload.input, "code");
+  addBlock(copy.agent.timelineDetails.labels.output, payload.output ?? payload.result, "code");
+
+  if (typeof payload.content === "string") {
+    if (payload.content.length <= 600) {
+      addBlock(copy.agent.timelineDetails.labels.content, payload.content, "code");
+    }
+  } else {
+    addBlock(copy.agent.timelineDetails.labels.content, payload.content, "code");
+  }
+
+  return {
+    tone,
+    stage: getTimelineEventStage(event, copy),
+    fields,
+    blocks,
+    rawPayload: Object.keys(payload).length ? JSON.stringify(payload, null, 2) : null,
+  };
 }
 
 function getReasoningSelectLabel(effort: ReasoningEffort, locale: string, copy: TranslationCopy) {
@@ -159,6 +570,10 @@ type OptimisticTurn = {
   assistantMessage: ChatMessage;
 };
 
+type TranscriptEntry =
+  | { kind: "message"; key: string; message: ChatMessage }
+  | { kind: "execution"; key: string; turnId: string; events: SessionEvent[] };
+
 function buildOptimisticMessage(
   sessionId: string,
   role: ChatMessage["role"],
@@ -181,6 +596,89 @@ function isStreamingMessage(message: ChatMessage) {
 
 function hasRenderableMessageContent(message: ChatMessage) {
   return Boolean(message.content.trim());
+}
+
+function getMessageImageAttachments(message: ChatMessage): ChatImageAttachment[] {
+  const attachments = message.metadata?.["attachments"];
+  if (!Array.isArray(attachments)) return [];
+
+  return attachments
+    .filter((attachment): attachment is Record<string, unknown> => Boolean(attachment && typeof attachment === "object"))
+    .map((attachment) => ({
+      type: "image" as const,
+      mime_type: typeof attachment["mime_type"] === "string" ? attachment["mime_type"] : "image/png",
+      data_url: typeof attachment["data_url"] === "string" ? attachment["data_url"] : "",
+      display_name: typeof attachment["display_name"] === "string" ? attachment["display_name"] : null,
+      width: typeof attachment["width"] === "number" ? attachment["width"] : null,
+      height: typeof attachment["height"] === "number" ? attachment["height"] : null,
+      size_bytes: typeof attachment["size_bytes"] === "number" ? attachment["size_bytes"] : null,
+    }))
+    .filter((attachment) => Boolean(attachment.data_url));
+}
+
+function getMessageMetadataString(message: ChatMessage, key: string) {
+  const value = message.metadata?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function getMessageTurnId(message: ChatMessage) {
+  return getMessageMetadataString(message, "turn_id");
+}
+
+function getEventTurnId(event: SessionEvent) {
+  return typeof event.turn_id === "string" && event.turn_id.trim() ? event.turn_id.trim() : null;
+}
+
+function shouldRenderInlineExecutionEvent(event: SessionEvent) {
+  if (!getEventTurnId(event)) return false;
+
+  if (
+    event.type === "session.idle" ||
+    event.type === "session.created" ||
+    event.type.startsWith("assistant.") ||
+    event.type.startsWith("user.")
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function buildTranscriptEntries(messages: ChatMessage[], events: SessionEvent[]): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = [];
+  const emittedTurns = new Set<string>();
+  const eventsByTurn = new Map<string, SessionEvent[]>();
+
+  for (const event of events) {
+    if (!shouldRenderInlineExecutionEvent(event)) continue;
+    const turnId = getEventTurnId(event);
+    if (!turnId) continue;
+    const turnEvents = eventsByTurn.get(turnId) ?? [];
+    turnEvents.push(event);
+    eventsByTurn.set(turnId, turnEvents);
+  }
+
+  for (const message of messages) {
+    entries.push({ kind: "message", key: `message-${message._id}`, message });
+
+    if (message.role !== "user") continue;
+
+    const turnId = getMessageTurnId(message);
+    if (!turnId || emittedTurns.has(turnId)) continue;
+
+    const turnEvents = eventsByTurn.get(turnId);
+    if (!turnEvents?.length) continue;
+
+    entries.push({ kind: "execution", key: `execution-${turnId}`, turnId, events: turnEvents });
+    emittedTurns.add(turnId);
+  }
+
+  for (const [turnId, turnEvents] of eventsByTurn) {
+    if (emittedTurns.has(turnId)) continue;
+    entries.push({ kind: "execution", key: `execution-${turnId}`, turnId, events: turnEvents });
+  }
+
+  return entries;
 }
 
 function upsertMessage(messages: ChatMessage[], nextMessage: ChatMessage) {
@@ -230,18 +728,71 @@ function buildRenderUrl(sessionId: string, latestRenderPath: string | null | und
   return latestRenderPath ? `/api/streams/renders/${sessionId}` : null;
 }
 
-export default function AgentPanel() {
+function getSessionModelToneClass(model: string) {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.includes("gpt-5.4-mini")) return "tone-gpt-54-mini";
+  if (normalized.includes("gpt-5.4")) return "tone-gpt-54";
+  if (normalized.startsWith("gpt")) return "tone-gpt";
+  if (normalized.includes("claude") && normalized.includes("haiku")) return "tone-claude-haiku";
+  if (normalized.includes("claude") && normalized.includes("sonnet")) return "tone-claude-sonnet";
+  if (normalized.includes("claude")) return "tone-claude";
+  if (normalized.includes("gemini")) return "tone-gemini";
+  if (normalized.includes("qwen")) return "tone-qwen";
+  return "tone-neutral";
+}
+
+function formatSessionModelLabel(model: string) {
+  const normalized = model.trim();
+  if (!normalized) return "Unknown";
+
+  if (/^gpt-/i.test(normalized)) {
+    return normalized.replace(/^gpt-/i, "GPT-").replace(/-mini$/i, " mini");
+  }
+
+  return normalized
+    .split("-")
+    .map((segment, index) => {
+      if (index === 0 && /^claude$/i.test(segment)) return "Claude";
+      if (index === 0 && /^gemini$/i.test(segment)) return "Gemini";
+      if (index === 0 && /^qwen$/i.test(segment)) return "Qwen";
+      if (/^mini$/i.test(segment)) return "mini";
+      if (!segment) return segment;
+      return segment.charAt(0).toUpperCase() + segment.slice(1);
+    })
+    .join(" ");
+}
+
+type AgentPanelProps = {
+  isSessionSidebarCollapsed?: boolean;
+  isContextSidebarCollapsed?: boolean;
+};
+
+export default function AgentPanel({
+  isSessionSidebarCollapsed = false,
+  isContextSidebarCollapsed = false,
+}: AgentPanelProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const { sessionId: routedSessionId } = useParams<{ sessionId?: string }>();
   const { copy, locale } = useI18n();
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [hasLoadedSessions, setHasLoadedSessions] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [context, setContext] = useState<AgentContext | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [optimisticTurn, setOptimisticTurn] = useState<OptimisticTurn | null>(null);
   const [prompt, setPrompt] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<PendingImageAttachment[]>([]);
+  const [composerAttachmentError, setComposerAttachmentError] = useState<string | null>(null);
+  const [isDraggingComposer, setIsDraggingComposer] = useState(false);
+  const [composerHeight, setComposerHeight] = useState(() => {
+    if (typeof window === "undefined") return DEFAULT_COMPOSER_HEIGHT;
+    const storedValue = Number(window.localStorage.getItem(COMPOSER_HEIGHT_STORAGE_KEY));
+    return Number.isFinite(storedValue)
+      ? clamp(storedValue, MIN_COMPOSER_HEIGHT, 420)
+      : DEFAULT_COMPOSER_HEIGHT;
+  });
   const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
@@ -258,6 +809,13 @@ export default function AgentPanel() {
   const [savingSessionName, setSavingSessionName] = useState(false);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerCardRef = useRef<HTMLDivElement | null>(null);
+  const composerFooterRef = useRef<HTMLDivElement | null>(null);
+  const composerAttachmentsRef = useRef<HTMLDivElement | null>(null);
+  const chatStageBodyRef = useRef<HTMLDivElement | null>(null);
+  const timelineListRef = useRef<HTMLDivElement | null>(null);
+  const followTimelineRef = useRef(true);
   const activeSessionIdRef = useRef<string | null>(null);
   const streamRef = useRef<EventSource | null>(null);
   const sessionStatusLabels = copy.status.session;
@@ -269,7 +827,23 @@ export default function AgentPanel() {
   const sessionSettingsErrorMessage = getUiErrorMessage(sessionSettingsError, copy);
 
   const sortedEvents = useMemo(
-    () => [...events].sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime()),
+    () => [...events].sort((left, right) => {
+      const leftSequence = typeof left.sequence === "number" ? left.sequence : null;
+      const rightSequence = typeof right.sequence === "number" ? right.sequence : null;
+
+      if (leftSequence !== null && rightSequence !== null && leftSequence !== rightSequence) {
+        return leftSequence - rightSequence;
+      }
+
+      const createdAtDelta = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
+      if (createdAtDelta !== 0) {
+        return createdAtDelta;
+      }
+
+      if (leftSequence !== null && rightSequence === null) return -1;
+      if (leftSequence === null && rightSequence !== null) return 1;
+      return 0;
+    }),
     [events]
   );
 
@@ -321,6 +895,13 @@ export default function AgentPanel() {
     return null;
   }, [visibleMessages]);
 
+  const transcriptEntries = useMemo(
+    () => buildTranscriptEntries(visibleMessages, sortedEvents),
+    [sortedEvents, visibleMessages]
+  );
+  const timelineEvents = useMemo(() => [...sortedEvents].reverse(), [sortedEvents]);
+  const latestTimelineEventId = timelineEvents.length ? timelineEvents[0]._id : null;
+
   const lastVisibleMessageContent = visibleMessages.length ? visibleMessages[visibleMessages.length - 1].content : "";
   const selectedReasoningOptions = selectedModelOption?.supported_reasoning_efforts ?? [];
   const reasoningSupported = Boolean(selectedModelOption?.supports_reasoning_effort && selectedReasoningOptions.length);
@@ -332,7 +913,6 @@ export default function AgentPanel() {
     effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
   );
   const showStarterCards = Boolean(currentSession) && visibleMessages.length === 0;
-  const showComposerSuggestions = Boolean(currentSession) && visibleMessages.length > 0;
   const metaChips = useMemo((): MetaChip[] => {
     if (!currentSession) {
       return [
@@ -412,6 +992,33 @@ export default function AgentPanel() {
     }
   };
 
+  const clampComposerHeight = () => {
+    const stageBody = chatStageBodyRef.current;
+    if (!stageBody) return;
+
+    const maxComposerHeight = Math.max(
+      MIN_COMPOSER_HEIGHT,
+      stageBody.clientHeight - MIN_TRANSCRIPT_HEIGHT - COMPOSER_SPLITTER_HEIGHT,
+    );
+    setComposerHeight((previous) => clamp(previous, MIN_COMPOSER_HEIGHT, maxComposerHeight));
+  };
+
+  const resizeComposerTextarea = () => {
+    const textarea = composerTextareaRef.current;
+    const composerCard = composerCardRef.current;
+    if (!textarea || !composerCard) return;
+
+    const footerHeight = composerFooterRef.current?.offsetHeight ?? 0;
+    const attachmentsHeight = composerAttachmentsRef.current?.offsetHeight ?? 0;
+    const availableHeight = Math.max(
+      COMPOSER_TEXTAREA_MIN_HEIGHT,
+      composerCard.clientHeight - footerHeight - attachmentsHeight,
+    );
+
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, availableHeight, textarea.scrollHeight)}px`;
+  };
+
   const navigateToSession = (sessionId: string | null, replace = false) => {
     const targetPath = sessionId ? `/sessions/${sessionId}` : "/";
     if (location.pathname !== targetPath) {
@@ -441,6 +1048,7 @@ export default function AgentPanel() {
     try {
       const res = await getSessions();
       setSessions(res.data);
+      setHasLoadedSessions(true);
       setSessionsError(null);
       if (res.data.length === 0) {
         setCurrentSession(null);
@@ -505,6 +1113,10 @@ export default function AgentPanel() {
   }, []);
 
   useEffect(() => {
+    if (!hasLoadedSessions) {
+      return;
+    }
+
     if (!sessions.length) {
       if (routedSessionId) {
         navigateToSession(null, true);
@@ -515,17 +1127,20 @@ export default function AgentPanel() {
     const routedSession = routedSessionId
       ? sessions.find((session) => session._id === routedSessionId) ?? null
       : null;
-    const preservedSession = currentSession
-      ? sessions.find((session) => session._id === currentSession._id) ?? null
-      : null;
-    const nextSession = routedSession ?? preservedSession ?? sessions[0];
+    if (routedSession) {
+      setCurrentSession(routedSession);
+      return;
+    }
+
+    const preservedSession = currentSession ? sessions.find((session) => session._id === currentSession._id) ?? null : null;
+    const nextSession = preservedSession ?? sessions[0];
 
     setCurrentSession(nextSession);
 
-    if ((!routedSessionId || !routedSession) && nextSession) {
+    if (nextSession) {
       navigateToSession(nextSession._id, true);
     }
-  }, [sessions, routedSessionId]);
+  }, [currentSession?._id, hasLoadedSessions, routedSessionId, sessions]);
 
   useEffect(() => {
     if (!currentSession) {
@@ -560,6 +1175,48 @@ export default function AgentPanel() {
 
     messageEndRef.current?.scrollIntoView({ block: "end" });
   }, [visibleMessages.length, lastVisibleMessageContent]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const frameId = window.requestAnimationFrame(() => {
+      resizeComposerTextarea();
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [prompt, pendingAttachments.length, composerHeight, currentSession?._id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(COMPOSER_HEIGHT_STORAGE_KEY, String(composerHeight));
+  }, [composerHeight]);
+
+  useEffect(() => {
+    clampComposerHeight();
+
+    const handleResize = () => {
+      clampComposerHeight();
+      resizeComposerTextarea();
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    followTimelineRef.current = true;
+  }, [currentSession?._id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !latestTimelineEventId || !followTimelineRef.current) return;
+
+    const frameId = window.requestAnimationFrame(() => {
+      const timelineList = timelineListRef.current;
+      if (!timelineList || !followTimelineRef.current) return;
+      timelineList.scrollTop = 0;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [currentSession?._id, latestTimelineEventId]);
 
   useEffect(() => {
     setExpandedTimelineEventIds([]);
@@ -722,11 +1379,18 @@ export default function AgentPanel() {
   };
 
   const handleSend = () => {
-    if (!currentSession || !prompt.trim() || sending) return;
+    if (!currentSession || sending) return;
 
     const sessionId = currentSession._id;
     const content = prompt.trim();
-    const optimisticUserMessage = buildOptimisticMessage(sessionId, "user", content);
+    const attachmentsToSend = pendingAttachments.map(({ id, ...attachment }) => attachment);
+    if (!content && !attachmentsToSend.length) return;
+
+    followTimelineRef.current = true;
+
+    const optimisticUserMessage = buildOptimisticMessage(sessionId, "user", content, {
+      attachments: attachmentsToSend,
+    });
     const optimisticAssistantMessage = buildOptimisticMessage(sessionId, "assistant", "", {
       streaming: true,
       state: "pending",
@@ -740,6 +1404,8 @@ export default function AgentPanel() {
     });
     setSendingSessionId(sessionId);
     setPrompt("");
+    setPendingAttachments([]);
+    setComposerAttachmentError(null);
     setPanelError(null);
     syncSessionRecord({
       ...currentSession,
@@ -748,13 +1414,15 @@ export default function AgentPanel() {
       updated_at: new Date().toISOString(),
     });
 
-    void sendChatTurn(sessionId, content)
+    void sendChatTurn(sessionId, { content, attachments: attachmentsToSend })
       .then(() => {
         setPanelError(null);
         void Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
       })
       .catch(async (err: any) => {
         setPanelError(buildUiError(err, "failedSendPrompt"));
+        setPrompt(content);
+        setPendingAttachments((previous) => (previous.length ? previous : pendingAttachments));
         setOptimisticTurn((previous) => (previous?.sessionId === sessionId ? null : previous));
         await Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
       })
@@ -762,6 +1430,107 @@ export default function AgentPanel() {
         setSendingSessionId((previous) => (previous === sessionId ? null : previous));
       });
   };
+
+  const handleAppendAttachments = async (files: File[]) => {
+    if (!files.length) return;
+
+    const availableSlots = Math.max(0, MAX_COMPOSER_ATTACHMENTS - pendingAttachments.length);
+    if (!availableSlots) {
+      setComposerAttachmentError(copy.agent.attachmentErrorLimit);
+      return;
+    }
+
+    const nextFiles = files.slice(0, availableSlots);
+    const overflowed = files.length > availableSlots;
+
+    try {
+      const nextAttachments = await Promise.all(nextFiles.map((file) => buildPendingImageAttachment(file)));
+      setPendingAttachments((previous) => [...previous, ...nextAttachments]);
+      setComposerAttachmentError(overflowed ? copy.agent.attachmentErrorLimit : null);
+    } catch (error) {
+      setComposerAttachmentError(getComposerAttachmentErrorMessage(error, copy));
+    }
+  };
+
+  const handleComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const imageFiles = getClipboardImageFiles(event);
+    if (!imageFiles.length) return;
+
+    event.preventDefault();
+    void handleAppendAttachments(imageFiles);
+  };
+
+  const handleComposerDragOver = (event: DragEvent<HTMLDivElement>) => {
+    const imageFiles = getDroppedImageFiles(event);
+    if (!imageFiles.length) return;
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsDraggingComposer(true);
+  };
+
+  const handleComposerDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDraggingComposer(false);
+  };
+
+  const handleComposerDrop = (event: DragEvent<HTMLDivElement>) => {
+    const imageFiles = getDroppedImageFiles(event);
+    if (!imageFiles.length) return;
+
+    event.preventDefault();
+    setIsDraggingComposer(false);
+    void handleAppendAttachments(imageFiles);
+  };
+
+  const handleRemoveAttachment = (attachmentId: string) => {
+    setPendingAttachments((previous) => previous.filter((attachment) => attachment.id !== attachmentId));
+    setComposerAttachmentError(null);
+    composerTextareaRef.current?.focus();
+  };
+
+  const handleComposerResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const stageBody = chatStageBodyRef.current;
+    if (!stageBody) return;
+
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    const startHeight = composerHeight;
+    const startY = event.clientY;
+
+    handle.setPointerCapture(pointerId);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const maxComposerHeight = Math.max(
+        MIN_COMPOSER_HEIGHT,
+        stageBody.clientHeight - MIN_TRANSCRIPT_HEIGHT - COMPOSER_SPLITTER_HEIGHT,
+      );
+      setComposerHeight(clamp(startHeight - (moveEvent.clientY - startY), MIN_COMPOSER_HEIGHT, maxComposerHeight));
+    };
+
+    const handlePointerUp = () => {
+      if (handle.hasPointerCapture(pointerId)) {
+        handle.releasePointerCapture(pointerId);
+      }
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  };
+
+  const handleTimelineScroll = () => {
+    const timelineList = timelineListRef.current;
+    if (!timelineList) return;
+    followTimelineRef.current = isScrolledNearTop(timelineList);
+  };
+
+  const composerLayoutStyle = useMemo(
+    () => ({ "--composer-height": `${composerHeight}px` } as CSSProperties),
+    [composerHeight],
+  );
   const handleModelChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextModel = event.target.value;
     const nextModelOption = sessionModelOptions.find((option) => option.id === nextModel) ?? null;
@@ -863,7 +1632,11 @@ export default function AgentPanel() {
 
   return (
     <div className="agent-workbench">
-      <aside className="secondary-sidebar">
+      <aside
+        className="secondary-sidebar"
+        data-testid="session-list-sidebar"
+        hidden={isSessionSidebarCollapsed}
+      >
         <div className="sidebar-section">
           <div className="sidebar-section-header">
             <span>{copy.agent.sidebarTitle}</span>
@@ -886,14 +1659,24 @@ export default function AgentPanel() {
                   >
                     <div className="session-item-top">
                       <div className="session-title-group">
-                        <span className={`status-dot status-${session.status}`} />
-                        <span className="session-name">{session.name}</span>
+                        <span className={`session-status-orb status-${session.status}`} aria-hidden="true">
+                          <span className="session-status-core" />
+                        </span>
+                        <div className="session-title-copy">
+                          <span className="session-name">{session.name}</span>
+                          <span className={`session-model-chip ${getSessionModelToneClass(session.copilot_model)}`}>
+                            {formatSessionModelLabel(session.copilot_model)}
+                          </span>
+                        </div>
                       </div>
                       <span className={`status-badge status-${session.status}`}>{sessionStatusLabels[session.status]}</span>
                     </div>
                     <div className="session-footline">
-                      <span>{session.active_project_id ? copy.common.yesBoundProject : copy.common.noProjectUploaded}</span>
-                      <time>{formatDateTime(session.updated_at, locale, copy.common.notStarted)}</time>
+                      <span className={`session-info-chip ${session.active_project_id ? "is-linked" : "is-empty"}`}>
+                        <span className="session-chip-dot" aria-hidden="true" />
+                        <span>{session.active_project_id ? copy.common.yesBoundProject : copy.common.noProjectUploaded}</span>
+                      </span>
+                      <time className="session-time-chip">{formatDateTime(session.updated_at, locale, copy.common.notStarted)}</time>
                     </div>
                   </button>
                 </li>
@@ -905,7 +1688,7 @@ export default function AgentPanel() {
         </div>
       </aside>
 
-      <section className="chat-stage">
+      <section className="chat-stage" data-testid="chat-stage">
         <header className="chat-stage-header">
           <div className="chat-stage-heading">
             <span className="eyebrow">{copy.agent.eyebrow}</span>
@@ -980,48 +1763,185 @@ export default function AgentPanel() {
           ))}
         </div>
 
-        <div className="chat-transcript">
-          {panelErrorMessage && <div className="notice-banner transcript-notice">{panelErrorMessage}</div>}
-          {currentSession ? (
-            visibleMessages.length ? (
-              visibleMessages.map((message) => {
-                const streaming = isStreamingMessage(message);
-                const hasContent = hasRenderableMessageContent(message);
+        <div className="chat-stage-body" ref={chatStageBodyRef} style={composerLayoutStyle}>
+          <div className="chat-transcript">
+            {panelErrorMessage && <div className="notice-banner transcript-notice">{panelErrorMessage}</div>}
+            {currentSession ? (
+              transcriptEntries.length ? (
+                transcriptEntries.map((entry) => {
+                  if (entry.kind === "message") {
+                    const { message } = entry;
+                    const streaming = isStreamingMessage(message);
+                    const hasContent = hasRenderableMessageContent(message);
+                    const messageImageAttachments = getMessageImageAttachments(message);
+                    const hasRenderableBody = hasContent || messageImageAttachments.length > 0;
+                    const roleLabel = message.role === "user" ? copy.agent.you : copy.agent.assistant;
+                    const avatarLabel = message.role === "user" ? roleLabel.charAt(0).toUpperCase() : "SW";
 
-                return (
-                  <article key={message._id} className={`chat-message role-${message.role}`}>
-                    <div className="chat-message-meta">
-                      <span className="chat-message-author">{message.role === "user" ? copy.agent.you : copy.agent.assistant}</span>
-                      <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
-                    </div>
-                    <div className={`chat-message-body markdown-content${streaming ? " streaming" : ""}`} aria-live={streaming ? "polite" : undefined}>
-                      {hasContent ? (
-                        <>
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                          {streaming ? <span className="streaming-cursor" aria-hidden="true" /> : null}
-                        </>
-                      ) : streaming ? (
-                        <div className="chat-message-placeholder">
-                          <span>{copy.agent.typingPlaceholder}</span>
-                          <span className="typing-dots" aria-hidden="true">
-                            <span />
-                            <span />
-                            <span />
+                    return (
+                      <div key={entry.key} className={`chat-entry role-${message.role}`}>
+                        <div className={`chat-entry-shell role-${message.role}`}>
+                          <span className={`chat-avatar chat-avatar-${message.role}`} aria-hidden="true">
+                            {avatarLabel}
                           </span>
+
+                          <article className={`chat-message role-${message.role}`}>
+                            <div className="chat-message-meta">
+                              <span className="chat-message-author">{roleLabel}</span>
+                              <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
+                            </div>
+                            <div className={`chat-message-body markdown-content${streaming ? " streaming" : ""}`} aria-live={streaming ? "polite" : undefined}>
+                              {hasContent ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : null}
+
+                              {messageImageAttachments.length ? (
+                                <div className={`chat-attachment-grid${hasContent ? " has-copy" : ""}`}>
+                                  {messageImageAttachments.map((attachment, index) => {
+                                    const attachmentMeta = [
+                                      attachment.display_name,
+                                      attachment.width && attachment.height ? `${attachment.width} x ${attachment.height}` : null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ");
+
+                                    return (
+                                      <figure key={`${message._id}-${attachment.data_url.slice(0, 24)}-${index}`} className="chat-attachment-card">
+                                        <img
+                                          className="chat-attachment-image"
+                                          src={attachment.data_url}
+                                          alt={attachment.display_name || copy.agent.attachmentImageAlt}
+                                          loading="lazy"
+                                        />
+                                        {attachmentMeta ? <figcaption className="chat-attachment-meta">{attachmentMeta}</figcaption> : null}
+                                      </figure>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+
+                              {hasContent && streaming ? <span className="streaming-cursor" aria-hidden="true" /> : null}
+
+                              {!hasRenderableBody && streaming ? (
+                                <div className="chat-message-placeholder">
+                                  <span>{copy.agent.typingPlaceholder}</span>
+                                  <span className="typing-dots" aria-hidden="true">
+                                    <span />
+                                    <span />
+                                    <span />
+                                  </span>
+                                </div>
+                              ) : null}
+
+                              {!hasRenderableBody && !streaming ? <p>{copy.common.emptyResponse}</p> : null}
+                            </div>
+                          </article>
                         </div>
-                      ) : (
-                        <p>{copy.common.emptyResponse}</p>
-                      )}
-                    </div>
-                  </article>
-                );
-              })
-            ) : showStarterCards ? (
-              <div className="chat-welcome">
-                <span className="eyebrow">{copy.agent.starterEyebrow}</span>
-                <h2>{copy.agent.starterTitle}</h2>
-                <p>{copy.agent.starterDescription}</p>
-                <div className="welcome-prompts">
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <section key={entry.key} className="chat-execution-block" data-testid="conversation-execution-block">
+                      <div className="chat-execution-header">
+                        <div>
+                          <span className="eyebrow">{copy.agent.executionInlineTitle}</span>
+                          <div className="chat-execution-title">{copy.agent.executionTitle}</div>
+                        </div>
+                        <span className="chat-execution-count">{entry.events.length}</span>
+                      </div>
+
+                      <div className="chat-execution-steps">
+                        {entry.events.map((event) => {
+                          const eventLabel = formatTimelineEventLabel(event.type);
+                          const timelinePresentation = buildTimelinePresentation(event, copy);
+                          const hasExecutionDetails = Boolean(
+                            timelinePresentation.fields.length || timelinePresentation.blocks.length
+                          );
+                          const inlineSummary = getTimelinePreviewText(event) || getTimelineExpandedSummary(event);
+
+                          return (
+                            <article
+                              key={event._id}
+                              className={`chat-execution-step tone-${timelinePresentation.tone}`}
+                              data-testid="conversation-execution-step"
+                            >
+                              <div className="chat-execution-step-topline">
+                                <div className="chat-execution-step-heading">
+                                  <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
+                                  <span className="chat-execution-step-title">{eventLabel}</span>
+                                </div>
+                                <span className="timeline-time">{formatClockTime(event.created_at, locale, copy.common.notStarted)}</span>
+                              </div>
+
+                              <p className="chat-execution-step-summary">{inlineSummary}</p>
+
+                              {hasExecutionDetails ? (
+                                <details className="chat-execution-step-details" data-testid="conversation-execution-step-details">
+                                  <summary>{copy.agent.executionInlineDetails}</summary>
+                                  {timelinePresentation.fields.length ? (
+                                    <dl className="timeline-detail-grid">
+                                      {timelinePresentation.fields.map((field) => (
+                                        <div key={`${event._id}-${field.label}-${field.value}`} className="timeline-detail-row">
+                                          <dt>{field.label}</dt>
+                                          <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
+                                        </div>
+                                      ))}
+                                    </dl>
+                                  ) : null}
+
+                                  {timelinePresentation.blocks.map((block) => (
+                                    <div key={`${event._id}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
+                                      <div className="timeline-detail-block-label">{block.label}</div>
+                                      {block.kind === "text" ? (
+                                        <p className="timeline-detail-block-text">{block.value}</p>
+                                      ) : (
+                                        <pre className="timeline-event-data">{block.value}</pre>
+                                      )}
+                                    </div>
+                                  ))}
+                                </details>
+                              ) : null}
+                            </article>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  );
+                })
+              ) : showStarterCards ? (
+                <div className="chat-welcome">
+                  <span className="eyebrow">{copy.agent.starterEyebrow}</span>
+                  <h2>{copy.agent.starterTitle}</h2>
+                  <p>{copy.agent.starterDescription}</p>
+                  <div className="welcome-prompts">
+                    {starterPrompts.map((starter, index) => (
+                      <button
+                        key={starter.prompt}
+                        type="button"
+                        data-testid="starter-card"
+                        className="starter-card"
+                        onClick={() => handleStarterPrompt(starter.prompt)}
+                      >
+                        <span className="starter-card-index">0{index + 1}</span>
+                        <strong className="starter-card-title">{starter.title}</strong>
+                        <span className="starter-card-description">{starter.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="chat-empty-transcript" />
+              )
+            ) : (
+              <div className="chat-welcome empty">
+                <span className="eyebrow">{copy.agent.emptyEyebrow}</span>
+                <h2>{copy.agent.emptyTitle}</h2>
+                <p>{copy.agent.emptyDescription}</p>
+                <div className="welcome-actions">
+                  <button className="btn-primary" onClick={handleNewSession}>
+                    {copy.common.createSession}
+                  </button>
+                </div>
+                <div className="welcome-prompts compact-prompts">
                   {starterPrompts.map((starter, index) => (
                     <button
                       key={starter.prompt}
@@ -1037,98 +1957,117 @@ export default function AgentPanel() {
                   ))}
                 </div>
               </div>
-            ) : (
-              <div className="chat-empty-transcript" />
-            )
-          ) : (
-            <div className="chat-welcome empty">
-              <span className="eyebrow">{copy.agent.emptyEyebrow}</span>
-              <h2>{copy.agent.emptyTitle}</h2>
-              <p>{copy.agent.emptyDescription}</p>
-              <div className="welcome-actions">
-                <button className="btn-primary" onClick={handleNewSession}>
-                  {copy.common.createSession}
-                </button>
+            )}
+            <div ref={messageEndRef} />
+          </div>
+
+          <div
+            className="composer-resizer"
+            data-testid="composer-resizer"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-valuemin={MIN_COMPOSER_HEIGHT}
+            aria-valuemax={Math.max(MIN_COMPOSER_HEIGHT, composerHeight)}
+            aria-valuenow={composerHeight}
+            onPointerDown={handleComposerResizeStart}
+          />
+
+          <div className="composer-shell">
+            {currentSession && isResponding ? (
+              <div className="composer-status" data-testid="composer-status">
+                <span className="typing-dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                <span>{copy.agent.respondingStatus}</span>
               </div>
-              <div className="welcome-prompts compact-prompts">
-                {starterPrompts.map((starter, index) => (
+            ) : null}
+
+            {composerAttachmentError ? <div className="inline-alert composer-alert">{composerAttachmentError}</div> : null}
+
+            <div
+              ref={composerCardRef}
+              className={`composer-card${isDraggingComposer ? " is-dragging" : ""}`}
+              onDragOver={handleComposerDragOver}
+              onDragLeave={handleComposerDragLeave}
+              onDrop={handleComposerDrop}
+            >
+              {pendingAttachments.length ? (
+                <div ref={composerAttachmentsRef} className="composer-attachments">
+                  {pendingAttachments.map((attachment) => {
+                    const attachmentMeta = [
+                      attachment.display_name,
+                      attachment.width && attachment.height ? `${attachment.width} x ${attachment.height}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ");
+
+                    return (
+                      <figure key={attachment.id} className="composer-attachment" data-testid="composer-attachment">
+                        <button
+                          type="button"
+                          className="composer-attachment-remove"
+                          aria-label={copy.common.remove}
+                          title={copy.common.remove}
+                          onClick={() => handleRemoveAttachment(attachment.id)}
+                        >
+                          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                            <path d="M6 2.5h4l.5 1H13a.75.75 0 0 1 0 1.5h-.6l-.55 7.18A1.75 1.75 0 0 1 10.1 13.8H5.9a1.75 1.75 0 0 1-1.75-1.62L3.6 5H3a.75.75 0 0 1 0-1.5h2.5l.5-1Zm-.9 2.5.54 7.06a.25.25 0 0 0 .26.24h4.2a.25.25 0 0 0 .26-.24L10.9 5H5.1ZM6.75 6.5a.75.75 0 0 1 .75.75v3.25a.75.75 0 0 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm2.5 0a.75.75 0 0 1 .75.75v3.25a.75.75 0 0 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Z" fill="currentColor"/>
+                          </svg>
+                        </button>
+                        <img
+                          className="composer-attachment-image"
+                          src={attachment.data_url}
+                          alt={attachment.display_name || copy.agent.attachmentImageAlt}
+                        />
+                        <figcaption className="composer-attachment-caption">{attachmentMeta}</figcaption>
+                      </figure>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              <textarea
+                ref={composerTextareaRef}
+                id="agent-prompt"
+                rows={5}
+                className="composer-textarea"
+                placeholder={currentSession ? copy.agent.textareaActive : copy.agent.textareaInactive}
+                value={prompt}
+                disabled={!currentSession}
+                onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
+                onKeyDown={handlePromptKeyDown}
+                onPaste={handleComposerPaste}
+              />
+
+              <div ref={composerFooterRef} className="composer-footer">
+                <div className="composer-meta">
+                  <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
+                  <span className="composer-hint">{copy.agent.composerImageHint}</span>
+                  <span className="composer-hint">{copy.agent.composerResizeHint}</span>
+                  <span className="composer-hint">{copy.common.autoRefreshHint}</span>
+                </div>
+                <div className="composer-actions">
                   <button
-                    key={starter.prompt}
-                    type="button"
-                    data-testid="starter-card"
-                    className="starter-card"
-                    onClick={() => handleStarterPrompt(starter.prompt)}
+                    className="btn-primary send-button"
+                    onClick={handleSend}
+                    disabled={!currentSession || sending || (!prompt.trim() && !pendingAttachments.length)}
                   >
-                    <span className="starter-card-index">0{index + 1}</span>
-                    <strong className="starter-card-title">{starter.title}</strong>
-                    <span className="starter-card-description">{starter.description}</span>
+                    {sending ? copy.common.working : copy.common.send}
                   </button>
-                ))}
-              </div>
-            </div>
-          )}
-          <div ref={messageEndRef} />
-        </div>
-
-        <div className="composer-shell">
-          {currentSession && isResponding && (
-            <div className="composer-status" data-testid="composer-status">
-              <span className="typing-dots" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-              </span>
-              <span>{copy.agent.respondingStatus}</span>
-            </div>
-          )}
-
-          {showComposerSuggestions && (
-            <div className="composer-toolbar">
-              {starterPrompts.map((starter) => (
-                <button
-                  key={starter.prompt}
-                  type="button"
-                  className="composer-suggestion"
-                  onClick={() => setPrompt(starter.prompt)}
-                >
-                  {starter.title}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div className="composer-card">
-            <textarea
-              id="agent-prompt"
-              rows={5}
-              className="composer-textarea"
-              placeholder={
-                currentSession
-                  ? copy.agent.textareaActive
-                  : copy.agent.textareaInactive
-              }
-              value={prompt}
-              disabled={!currentSession}
-              onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
-              onKeyDown={handlePromptKeyDown}
-            />
-
-            <div className="composer-footer">
-              <div className="composer-meta">
-                <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
-                <span className="composer-hint">{copy.common.autoRefreshHint}</span>
-              </div>
-              <div className="composer-actions">
-                <button className="btn-primary send-button" onClick={handleSend} disabled={!currentSession || sending || !prompt.trim()}>
-                  {sending ? copy.common.working : copy.common.send}
-                </button>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </section>
 
-      <aside className="context-sidebar" data-testid="session-context-sidebar">
+      <aside
+        className="context-sidebar"
+        data-testid="session-context-sidebar"
+        hidden={isContextSidebarCollapsed}
+      >
         {currentSession ? (
           <>
             <div className="card context-panel session-overview-panel">
@@ -1292,19 +2231,25 @@ export default function AgentPanel() {
                   <span className="eyebrow">{copy.agent.executionEyebrow}</span>
                   <h3>{copy.agent.executionTitle}</h3>
                 </div>
-                <span className="panel-count">{sortedEvents.length}</span>
+                <span className="panel-count">{timelineEvents.length}</span>
               </div>
-              {sortedEvents.length ? (
-                <div className="timeline-list panel-list-scroll" data-testid="session-timeline">
-                  {sortedEvents.map((event) => {
+              {timelineEvents.length ? (
+                <div
+                  ref={timelineListRef}
+                  className="timeline-list panel-list-scroll"
+                  data-testid="session-timeline"
+                  onScroll={handleTimelineScroll}
+                >
+                  {timelineEvents.map((event) => {
                     const isExpanded = expandedTimelineEventIds.includes(event._id);
                     const eventLabel = formatTimelineEventLabel(event.type);
                     const previewText = getTimelinePreviewText(event);
+                    const timelinePresentation = buildTimelinePresentation(event, copy);
 
                     return (
                     <div
                       key={event._id}
-                      className={`timeline-entry ${isExpanded ? "expanded" : ""}`}
+                      className={`timeline-entry ${isExpanded ? "expanded" : ""} tone-${timelinePresentation.tone}`}
                       data-testid="timeline-entry"
                     >
                       <button
@@ -1318,7 +2263,10 @@ export default function AgentPanel() {
                           <span className="timeline-chevron" aria-hidden="true" />
                           <div className="timeline-summary-stack">
                             <div className="timeline-summary-topline">
-                              <span className="timeline-type">{eventLabel}</span>
+                              <div className="timeline-summary-heading">
+                                <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
+                                <span className="timeline-type">{eventLabel}</span>
+                              </div>
                               <span className="timeline-time">{formatClockTime(event.created_at, locale, copy.common.notStarted)}</span>
                             </div>
                             {previewText ? <div className="timeline-summary-preview">{previewText}</div> : null}
@@ -1327,9 +2275,42 @@ export default function AgentPanel() {
                       </button>
                       {isExpanded ? (
                         <div className="timeline-entry-body">
-                          <div className="timeline-event-code">{event.type}</div>
-                          <p className="timeline-summary-full">{getTimelineExpandedSummary(event)}</p>
-                          {hasEventData(event) && <pre className="timeline-event-data">{JSON.stringify(event.data, null, 2)}</pre>}
+                          <div className="timeline-body-header">
+                            <span className={`timeline-tone-marker tone-${timelinePresentation.tone}`} aria-hidden="true" />
+                            <div className="timeline-body-header-copy">
+                              <div className="timeline-event-code">{event.type}</div>
+                              <p className="timeline-summary-full">{getTimelineExpandedSummary(event)}</p>
+                            </div>
+                          </div>
+
+                          {timelinePresentation.fields.length ? (
+                            <dl className="timeline-detail-grid">
+                              {timelinePresentation.fields.map((field) => (
+                                <div key={`${field.label}-${field.value}`} className="timeline-detail-row">
+                                  <dt>{field.label}</dt>
+                                  <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
+                                </div>
+                              ))}
+                            </dl>
+                          ) : null}
+
+                          {timelinePresentation.blocks.map((block) => (
+                            <div key={`${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
+                              <div className="timeline-detail-block-label">{block.label}</div>
+                              {block.kind === "text" ? (
+                                <p className="timeline-detail-block-text">{block.value}</p>
+                              ) : (
+                                <pre className="timeline-event-data">{block.value}</pre>
+                              )}
+                            </div>
+                          ))}
+
+                          {timelinePresentation.rawPayload ? (
+                            <details className="timeline-raw-details">
+                              <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
+                              <pre className="timeline-event-data">{timelinePresentation.rawPayload}</pre>
+                            </details>
+                          ) : null}
                         </div>
                       ) : null}
                     </div>

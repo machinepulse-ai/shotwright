@@ -28,7 +28,11 @@ async def send_chat_turn(session_id: str, body: ChatTurnCreate):
     session = await get_session_collection().find_one({"_id": session_id})
     if not session:
         raise HTTPException(404, "Session not found")
-    result = await runtime_manager.send_message(session_id, body.content)
+    result = await runtime_manager.send_message(
+        session_id,
+        body.content.strip(),
+        [attachment.model_dump() for attachment in body.attachments],
+    )
     return result
 
 
@@ -41,7 +45,7 @@ async def list_messages(session_id: str):
 
 
 @router.get("/sessions/{session_id}/events", response_model=list[SessionEvent])
-async def list_events(session_id: str, limit: int = 200):
+async def list_events(session_id: str, limit: int = 1000):
     session = await get_session_collection().find_one({"_id": session_id})
     if not session:
         raise HTTPException(404, "Session not found")

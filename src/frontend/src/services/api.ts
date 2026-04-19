@@ -1,6 +1,13 @@
 import axios, { InternalAxiosRequestConfig } from "axios";
 
-import { ChatMessage, ChatMessageDeletedEvent, Session, SessionContextRefreshEvent, SessionEvent } from "../types";
+import {
+  ChatImageAttachment,
+  ChatMessage,
+  ChatMessageDeletedEvent,
+  Session,
+  SessionContextRefreshEvent,
+  SessionEvent,
+} from "../types";
 
 const api = axios.create({
   baseURL: "/api",
@@ -45,8 +52,10 @@ export const exportProject = (sessionId: string, projectId: string) =>
 export const getAgentContext = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/context`);
 export const getAgentMessages = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/messages`);
 export const getAgentEvents = (sessionId: string) => api.get(`/agent/sessions/${sessionId}/events`);
-export const sendChatTurn = (sessionId: string, content: string) =>
-  api.post(`/agent/sessions/${sessionId}/messages`, { content });
+export const sendChatTurn = (
+  sessionId: string,
+  payload: { content: string; attachments?: ChatImageAttachment[] }
+) => api.post(`/agent/sessions/${sessionId}/messages`, payload);
 
 function parseStreamPayload<T>(event: MessageEvent<string>): T | null {
   try {

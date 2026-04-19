@@ -50,12 +50,24 @@ export interface ChatMessage {
   metadata: Record<string, unknown>;
 }
 
+export interface ChatImageAttachment {
+  type: "image";
+  mime_type: string;
+  data_url: string;
+  display_name?: string | null;
+  width?: number | null;
+  height?: number | null;
+  size_bytes?: number | null;
+}
+
 export interface SessionEvent {
   _id: string;
   session_id: string;
   type: string;
   summary: string;
   created_at: string;
+  turn_id?: string | null;
+  sequence?: number | null;
   data: Record<string, unknown>;
 }
 

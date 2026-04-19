@@ -70,12 +70,23 @@ def _event_type_name(event) -> str:
 
 
 def _event_summary(event_type: str, data: dict) -> str:
+    if event_type == "session.turn.started":
+        return "Turn submitted to Copilot runtime"
+    if event_type == "session.timeout":
+        timeout_seconds = data.get("timeout_seconds")
+        return f"Turn timed out after {timeout_seconds}s" if timeout_seconds else "Turn timed out"
     if event_type == "tool.execution_start":
         return f"Tool start: {data.get('tool_name') or data.get('toolName') or 'unknown'}"
     if event_type == "tool.execution_complete":
         tool_name = data.get("tool_name") or data.get("toolName") or "unknown"
         success = data.get("success")
-        return f"Tool complete: {tool_name} ({'ok' if success else 'failed'})"
+        if success is True:
+            outcome = "ok"
+        elif success is False:
+            outcome = "failed"
+        else:
+            outcome = "completed"
+        return f"Tool complete: {tool_name} ({outcome})"
     if event_type == "session.task_complete":
         return data.get("summary") or "Agent task completed"
     if event_type == "session.error":
@@ -94,6 +105,42 @@ def _first_non_empty(*values: str | None) -> str:
     return ""
 
 
+def _prepare_turn_attachments(attachments: list[dict] | None) -> tuple[list[dict], list[dict]]:
+    copilot_attachments: list[dict] = []
+    persisted_attachments: list[dict] = []
+
+    for attachment in attachments or []:
+        data_url = str(attachment.get("data_url") or "")
+        _, _, encoded_payload = data_url.partition(",")
+        if not encoded_payload:
+            continue
+
+        mime_type = str(attachment.get("mime_type") or "application/octet-stream")
+        display_name = _first_non_empty(attachment.get("display_name"))
+
+        copilot_attachment = {
+            "type": "blob",
+            "data": encoded_payload,
+            "mimeType": mime_type,
+        }
+        if display_name:
+            copilot_attachment["displayName"] = display_name
+        copilot_attachments.append(copilot_attachment)
+
+        persisted_attachment = {
+            "type": "image",
+            "mime_type": mime_type,
+            "data_url": data_url,
+        }
+        for key in ("display_name", "width", "height", "size_bytes"):
+            value = attachment.get(key)
+            if value not in (None, ""):
+                persisted_attachment[key] = value
+        persisted_attachments.append(persisted_attachment)
+
+    return copilot_attachments, persisted_attachments
+
+
 class _RuntimeHandle:
     def __init__(self, app_session_id: str, client: CopilotClient, session, unsubscribe) -> None:
         self.app_session_id = app_session_id
@@ -103,19 +150,29 @@ class _RuntimeHandle:
         self.lock = asyncio.Lock()
         self.pending_tasks: set[asyncio.Task] = set()
         self.turn_state: _StreamingTurnState | None = None
+        self.event_sequence = 0
 
     def track_task(self, coro) -> None:
         task = asyncio.create_task(coro)
         self.pending_tasks.add(task)
         task.add_done_callback(self.pending_tasks.discard)
 
+    def next_event_sequence(self) -> int:
+        self.event_sequence += 1
+        return self.event_sequence
+
 
 class _StreamingTurnState:
-    def __init__(self, message_id: str) -> None:
+    def __init__(self, message_id: str, *, turn_id: str, user_message_id: str) -> None:
         self.message_id = message_id
+        self.turn_id = turn_id
+        self.user_message_id = user_message_id
         self.content = ""
         self.version = 0
         self.finalized = False
+        self.idle_event = asyncio.Event()
+        self.error: Exception | None = None
+        self.error_event_seen = False
 
 
 class ShotwrightCopilotRuntimeManager:
@@ -405,7 +462,26 @@ class ShotwrightCopilotRuntimeManager:
                 return value
         return ""
 
-    async def _persist_event(self, app_session_id: str, event_type: str, data: dict) -> None:
+    async def _load_last_event_sequence(self, app_session_id: str) -> int:
+        latest_event = await get_event_collection().find_one(
+            {
+                "session_id": app_session_id,
+                "sequence": {"$type": "number"},
+            },
+            sort=[("sequence", -1), ("created_at", -1)],
+        )
+        sequence = latest_event.get("sequence") if latest_event else 0
+        return sequence if isinstance(sequence, int) and sequence > 0 else 0
+
+    async def _persist_event(
+        self,
+        app_session_id: str,
+        event_type: str,
+        data: dict,
+        *,
+        turn_id: str | None = None,
+        sequence: int | None = None,
+    ) -> None:
         if event_type in {
             "assistant.message",
             "assistant.message_delta",
@@ -420,6 +496,8 @@ class ShotwrightCopilotRuntimeManager:
             "session_id": app_session_id,
             "type": event_type,
             "summary": _event_summary(event_type, data),
+            "turn_id": turn_id,
+            "sequence": sequence,
             "data": data,
             "created_at": _utcnow(),
         }
@@ -456,11 +534,9 @@ class ShotwrightCopilotRuntimeManager:
             {
                 "$set": {
                     "content": content,
-                    "metadata": {
-                        "streaming": streaming,
-                        "state": state,
-                        "version": version,
-                    },
+                    "metadata.streaming": streaming,
+                    "metadata.state": state,
+                    "metadata.version": version,
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -507,7 +583,6 @@ class ShotwrightCopilotRuntimeManager:
             "model": session_model,
             "reasoning_effort": session_reasoning_effort,
             "streaming": True,
-            "available_tools": [],
             "tools": build_shotwright_tools(app_session_id),
             "system_message": {"mode": "replace", "content": self._system_prompt()},
             "custom_agents": self._custom_agents(skill_names),
@@ -529,6 +604,7 @@ class ShotwrightCopilotRuntimeManager:
             runtime = self._runtimes.get(app_session_id)
             if runtime:
                 turn_state = runtime.turn_state
+                sequence = runtime.next_event_sequence()
                 if turn_state and not turn_state.finalized and event_type in {"assistant.message_delta", "assistant.streaming_delta"}:
                     delta = self._extract_delta_content(event_data)
                     if delta:
@@ -560,7 +636,24 @@ class ShotwrightCopilotRuntimeManager:
                         )
                     )
 
-                runtime.track_task(self._persist_event(app_session_id, event_type, data))
+                if turn_state and event_type == "session.error":
+                    message = data.get("message") or data.get("error") or str(event_data)
+                    turn_state.error = Exception(str(message))
+                    turn_state.error_event_seen = True
+                    turn_state.idle_event.set()
+
+                if turn_state and event_type == "session.idle":
+                    turn_state.idle_event.set()
+
+                runtime.track_task(
+                    self._persist_event(
+                        app_session_id,
+                        event_type,
+                        data,
+                        turn_id=turn_state.turn_id if turn_state else None,
+                        sequence=sequence,
+                    )
+                )
 
         unsubscribe = session.on(on_event)
         handle = _RuntimeHandle(app_session_id, client, session, unsubscribe)
@@ -576,30 +669,74 @@ class ShotwrightCopilotRuntimeManager:
             if runtime:
                 return runtime
             runtime = await self._build_runtime(app_session_id)
+            runtime.event_sequence = await self._load_last_event_sequence(app_session_id)
             self._runtimes[app_session_id] = runtime
             runtime.track_task(
-                self._persist_event(app_session_id, "session.created", {"copilot_session_id": runtime.session.session_id})
+                self._persist_event(
+                    app_session_id,
+                    "session.created",
+                    {"copilot_session_id": runtime.session.session_id},
+                    sequence=runtime.next_event_sequence(),
+                )
             )
             return runtime
 
-    async def send_message(self, app_session_id: str, content: str) -> dict:
+    async def send_message(self, app_session_id: str, content: str, attachments: list[dict] | None = None) -> dict:
         runtime = await self.ensure_runtime(app_session_id)
         async with runtime.lock:
-            await self._persist_message(app_session_id, "user", content)
+            turn_id = str(uuid4())
+            copilot_attachments, persisted_attachments = _prepare_turn_attachments(attachments)
+            user_metadata = {"turn_id": turn_id, "kind": "user_prompt"}
+            if persisted_attachments:
+                user_metadata["attachments"] = persisted_attachments
+            user_doc = await self._persist_message(
+                app_session_id,
+                "user",
+                content,
+                user_metadata,
+            )
             assistant_doc = await self._persist_message(
                 app_session_id,
                 "assistant",
                 "",
-                {"streaming": True, "state": "pending", "version": 0},
+                {
+                    "turn_id": turn_id,
+                    "kind": "assistant_reply",
+                    "streaming": True,
+                    "state": "pending",
+                    "version": 0,
+                },
             )
-            runtime.turn_state = _StreamingTurnState(assistant_doc["_id"])
+            runtime.turn_state = _StreamingTurnState(
+                assistant_doc["_id"],
+                turn_id=turn_id,
+                user_message_id=user_doc["_id"],
+            )
             await self._set_session_status(app_session_id, "running", last_error=None)
             try:
-                response = await runtime.session.send_and_wait(content)
+                copilot_message_id = await runtime.session.send(
+                    content,
+                    attachments=copilot_attachments or None,
+                )
+                await self._persist_event(
+                    app_session_id,
+                    "session.turn.started",
+                    {
+                        "copilot_message_id": copilot_message_id,
+                        "timeout_seconds": settings.copilot_turn_timeout_seconds,
+                    },
+                    turn_id=turn_id,
+                    sequence=runtime.next_event_sequence(),
+                )
+                await asyncio.wait_for(
+                    runtime.turn_state.idle_event.wait(),
+                    timeout=settings.copilot_turn_timeout_seconds,
+                )
+                if runtime.turn_state.error:
+                    raise runtime.turn_state.error
+
                 turn_state = runtime.turn_state
                 assistant_text = turn_state.content if turn_state else ""
-                if response and getattr(response, "data", None):
-                    assistant_text = getattr(response.data, "content", "") or assistant_text
 
                 if turn_state and (assistant_text != turn_state.content or not turn_state.finalized):
                     turn_state.content = assistant_text
@@ -626,6 +763,7 @@ class ShotwrightCopilotRuntimeManager:
                 }
             except Exception as exc:
                 logger.exception("Copilot turn failed for %s", app_session_id)
+                timeout_error = isinstance(exc, TimeoutError)
                 if runtime.turn_state and runtime.turn_state.content.strip():
                     runtime.turn_state.finalized = True
                     runtime.turn_state.version += 1
@@ -639,8 +777,29 @@ class ShotwrightCopilotRuntimeManager:
                 else:
                     await get_message_collection().delete_one({"_id": assistant_doc["_id"]})
                     await publish_message_deleted(app_session_id, assistant_doc["_id"])
-                await self._persist_event(app_session_id, "session.error", {"message": str(exc)})
+                if timeout_error:
+                    await self._persist_event(
+                        app_session_id,
+                        "session.timeout",
+                        {
+                            "message": str(exc),
+                            "timeout_seconds": settings.copilot_turn_timeout_seconds,
+                            "partial_output": bool(runtime.turn_state and runtime.turn_state.content.strip()),
+                        },
+                        turn_id=turn_id,
+                        sequence=runtime.next_event_sequence(),
+                    )
+                elif not (runtime.turn_state and runtime.turn_state.error_event_seen):
+                    await self._persist_event(
+                        app_session_id,
+                        "session.error",
+                        {"message": str(exc)},
+                        turn_id=turn_id,
+                        sequence=runtime.next_event_sequence(),
+                    )
                 await self._set_session_status(app_session_id, "error", last_error=str(exc))
+                if timeout_error:
+                    await self.disconnect_session(app_session_id)
                 raise
             finally:
                 runtime.turn_state = None

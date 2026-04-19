@@ -51,6 +51,8 @@ RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
         & 'C:/Program Files/nodejs/npm.cmd' config set registry $env:NPM_CONFIG_REGISTRY; \
     }
 
+RUN & 'C:/workspace/scripts/install/ensure_pwsh_compat.ps1'
+
 COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
 COPY src/backend/app/ C:/workspace/src/backend/app/
 RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT uv; \
