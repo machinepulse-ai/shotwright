@@ -53,6 +53,7 @@ def _build_jsx_wrapper(
     log_path: str | Path,
     managed_project_path: str | Path | None = None,
     bootstrap_comp_name: str | None = None,
+    template_project_path: str | Path | None = None,
 ) -> str:
     normalized_script_path = Path(user_script_path).as_posix()
     normalized_log_path = Path(log_path).as_posix()
@@ -60,6 +61,9 @@ def _build_jsx_wrapper(
         Path(managed_project_path).as_posix().lower() if managed_project_path else ""
     )
     normalized_bootstrap_comp_name = bootstrap_comp_name or ""
+    normalized_template_project_path = (
+        Path(template_project_path).as_posix().lower() if template_project_path else ""
+    )
     return "\n".join(
         [
             "(function () {",
@@ -93,6 +97,27 @@ def _build_jsx_wrapper(
             "    }",
             f'    var __shotwrightManagedProjectPath = "{normalized_managed_project_path}";',
             f'    var __shotwrightBootstrapCompName = "{normalized_bootstrap_comp_name}";',
+            f'    var __shotwrightTemplateProjectPath = "{normalized_template_project_path}";',
+            "    try {",
+            "        if (__shotwrightManagedProjectPath && typeof $.setenv === \"function\") {",
+            "            $.setenv(\"SHOTWRIGHT_PROJECT_FILE\", __shotwrightManagedProjectPath);",
+            "            __shotwrightLog(\"SHOTWRIGHT_PROJECT_ENV_SET:\" + __shotwrightManagedProjectPath);",
+            "        }",
+            "    } catch (__shotwrightSetEnvError) {",
+            "        __shotwrightLog(\"SHOTWRIGHT_PROJECT_ENV_SET_FAILED:\" + __shotwrightSetEnvError.toString());",
+            "    }",
+            "    function __shotwrightEnsureTemplateProjectOpen() {",
+            "        if (!__shotwrightTemplateProjectPath) { return; }",
+            "        var __shotwrightCurrentProjectPath = app.project && app.project.file ? __shotwrightNormalizePath(app.project.file) : \"\";",
+            "        if (__shotwrightCurrentProjectPath && __shotwrightCurrentProjectPath === __shotwrightTemplateProjectPath) { return; }",
+            "        var __shotwrightTemplateFile = new File(__shotwrightTemplateProjectPath);",
+            "        if (!__shotwrightTemplateFile.exists) {",
+            "            __shotwrightLog(\"SHOTWRIGHT_TEMPLATE_MISSING:\" + __shotwrightDescribeFile(__shotwrightTemplateFile));",
+            "            return;",
+            "        }",
+            "        app.open(__shotwrightTemplateFile);",
+            "        __shotwrightLog(\"SHOTWRIGHT_TEMPLATE_OPENED:\" + __shotwrightDescribeFile(__shotwrightTemplateFile));",
+            "    }",
             "    function __shotwrightFindCompByName(name) {",
             "        if (!name || !app.project) { return null; }",
             "        for (var itemIndex = 1; itemIndex <= app.project.items.length; itemIndex += 1) {",
@@ -130,6 +155,7 @@ def _build_jsx_wrapper(
             "    }",
             "    __shotwrightLog(\"SHOTWRIGHT_JSX_START\");",
             "    try {",
+            "        __shotwrightEnsureTemplateProjectOpen();",
             "        $.evalFile(__shotwrightScript);",
             "        __shotwrightSaveManagedProject();",
             "        __shotwrightLog(\"SHOTWRIGHT_JSX_SUCCESS\");",
@@ -496,7 +522,7 @@ async def run_jsx_script(
     project: dict | None = None,
     timeout_seconds: int = 300,
 ) -> dict:
-    """Write and execute a JSX script via nexrender-cli in the container."""
+    """Write and execute a JSX script via the warmed After Effects host helper."""
     container = await get_container(container_db_id)
     if not container:
         raise ValueError("Container not found")
@@ -529,6 +555,7 @@ async def run_jsx_script(
             jsx_log_path,
             project_payload["entry_aep_path"] if project_payload else None,
             BOOTSTRAP_TEMPLATE_COMPOSITION if template_path == bootstrap_project_path else None,
+            template_path,
         ),
         encoding="utf-8",
     )
@@ -544,29 +571,39 @@ async def run_jsx_script(
         encoding="utf-8",
     )
 
-    aerender_path = _resolve_after_effects_binary("aerender.exe")
-    run_cmd = _build_nexrender_cli_command(
-        job_path,
-        work_dir,
-        aerender_path,
-        skip_render=True,
+    afterfx_gui_path = _resolve_after_effects_binary("AfterFX.exe")
+    afterfx_dispatch_path = _resolve_after_effects_dispatch_binary()
+    run_cmd = _build_after_effects_host_command(
+        "jsx",
+        afterfx_gui=afterfx_gui_path,
+        afterfx_dispatch=afterfx_dispatch_path,
+        wrapper_script=wrapper_script_path,
+        jsx_log=jsx_log_path,
+        stdout_log=stdout_path,
+        stderr_log=stderr_path,
+        timeout_seconds=max(30, timeout_seconds),
+        project_id=project_payload["project_id"] if project_payload else None,
+        project_root=project_payload["workspace_dir"] if project_payload else None,
+        project_file=project_payload["entry_aep_path"] if project_payload else None,
+        project_name=project_payload["entry_aep_file"] if project_payload else None,
     )
     exit_code, raw_output = await exec_in_container(container["docker_id"], run_cmd)
 
-    stdout_path.write_text(raw_output, encoding="utf-8")
-    stderr_path.write_text("", encoding="utf-8")
+    helper_result = _parse_after_effects_host_result(raw_output)
 
     jsx_log_text = _read_text_tail(jsx_log_path)
-    success_marker_seen = "SHOTWRIGHT_JSX_SUCCESS" in jsx_log_text
-    error_marker_seen = "SHOTWRIGHT_JSX_ERROR:" in jsx_log_text
+    success_marker_seen = bool(helper_result.get("success_marker_seen")) or "SHOTWRIGHT_JSX_SUCCESS" in jsx_log_text
+    error_marker_seen = bool(helper_result.get("error_marker_seen")) or "SHOTWRIGHT_JSX_ERROR:" in jsx_log_text
     managed_project_exists = bool(
         project_payload and Path(project_payload["entry_aep_path"]).exists()
     )
-    success = success_marker_seen and not error_marker_seen and (exit_code == 0 or managed_project_exists)
+    success = bool(helper_result.get("success")) or (
+        managed_project_exists and not error_marker_seen and not bool(helper_result.get("timed_out"))
+    )
     combined_output = "\n".join(
         part
         for part in (
-            raw_output.strip(),
+            (helper_result.get("output") or raw_output).strip(),
             jsx_log_text.strip(),
             f"Template project: {template_path}",
             f"Bootstrap template used: {template_path == bootstrap_project_path}",
@@ -576,7 +613,7 @@ async def run_jsx_script(
 
     return {
         "exit_code": exit_code,
-        "runner": Path(run_cmd[0]).name,
+        "runner": helper_result.get("runner") or afterfx_dispatch_path.name,
         "script_path": str(wrapper_script_path),
         "user_script_path": str(user_script_path),
         "jsx_log_path": str(jsx_log_path),
@@ -588,8 +625,11 @@ async def run_jsx_script(
         "bootstrap_template_path": str(bootstrap_project_path),
         "project": project_payload,
         "success": success,
-        "timed_out": exit_code == 124,
+        "timed_out": bool(helper_result.get("timed_out")) or exit_code == 124,
         "forced_cleanup": False,
+        "after_effects_ready": bool(helper_result.get("after_effects_ready")),
+        "after_effects_ready_marker": helper_result.get("after_effects_ready_marker"),
+        "dispatch_failed_to_inject": bool(helper_result.get("dispatch_failed_to_inject")),
         "success_marker_seen": success_marker_seen,
         "error_marker_seen": error_marker_seen,
         "output": combined_output[-2000:] if len(combined_output) > 2000 else combined_output,

@@ -49,6 +49,7 @@ services:
       SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE: ${SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE:-}
       SHOTWRIGHT_DEBUG: "true"
       SHOTWRIGHT_API_PROXY_TARGET: http://127.0.0.1:8000
+      PYTHONPATH: C:/workspace/src/backend
     volumes:
       - ./backend/app:C:/workspace/src/backend/app
       - ./frontend:C:/workspace/src/frontend

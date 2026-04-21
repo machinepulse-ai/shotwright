@@ -71,11 +71,23 @@ if (-not $env:SHOTWRIGHT_API_PROXY_TARGET) {
 }
 
 $env:SHOTWRIGHT_DEBUG = 'true'
+if (-not $env:WATCHFILES_FORCE_POLLING) {
+    $env:WATCHFILES_FORCE_POLLING = '1'
+}
+if (-not $env:WATCHFILES_POLL_DELAY_MS) {
+    $env:WATCHFILES_POLL_DELAY_MS = '500'
+}
+if (-not $env:PYTHONPATH) {
+    $env:PYTHONPATH = $backendRoot
+}
+elseif (-not ($env:PYTHONPATH -split ';' | Where-Object { $_ -eq $backendRoot })) {
+    $env:PYTHONPATH = "$backendRoot;$env:PYTHONPATH"
+}
 
 Write-Host '[dev-container] Starting backend and frontend inside the dev container ...' -ForegroundColor Green
 
 $backendProcess = Start-Process -FilePath 'python' `
-    -ArgumentList @('-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', '8000', '--reload') `
+    -ArgumentList @('-m', 'uvicorn', '--app-dir', $backendRoot, 'app.main:app', '--host', '0.0.0.0', '--port', '8000', '--reload', '--timeout-graceful-shutdown', '5') `
     -WorkingDirectory $backendRoot `
     -PassThru `
     -RedirectStandardOutput $backendStdout `

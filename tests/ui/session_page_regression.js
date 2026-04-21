@@ -730,6 +730,7 @@ async function collectSessionWorkbenchPanelMetrics(page) {
     const emptyState = sidebar?.querySelector('.resources-panel .empty-side');
     const composerShell = document.querySelector('.composer-shell');
     const composerCard = composerShell?.querySelector('.composer-card');
+    const prompt = composerCard?.querySelector('#agent-prompt');
     const settingsCard = document.querySelector('[data-testid="session-settings-card"]');
     const modelSelect = document.querySelector('[data-testid="session-model-select"]');
     const reasoningSelect = document.querySelector('[data-testid="session-reasoning-select"]');
@@ -741,14 +742,11 @@ async function collectSessionWorkbenchPanelMetrics(page) {
       resourcesRect: rect(resources),
       composerShellRect: rect(composerShell),
       composerCardRect: rect(composerCard),
+      promptRect: rect(prompt),
       settingsCardRect: rect(settingsCard),
       settingsInComposer: Boolean(composerShell && settingsCard && composerShell.contains(settingsCard)),
       settingsInSidebar: Boolean(sidebar && settingsCard && sidebar.contains(settingsCard)),
-      settingsBeforeComposerCard: Boolean(
-        settingsCard &&
-          composerCard &&
-          (settingsCard.compareDocumentPosition(composerCard) & Node.DOCUMENT_POSITION_FOLLOWING)
-      ),
+      settingsInComposerCard: Boolean(composerCard && settingsCard && composerCard.contains(settingsCard)),
       modelSelectRect: rect(modelSelect),
       modelSelectText: modelSelect?.selectedOptions?.[0]?.textContent?.trim() || null,
       reasoningSelectRect: rect(reasoningSelect),
@@ -826,9 +824,10 @@ async function collectPaneResizerMetrics(page, testId) {
       width: rect.width,
       height: rect.height,
       cursor: style.cursor,
+      gripBackgroundColor: beforeStyle.backgroundColor,
       gripBackgroundImage: beforeStyle.backgroundImage,
       gripBorderRadius: beforeStyle.borderRadius,
-      accentBackgroundImage: afterStyle.backgroundImage,
+      afterContent: afterStyle.content,
     };
   });
 }
@@ -1023,6 +1022,10 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       false,
       `Composer shell should not start in an overflowing state: ${JSON.stringify(composerMetrics, null, 2)}`
     );
+    assert.ok(
+      composerMetrics.composerHeight !== null && composerMetrics.composerHeight <= 196,
+      `Composer should stay compact by default instead of consuming a tall footer block: ${JSON.stringify(composerMetrics, null, 2)}`
+    );
     assert.ok(await page.locator('.chat-avatar-assistant').count(), 'Assistant messages should render a Shotwright avatar');
     assert.ok(await page.locator('.chat-avatar-user').count(), 'User messages should render a user avatar');
 
@@ -1050,12 +1053,18 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.ok(sessionPaneResizerMetrics.width >= 12 && sessionPaneResizerMetrics.cursor === 'col-resize', `Session pane resizer should be visible and horizontally draggable: ${JSON.stringify(sessionPaneResizerMetrics, null, 2)}`);
     assert.ok(contextPaneResizerMetrics.width >= 12 && contextPaneResizerMetrics.cursor === 'col-resize', `Context pane resizer should be visible and horizontally draggable: ${JSON.stringify(contextPaneResizerMetrics, null, 2)}`);
     assert.ok(
-      sessionPaneResizerMetrics.gripBackgroundImage.includes('gradient') &&
-        contextPaneResizerMetrics.gripBackgroundImage.includes('gradient') &&
-        composerResizerMetrics.gripBackgroundImage.includes('gradient') &&
+      sessionPaneResizerMetrics.gripBackgroundImage === 'none' &&
+        contextPaneResizerMetrics.gripBackgroundImage === 'none' &&
+        composerResizerMetrics.gripBackgroundImage === 'none' &&
+        sessionPaneResizerMetrics.gripBackgroundColor !== 'rgba(0, 0, 0, 0)' &&
+        contextPaneResizerMetrics.gripBackgroundColor !== 'rgba(0, 0, 0, 0)' &&
+        composerResizerMetrics.gripBackgroundColor !== 'rgba(0, 0, 0, 0)' &&
         sessionPaneResizerMetrics.gripBorderRadius === contextPaneResizerMetrics.gripBorderRadius &&
-        contextPaneResizerMetrics.gripBorderRadius === composerResizerMetrics.gripBorderRadius,
-      `All three resize handles should share the same visible grip language instead of mixing styles: ${JSON.stringify({ sessionPaneResizerMetrics, contextPaneResizerMetrics, composerResizerMetrics }, null, 2)}`
+        contextPaneResizerMetrics.gripBorderRadius === composerResizerMetrics.gripBorderRadius &&
+        sessionPaneResizerMetrics.afterContent === 'none' &&
+        contextPaneResizerMetrics.afterContent === 'none' &&
+        composerResizerMetrics.afterContent === 'none',
+      `All three resize handles should use the same plain solid bar treatment: ${JSON.stringify({ sessionPaneResizerMetrics, contextPaneResizerMetrics, composerResizerMetrics }, null, 2)}`
     );
 
     const layoutBeforePaneResize = await collectWorkbenchLayoutMetrics(page);
@@ -1286,10 +1295,16 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     const initialPanelMetrics = await collectSessionWorkbenchPanelMetrics(page);
     assert.equal(initialPanelMetrics.settingsInComposer, true, `Session settings card should move into the composer shell: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.settingsInSidebar, false, `Right sidebar should no longer host the session settings card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.equal(initialPanelMetrics.settingsBeforeComposerCard, true, `Session settings should sit above the prompt card inside the composer shell: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.settingsInComposerCard, true, `Session settings should live inside the composer card instead of floating above it: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.modelSelectText, "GPT-5.4 mini", "Model selector should show the full GPT-5.4 mini label");
     assert.equal(initialPanelMetrics.reasoningSelectText, "Extreme", `Reasoning selector should use compact option labels in the composer settings row: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.ok(initialPanelMetrics.modelSelectRect && initialPanelMetrics.modelSelectRect.width >= 148, `Model selector is still too narrow: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.modelSelectRect && initialPanelMetrics.modelSelectRect.width >= 118, `Model selector is still too narrow: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(
+      initialPanelMetrics.promptRect &&
+        initialPanelMetrics.settingsCardRect &&
+        initialPanelMetrics.settingsCardRect.top >= initialPanelMetrics.promptRect.bottom - 1,
+      `Composer settings should sit in the bottom control strip below the prompt area: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+    );
     assert.ok(
       initialPanelMetrics.modelSelectRect &&
         initialPanelMetrics.reasoningSelectRect &&
@@ -1299,14 +1314,14 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.ok(
       initialPanelMetrics.modelSelectRect &&
         initialPanelMetrics.reasoningSelectRect &&
-        initialPanelMetrics.reasoningSelectRect.left - initialPanelMetrics.modelSelectRect.right >= 12,
+        initialPanelMetrics.reasoningSelectRect.left - initialPanelMetrics.modelSelectRect.right >= 8,
       `Composer settings selects should keep enough horizontal gap instead of crowding together: ${JSON.stringify(initialPanelMetrics, null, 2)}`
     );
     assert.ok(
-      initialPanelMetrics.selectWidthDelta !== null && initialPanelMetrics.selectWidthDelta <= 2,
-      `Composer settings selects should have matching widths: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+      initialPanelMetrics.selectWidthDelta !== null && initialPanelMetrics.selectWidthDelta <= 28,
+      `Composer settings selects should stay visually balanced even in the compact footer row: ${JSON.stringify(initialPanelMetrics, null, 2)}`
     );
-    assert.ok(initialPanelMetrics.saveButtonRect && initialPanelMetrics.saveButtonRect.height >= 36, `Save button should keep a usable hit area inside the composer row: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.saveButtonRect && initialPanelMetrics.saveButtonRect.height >= 32, `Save button should keep a usable hit area inside the composer row: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.runtimeValueText, sessionStates[primarySessionId].copilot_session_id, `Runtime id should stay fully visible in the sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(initialPanelMetrics.runtimeValueRect && initialPanelMetrics.runtimeValueRect.height >= 30, `Runtime id row should have enough height to wrap long ids instead of truncating them: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.resourcesEmptyText, "No project files have been uploaded yet.", "Resources empty state should stay visible");

@@ -71,11 +71,11 @@ type MetaChip = {
 const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MAX_COMPOSER_IMAGE_BYTES = 6 * 1024 * 1024;
 const MAX_COMPOSER_ATTACHMENTS = 4;
-const DEFAULT_COMPOSER_HEIGHT = 220;
-const MIN_COMPOSER_HEIGHT = 176;
+const DEFAULT_COMPOSER_HEIGHT = 172;
+const MIN_COMPOSER_HEIGHT = 136;
 const MIN_TRANSCRIPT_HEIGHT = 220;
 const COMPOSER_SPLITTER_HEIGHT = 14;
-const COMPOSER_TEXTAREA_MIN_HEIGHT = 132;
+const COMPOSER_TEXTAREA_MIN_HEIGHT = 76;
 const COMPOSER_HEIGHT_STORAGE_KEY = "shotwright_composer_height";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 232;
 const MIN_SESSION_SIDEBAR_WIDTH = 196;
@@ -2620,6 +2620,7 @@ export default function AgentPanel({
             <select
               className="settings-select"
               data-testid="session-model-select"
+              aria-label={copy.agent.sessionSettingsFields.model}
               value={draftModel}
               onChange={handleModelChange}
               disabled={modelOptionsLoading || !sessionModelOptions.length}
@@ -2643,6 +2644,7 @@ export default function AgentPanel({
             <select
               className="settings-select"
               data-testid="session-reasoning-select"
+              aria-label={copy.agent.sessionSettingsFields.reasoning}
               value={draftReasoning ?? ""}
               onChange={handleReasoningChange}
               disabled={!reasoningSupported}
@@ -2986,8 +2988,6 @@ export default function AgentPanel({
 
             {composerAttachmentError ? <div className="inline-alert composer-alert">{composerAttachmentError}</div> : null}
 
-            {composerSessionSettings}
-
             <div
               ref={composerCardRef}
               className={`composer-card${isDraggingComposer ? " is-dragging" : ""}`}
@@ -2997,16 +2997,29 @@ export default function AgentPanel({
             >
               {pendingAttachments.length ? (
                 <div ref={composerAttachmentsRef} className="composer-attachments">
-                  {pendingAttachments.map((attachment) => {
-                    const attachmentMeta = [
-                      attachment.display_name,
-                      attachment.width && attachment.height ? `${attachment.width} x ${attachment.height}` : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ");
+                  {pendingAttachments.map((attachment, index) => {
+                    const attachmentTitle = attachment.display_name || `${copy.agent.attachmentImageAlt} ${index + 1}`;
+                    const attachmentMeta = attachment.width && attachment.height ? `${attachment.width} x ${attachment.height}` : null;
+                    const attachmentSummary = [attachmentTitle, attachmentMeta].filter(Boolean).join(" · ");
 
                     return (
-                      <figure key={attachment.id} className="composer-attachment" data-testid="composer-attachment">
+                      <div
+                        key={attachment.id}
+                        className="composer-attachment"
+                        data-testid="composer-attachment"
+                        title={attachmentSummary}
+                      >
+                        <div className="composer-attachment-chip">
+                          <span className="composer-attachment-icon" aria-hidden="true">
+                            <svg viewBox="0 0 16 16" focusable="false">
+                              <path d="M2.25 3A1.25 1.25 0 0 1 3.5 1.75h9A1.25 1.25 0 0 1 13.75 3v10A1.25 1.25 0 0 1 12.5 14.25h-9A1.25 1.25 0 0 1 2.25 13V3Zm1.25.25a.25.25 0 0 0-.25.25v7.82l2.7-2.93a.75.75 0 0 1 1.08-.03l1.64 1.64 1.96-2.29a.75.75 0 0 1 1.14.97l-2.48 2.9a.75.75 0 0 1-1.1.05L6.45 9.95l-3.2 3.47v.08c0 .14.11.25.25.25h9a.25.25 0 0 0 .25-.25v-10a.25.25 0 0 0-.25-.25h-9Zm6.9 1.35a1.15 1.15 0 1 1 0 2.3 1.15 1.15 0 0 1 0-2.3Z" fill="currentColor"/>
+                            </svg>
+                          </span>
+                          <div className="composer-attachment-copy">
+                            <span className="composer-attachment-title">{attachmentTitle}</span>
+                            {attachmentMeta ? <span className="composer-attachment-caption">{attachmentMeta}</span> : null}
+                          </div>
+                        </div>
                         <button
                           type="button"
                           className="composer-attachment-remove"
@@ -3018,13 +3031,7 @@ export default function AgentPanel({
                             <path d="M6 2.5h4l.5 1H13a.75.75 0 0 1 0 1.5h-.6l-.55 7.18A1.75 1.75 0 0 1 10.1 13.8H5.9a1.75 1.75 0 0 1-1.75-1.62L3.6 5H3a.75.75 0 0 1 0-1.5h2.5l.5-1Zm-.9 2.5.54 7.06a.25.25 0 0 0 .26.24h4.2a.25.25 0 0 0 .26-.24L10.9 5H5.1ZM6.75 6.5a.75.75 0 0 1 .75.75v3.25a.75.75 0 0 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Zm2.5 0a.75.75 0 0 1 .75.75v3.25a.75.75 0 0 1-1.5 0V7.25a.75.75 0 0 1 .75-.75Z" fill="currentColor"/>
                           </svg>
                         </button>
-                        <img
-                          className="composer-attachment-image"
-                          src={attachment.data_url}
-                          alt={attachment.display_name || copy.agent.attachmentImageAlt}
-                        />
-                        <figcaption className="composer-attachment-caption">{attachmentMeta}</figcaption>
-                      </figure>
+                      </div>
                     );
                   })}
                 </div>
@@ -3033,7 +3040,7 @@ export default function AgentPanel({
               <textarea
                 ref={composerTextareaRef}
                 id="agent-prompt"
-                rows={5}
+                rows={3}
                 className="composer-textarea"
                 placeholder={currentSession ? copy.agent.textareaActive : copy.agent.textareaInactive}
                 value={prompt}
@@ -3045,11 +3052,10 @@ export default function AgentPanel({
 
               <div ref={composerFooterRef} className="composer-footer">
                 <div className="composer-footer-main">
+                  {composerSessionSettings}
                   <div className="composer-meta">
                     <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
                     <span className="composer-hint">{copy.agent.composerImageHint}</span>
-                    <span className="composer-hint">{copy.agent.composerResizeHint}</span>
-                    <span className="composer-hint">{copy.common.autoRefreshHint}</span>
                   </div>
                 </div>
                 <div className="composer-actions">

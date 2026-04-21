@@ -18,7 +18,19 @@ $backendJob = Start-Job -ScriptBlock {
     Set-Location $dir
     $env:SHOTWRIGHT_MONGO_URI = 'mongodb://localhost:27017'
     $env:SHOTWRIGHT_DEBUG = 'true'
-    & python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    if (-not $env:WATCHFILES_FORCE_POLLING) {
+        $env:WATCHFILES_FORCE_POLLING = '1'
+    }
+    if (-not $env:WATCHFILES_POLL_DELAY_MS) {
+        $env:WATCHFILES_POLL_DELAY_MS = '500'
+    }
+    if (-not $env:PYTHONPATH) {
+        $env:PYTHONPATH = $dir
+    }
+    elseif (-not ($env:PYTHONPATH -split ';' | Where-Object { $_ -eq $dir })) {
+        $env:PYTHONPATH = "$dir;$env:PYTHONPATH"
+    }
+    & python -m uvicorn --app-dir $dir app.main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 5
 } -ArgumentList "$root\backend"
 
 # Frontend
