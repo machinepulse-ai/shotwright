@@ -651,6 +651,9 @@ async function collectChatAlignmentMetrics(page) {
 
 async function collectSessionListMetrics(page) {
   return page.evaluate(() => {
+    const sidebar = document.querySelector('[data-testid="session-list-sidebar"]');
+    const sidebarRect = sidebar?.getBoundingClientRect() || null;
+
     return Array.from(document.querySelectorAll('[data-testid="session-list-item"]')).map((item) => {
       const title = item.querySelector('.session-name');
       const modelChip = item.querySelector('.session-model-chip');
@@ -668,6 +671,7 @@ async function collectSessionListMetrics(page) {
         projectChipBottom: projectChip ? rect.bottom - projectChip.getBoundingClientRect().bottom : null,
         timeChipBottom: timeChip ? rect.bottom - timeChip.getBoundingClientRect().bottom : null,
         timeChipRight: timeChip ? rect.right - timeChip.getBoundingClientRect().right : null,
+        leftInset: sidebarRect ? rect.left - sidebarRect.left : null,
         badgeTop: badge ? badge.getBoundingClientRect().top - rect.top : null,
         modelChipColor: modelChip ? getComputedStyle(modelChip).color : null,
         modelChipClass: modelChip?.className || null,
@@ -721,11 +725,39 @@ async function collectOverflowMetrics(page) {
   });
 }
 
+async function collectScrollbarVisibilityMetrics(page) {
+  return page.evaluate(() => {
+    const read = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) {
+        return null;
+      }
+
+      const style = getComputedStyle(element);
+      const scrollbarStyle = getComputedStyle(element, '::-webkit-scrollbar');
+
+      return {
+        selector,
+        scrollbarWidth: style.scrollbarWidth || null,
+        webkitDisplay: scrollbarStyle.display || null,
+      };
+    };
+
+    return {
+      transcript: read('.chat-transcript'),
+      contextSidebar: read('[data-testid="session-context-sidebar"]'),
+    };
+  });
+}
+
 async function collectSessionWorkbenchPanelMetrics(page) {
   return page.evaluate(() => {
     const sidebar = document.querySelector('[data-testid="session-context-sidebar"]');
     const overview = sidebar?.querySelector('.session-overview-panel');
+    const overviewGrid = sidebar?.querySelector('[data-testid="session-overview-grid"]');
     const resources = sidebar?.querySelector('.resources-panel');
+    const previewPanel = document.querySelector('[data-testid="render-preview-panel"]');
+    const previewTrigger = document.querySelector('[data-testid="render-preview-trigger"]');
     const runtimeValue = sidebar?.querySelector('[data-testid="session-runtime-id"]');
     const emptyState = sidebar?.querySelector('.resources-panel .empty-side');
     const composerShell = document.querySelector('.composer-shell');
@@ -739,7 +771,10 @@ async function collectSessionWorkbenchPanelMetrics(page) {
 
     return {
       overviewRect: rect(overview),
+      overviewGridRect: rect(overviewGrid),
       resourcesRect: rect(resources),
+      previewPanelRect: rect(previewPanel),
+      previewTriggerRect: rect(previewTrigger),
       composerShellRect: rect(composerShell),
       composerCardRect: rect(composerCard),
       promptRect: rect(prompt),
@@ -958,8 +993,10 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     const reasoningSelect = page.locator('[data-testid="session-reasoning-select"]');
     const saveButton = page.locator('[data-testid="session-settings-save"]');
     const assistantMessage = page.locator(".chat-message.role-assistant .markdown-content");
-    const previewBadge = page.locator(".video-source-badge");
-    const previewVideo = page.locator(".video-element");
+    const previewPanel = page.locator('[data-testid="render-preview-panel"]');
+    const previewBadge = previewPanel.locator('.video-source-badge');
+    const previewTrigger = page.locator('[data-testid="render-preview-trigger"]');
+    const previewModal = page.locator('[data-testid="render-preview-modal"]');
 
     const sessionListMetrics = await collectSessionListMetrics(page);
     assert.ok(sessionListMetrics.length >= 2, "Session list should render multiple cards for alignment checks");
@@ -988,6 +1025,10 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       assert.ok(
         metrics.timeChipRight !== null && metrics.timeChipRight <= 10,
         `Session timestamp chip should stay tucked into the bottom-right corner: ${JSON.stringify(sessionListMetrics, null, 2)}`
+      );
+      assert.ok(
+        metrics.leftInset !== null && metrics.leftInset <= 2,
+        `Session cards should hug the left edge instead of floating with a blank gutter: ${JSON.stringify(sessionListMetrics, null, 2)}`
       );
     }
     assert.notEqual(
@@ -1028,6 +1069,14 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     );
     assert.ok(await page.locator('.chat-avatar-assistant').count(), 'Assistant messages should render a Shotwright avatar');
     assert.ok(await page.locator('.chat-avatar-user').count(), 'User messages should render a user avatar');
+
+    const scrollbarMetrics = await collectScrollbarVisibilityMetrics(page);
+    for (const [key, metrics] of Object.entries(scrollbarMetrics)) {
+      assert.ok(
+        metrics && (metrics.webkitDisplay === 'none' || metrics.scrollbarWidth === 'none'),
+        `Scrollable workbench surfaces should hide native scrollbars: ${JSON.stringify(scrollbarMetrics, null, 2)}`
+      );
+    }
 
     const resizerHandle = page.locator('[data-testid="composer-resizer"]');
     const composerShell = page.locator('.composer-shell');
@@ -1282,8 +1331,15 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.equal(restoredLayoutMetrics.sessionSidebarVisible, true, 'Session sidebar should reopen when toggled again');
     assert.equal(restoredLayoutMetrics.contextSidebarVisible, true, 'Context sidebar should reopen when toggled again');
 
+    assert.equal(await previewPanel.count(), 1, 'A compact render preview entry should appear when a render exists');
     assert.equal((await previewBadge.textContent())?.trim(), "MP4");
-    assert.ok((await previewVideo.getAttribute("src"))?.includes(`/api/streams/renders/${primarySessionId}`), "Video preview should point at the direct mp4 route");
+    assert.equal(await page.locator('[data-testid="session-context-sidebar"] .video-element').count(), 0, 'Right sidebar should not embed the video player directly anymore');
+    await previewTrigger.click();
+    await page.waitForSelector('[data-testid="render-preview-modal"]');
+    const previewVideo = previewModal.locator('.video-element');
+    assert.ok((await previewVideo.getAttribute('src'))?.includes(`/api/streams/renders/${primarySessionId}`), 'Preview modal should point at the direct mp4 route');
+    await page.locator('[data-testid="render-preview-modal-close"]').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="render-preview-modal"]'));
 
     let overflowMetrics = await collectOverflowMetrics(page);
     assert.equal(
@@ -1321,11 +1377,18 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       initialPanelMetrics.selectWidthDelta !== null && initialPanelMetrics.selectWidthDelta <= 28,
       `Composer settings selects should stay visually balanced even in the compact footer row: ${JSON.stringify(initialPanelMetrics, null, 2)}`
     );
-    assert.ok(initialPanelMetrics.saveButtonRect && initialPanelMetrics.saveButtonRect.height >= 32, `Save button should keep a usable hit area inside the composer row: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(
+      initialPanelMetrics.saveButtonRect &&
+        initialPanelMetrics.saveButtonRect.height >= 30 &&
+        initialPanelMetrics.saveButtonRect.width <= 36,
+      `Save control should collapse into a compact icon affordance inside the new composer toolbar: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+    );
     assert.equal(initialPanelMetrics.runtimeValueText, sessionStates[primarySessionId].copilot_session_id, `Runtime id should stay fully visible in the sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(initialPanelMetrics.runtimeValueRect && initialPanelMetrics.runtimeValueRect.height >= 30, `Runtime id row should have enough height to wrap long ids instead of truncating them: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.resourcesEmptyText, "No project files have been uploaded yet.", "Resources empty state should stay visible");
-    assert.ok(initialPanelMetrics.overviewRect && initialPanelMetrics.overviewRect.height <= 520, `Overview panel should not consume the whole sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.overviewGridRect, `Session overview should use the new compact summary grid: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.previewPanelRect && initialPanelMetrics.previewTriggerRect, `Render preview summary should expose a trigger instead of a fixed inline player: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.overviewRect && initialPanelMetrics.overviewRect.height <= 460, `Overview panel should stay concise instead of expanding into a long fact sheet: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
 
     await modelSelect.selectOption("gpt-4.1");
     assert.equal(await reasoningSelect.isDisabled(), true, "Reasoning selector should disable for models without reasoning support");

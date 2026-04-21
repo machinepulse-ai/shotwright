@@ -80,9 +80,9 @@ const COMPOSER_HEIGHT_STORAGE_KEY = "shotwright_composer_height";
 const DEFAULT_SESSION_SIDEBAR_WIDTH = 232;
 const MIN_SESSION_SIDEBAR_WIDTH = 196;
 const MAX_SESSION_SIDEBAR_WIDTH = 360;
-const DEFAULT_CONTEXT_SIDEBAR_WIDTH = 392;
-const MIN_CONTEXT_SIDEBAR_WIDTH = 320;
-const MAX_CONTEXT_SIDEBAR_WIDTH = 520;
+const DEFAULT_CONTEXT_SIDEBAR_WIDTH = 428;
+const MIN_CONTEXT_SIDEBAR_WIDTH = 340;
+const MAX_CONTEXT_SIDEBAR_WIDTH = 560;
 const SIDEBAR_RESIZER_WIDTH = 14;
 const MIN_CHAT_STAGE_WIDTH = 480;
 const SESSION_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_session_sidebar_width";
@@ -1533,6 +1533,7 @@ export default function AgentPanel({
   const [draftModel, setDraftModel] = useState("");
   const [draftReasoning, setDraftReasoning] = useState<ReasoningEffort | null>(null);
   const [savingSessionSettings, setSavingSessionSettings] = useState(false);
+  const [isRenderPreviewOpen, setIsRenderPreviewOpen] = useState(false);
   const [sessionsError, setSessionsError] = useState<UiError | null>(null);
   const [panelError, setPanelError] = useState<UiError | null>(null);
   const [sessionSettingsError, setSessionSettingsError] = useState<UiError | null>(null);
@@ -1544,6 +1545,7 @@ export default function AgentPanel({
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerAttachmentInputRef = useRef<HTMLInputElement | null>(null);
   const composerCardRef = useRef<HTMLDivElement | null>(null);
   const composerFooterRef = useRef<HTMLDivElement | null>(null);
   const composerAttachmentsRef = useRef<HTMLDivElement | null>(null);
@@ -1641,6 +1643,8 @@ export default function AgentPanel({
   const effectiveDraftReasoning = reasoningSupported ? draftReasoning : null;
   const previewVideoSrc = context?.latest_render_url || context?.latest_stream_url || null;
   const previewVideoFormat = context?.latest_render_url ? "mp4" : context?.latest_stream_url ? "hls" : null;
+  const hasRenderPreview = Boolean(previewVideoSrc && previewVideoFormat);
+  const latestRenderName = basename(context?.latest_render_path, copy.common.notGenerated);
   const sessionSettingsDirty = Boolean(currentSession) && (
     draftModel !== (currentSession?.copilot_model ?? "") ||
     effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
@@ -1898,6 +1902,35 @@ export default function AgentPanel({
     renameInputRef.current?.focus();
     renameInputRef.current?.select();
   }, [editingSessionName, currentSession?._id]);
+
+  useEffect(() => {
+    if (hasRenderPreview) {
+      return;
+    }
+
+    setIsRenderPreviewOpen(false);
+  }, [hasRenderPreview]);
+
+  useEffect(() => {
+    if (typeof document === "undefined" || !isRenderPreviewOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsRenderPreviewOpen(false);
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleWindowKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleWindowKeyDown);
+    };
+  }, [isRenderPreviewOpen]);
 
   useEffect(() => {
     activeSessionIdRef.current = currentSession?._id ?? null;
@@ -2271,6 +2304,19 @@ export default function AgentPanel({
     composerTextareaRef.current?.focus();
   };
 
+  const handleOpenComposerAttachmentPicker = () => {
+    if (!currentSession) return;
+    composerAttachmentInputRef.current?.click();
+  };
+
+  const handleComposerAttachmentInputChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length) {
+      void handleAppendAttachments(files);
+    }
+    event.target.value = "";
+  };
+
   const handleComposerResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
     const stageBody = chatStageBodyRef.current;
     if (!stageBody) return;
@@ -2612,69 +2658,68 @@ export default function AgentPanel({
   };
 
   const composerSessionSettings = currentSession ? (
-    <div className="session-settings-block composer-session-settings" data-testid="session-settings-card">
-      <div className="composer-session-settings-grid">
-        <label className="settings-field settings-field-model">
-          <span className="settings-label">{copy.agent.sessionSettingsFields.model}</span>
-          <div className={`settings-control-shell${modelOptionsLoading || !sessionModelOptions.length ? " is-disabled" : ""}`}>
-            <select
-              className="settings-select"
-              data-testid="session-model-select"
-              aria-label={copy.agent.sessionSettingsFields.model}
-              value={draftModel}
-              onChange={handleModelChange}
-              disabled={modelOptionsLoading || !sessionModelOptions.length}
-            >
-              {sessionModelOptions.length ? (
-                sessionModelOptions.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.name}
-                  </option>
-                ))
-              ) : (
-                <option value="">{copy.agent.sessionSettingsNoOptions}</option>
-              )}
-            </select>
-          </div>
-        </label>
-
-        <label className="settings-field settings-field-reasoning">
-          <span className="settings-label">{copy.agent.sessionSettingsFields.reasoning}</span>
-          <div className={`settings-control-shell${!reasoningSupported ? " is-disabled" : ""}`}>
-            <select
-              className="settings-select"
-              data-testid="session-reasoning-select"
-              aria-label={copy.agent.sessionSettingsFields.reasoning}
-              value={draftReasoning ?? ""}
-              onChange={handleReasoningChange}
-              disabled={!reasoningSupported}
-            >
-              {reasoningSupported ? (
-                selectedReasoningOptions.map((effort) => (
-                  <option key={effort} value={effort}>
-                    {getReasoningSelectLabel(effort, locale, copy)}
-                  </option>
-                ))
-              ) : (
-                <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
-              )}
-            </select>
-          </div>
-        </label>
-
-        <div className="session-settings-actions composer-session-settings-actions">
-          <button
-            className="btn-primary btn-sm"
-            data-testid="session-settings-save"
-            onClick={handleSaveSessionSettings}
-            disabled={savingSessionSettings || !draftModel || !sessionSettingsDirty}
+    <div className="composer-session-settings" data-testid="session-settings-card">
+      <label className="settings-field settings-field-model">
+        <span className="settings-label">{copy.agent.sessionSettingsFields.model}</span>
+        <div className={`settings-control-shell${modelOptionsLoading || !sessionModelOptions.length ? " is-disabled" : ""}`}>
+          <select
+            className="settings-select"
+            data-testid="session-model-select"
+            aria-label={copy.agent.sessionSettingsFields.model}
+            value={draftModel}
+            onChange={handleModelChange}
+            disabled={modelOptionsLoading || !sessionModelOptions.length}
           >
-            {savingSessionSettings ? copy.common.saving : copy.common.save}
-          </button>
+            {sessionModelOptions.length ? (
+              sessionModelOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.name}
+                </option>
+              ))
+            ) : (
+              <option value="">{copy.agent.sessionSettingsNoOptions}</option>
+            )}
+          </select>
         </div>
-      </div>
-      {modelOptionsLoading ? <p className="settings-help">{copy.agent.sessionSettingsLoading}</p> : null}
-      {sessionSettingsErrorMessage ? <div className="inline-alert composer-session-settings-alert">{sessionSettingsErrorMessage}</div> : null}
+      </label>
+
+      <label className="settings-field settings-field-reasoning">
+        <span className="settings-label">{copy.agent.sessionSettingsFields.reasoning}</span>
+        <div className={`settings-control-shell${!reasoningSupported ? " is-disabled" : ""}`}>
+          <select
+            className="settings-select"
+            data-testid="session-reasoning-select"
+            aria-label={copy.agent.sessionSettingsFields.reasoning}
+            value={draftReasoning ?? ""}
+            onChange={handleReasoningChange}
+            disabled={!reasoningSupported}
+          >
+            {reasoningSupported ? (
+              selectedReasoningOptions.map((effort) => (
+                <option key={effort} value={effort}>
+                  {getReasoningSelectLabel(effort, locale, copy)}
+                </option>
+              ))
+            ) : (
+              <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
+            )}
+          </select>
+        </div>
+      </label>
+
+      <button
+        type="button"
+        className={`composer-settings-save${sessionSettingsDirty ? " is-dirty" : ""}`}
+        data-testid="session-settings-save"
+        aria-label={sessionSettingsDirty ? copy.common.save : copy.common.saved}
+        title={sessionSettingsDirty ? copy.common.save : copy.common.saved}
+        onClick={handleSaveSessionSettings}
+        disabled={savingSessionSettings || !draftModel || !sessionSettingsDirty}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path d="M3 2.25h8.2l2.55 2.55V13A1.25 1.25 0 0 1 12.5 14.25h-9A1.25 1.25 0 0 1 2.25 13V3.5A1.25 1.25 0 0 1 3.5 2.25H3Zm1.25 1.5v3h6.5v-3h-6.5Zm6.9 8.55V8.75h-6.3v3.55h6.3Z" fill="currentColor"/>
+        </svg>
+      </button>
     </div>
   ) : null;
 
@@ -2686,14 +2731,16 @@ export default function AgentPanel({
         hidden={isSessionSidebarCollapsed}
       >
         <div className="sidebar-section">
-          <div className="sidebar-section-header">
-            <span>{copy.agent.sidebarTitle}</span>
-            <span>{sessions.length}</span>
+          <div className="sidebar-section-lead">
+            <div className="sidebar-section-header">
+              <span>{copy.agent.sidebarTitle}</span>
+              <span>{sessions.length}</span>
+            </div>
+            <button className="ghost-button sidebar-new-button" onClick={handleNewSession}>
+              {copy.common.newChat}
+            </button>
+            {sessionsErrorMessage && <div className="sidebar-alert">{sessionsErrorMessage}</div>}
           </div>
-          <button className="ghost-button sidebar-new-button" onClick={handleNewSession}>
-            {copy.common.newChat}
-          </button>
-          {sessionsErrorMessage && <div className="sidebar-alert">{sessionsErrorMessage}</div>}
 
           <ul className="session-list">
             {sessions.length ? (
@@ -2704,6 +2751,7 @@ export default function AgentPanel({
                     data-testid="session-list-item"
                     className={`session-item ${currentSession?._id === session._id ? "active" : ""}`}
                     onClick={() => handleSelectSession(session)}
+                    title={session.name}
                   >
                     <div className="session-item-top">
                       <div className="session-title-group">
@@ -2987,6 +3035,7 @@ export default function AgentPanel({
             ) : null}
 
             {composerAttachmentError ? <div className="inline-alert composer-alert">{composerAttachmentError}</div> : null}
+            {sessionSettingsErrorMessage ? <div className="inline-alert composer-alert">{sessionSettingsErrorMessage}</div> : null}
 
             <div
               ref={composerCardRef}
@@ -2995,6 +3044,15 @@ export default function AgentPanel({
               onDragLeave={handleComposerDragLeave}
               onDrop={handleComposerDrop}
             >
+              <input
+                ref={composerAttachmentInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                hidden
+                multiple
+                onChange={handleComposerAttachmentInputChange}
+              />
+
               {pendingAttachments.length ? (
                 <div ref={composerAttachmentsRef} className="composer-attachments">
                   {pendingAttachments.map((attachment, index) => {
@@ -3052,19 +3110,40 @@ export default function AgentPanel({
 
               <div ref={composerFooterRef} className="composer-footer">
                 <div className="composer-footer-main">
+                  <button
+                    type="button"
+                    className="composer-tool-button composer-attach-button"
+                    data-testid="composer-attachment-trigger"
+                    aria-label={copy.agent.composerAttachImage}
+                    title={copy.agent.composerAttachImage}
+                    onClick={handleOpenComposerAttachmentPicker}
+                    disabled={!currentSession}
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                      <path d="M8 2.25a.75.75 0 0 1 .75.75v4.25H13a.75.75 0 0 1 0 1.5H8.75V13a.75.75 0 0 1-1.5 0V8.75H3a.75.75 0 0 1 0-1.5h4.25V3A.75.75 0 0 1 8 2.25Z" fill="currentColor"/>
+                    </svg>
+                  </button>
+
+                  <span className="composer-mode-pill" data-testid="composer-mode-pill">
+                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                      <path d="M8.1 1.75a1 1 0 0 1 .82.43l1.4 2a1 1 0 0 0 .68.42l2.39.39a1 1 0 0 1 .55 1.71l-1.72 1.77a1 1 0 0 0-.27.83l.4 2.46a1 1 0 0 1-1.45 1.03L8.6 12.23a1 1 0 0 0-.93 0l-2.3 1.33a1 1 0 0 1-1.45-1.03l.4-2.46a1 1 0 0 0-.27-.83L2.33 6.7a1 1 0 0 1 .55-1.71l2.39-.39a1 1 0 0 0 .68-.42l1.4-2a1 1 0 0 1 .75-.43Z" fill="currentColor"/>
+                    </svg>
+                    <span>{copy.app.agent}</span>
+                  </span>
+
                   {composerSessionSettings}
-                  <div className="composer-meta">
-                    <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
-                    <span className="composer-hint">{copy.agent.composerImageHint}</span>
-                  </div>
                 </div>
                 <div className="composer-actions">
+                  <span className="composer-shortcut">{copy.common.ctrlEnterHint}</span>
                   <button
                     className="btn-primary send-button"
                     onClick={handleSend}
                     disabled={!currentSession || sending || (!prompt.trim() && !pendingAttachments.length)}
                   >
-                    {sending ? copy.common.working : copy.common.send}
+                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                      <path d="M2.5 8.75 11 8.76 7.72 12.04a.75.75 0 1 0 1.06 1.06l4.56-4.57a.75.75 0 0 0 0-1.06L8.78 2.9a.75.75 0 0 0-1.06 1.06L11 7.25H2.5a.75.75 0 0 0 0 1.5Z" fill="currentColor"/>
+                    </svg>
+                    <span>{sending ? copy.common.working : copy.common.send}</span>
                   </button>
                 </div>
               </div>
@@ -3095,58 +3174,83 @@ export default function AgentPanel({
         {currentSession ? (
           <>
             <div className="card context-panel session-overview-panel">
-              <div className="panel-heading">
-                <div>
+              <div className="session-overview-header">
+                <div className="session-overview-heading">
                   <span className="eyebrow">{copy.agent.sessionPanelEyebrow}</span>
-                  <h3>{currentSession.name}</h3>
+                  <h3 title={currentSession.name}>{currentSession.name}</h3>
                 </div>
-              </div>
-              <div className="session-overview-scroll">
-                <dl className="fact-list">
-                  <div className="fact-row">
-                    <dt>{copy.agent.sessionPanelFields.status}</dt>
-                    <dd>{sessionStatusLabels[sessionStatus]}</dd>
-                  </div>
-                  <div className="fact-row">
-                    <dt>{copy.agent.sessionPanelFields.activeProject}</dt>
-                    <dd>{activeProject?.filename || copy.common.notSpecified}</dd>
-                  </div>
-                  <div className="fact-row">
-                    <dt>{copy.agent.sessionPanelFields.container}</dt>
-                    <dd>{context?.container ? containerStatusLabels[context.container.status] : copy.common.notStarted}</dd>
-                  </div>
-                  <div className="fact-row">
-                    <dt>{copy.agent.sessionPanelFields.lastReply}</dt>
-                    <dd>{latestAssistantMessage ? formatDateTime(latestAssistantMessage.created_at, locale, copy.common.notStarted) : copy.common.none}</dd>
-                  </div>
-                  <div className="fact-row">
-                    <dt>{copy.agent.sessionPanelFields.latestRender}</dt>
-                    <dd>{basename(context?.latest_render_path, copy.common.notGenerated)}</dd>
-                  </div>
-                  <div className="fact-row">
-                    <dt>{copy.agent.sessionPanelFields.lastSync}</dt>
-                    <dd>{formatDateTime(currentSession.updated_at, locale, copy.common.notStarted)}</dd>
-                  </div>
-                </dl>
-                <div className="session-runtime-meta">
-                  <span className="eyebrow">{copy.agent.sessionPanelFields.runtime}</span>
-                  <span className="mono" data-testid="session-runtime-id">
-                    {context?.session.copilot_session_id || copy.common.notStarted}
+                <div className="session-overview-badges">
+                  <span className={`session-model-chip ${getSessionModelToneClass(currentSession.copilot_model)}`}>
+                    {currentModelLabel}
                   </span>
+                  <span className={`status-badge status-${sessionStatus}`}>{sessionStatusLabels[sessionStatus]}</span>
                 </div>
-                {currentSession.last_error && <div className="inline-alert">{currentSession.last_error}</div>}
               </div>
+              <div className="session-overview-grid" data-testid="session-overview-grid">
+                <div className="session-overview-stat">
+                  <span className="session-overview-stat-label">{copy.agent.sessionPanelFields.activeProject}</span>
+                  <strong title={activeProject?.filename || copy.common.notSpecified}>{activeProject?.filename || copy.common.notSpecified}</strong>
+                </div>
+                <div className="session-overview-stat">
+                  <span className="session-overview-stat-label">{copy.agent.sessionPanelFields.container}</span>
+                  <strong>{context?.container ? containerStatusLabels[context.container.status] : copy.common.notStarted}</strong>
+                </div>
+                <div className="session-overview-stat">
+                  <span className="session-overview-stat-label">{copy.agent.sessionPanelFields.lastReply}</span>
+                  <strong>{latestAssistantMessage ? formatDateTime(latestAssistantMessage.created_at, locale, copy.common.notStarted) : copy.common.none}</strong>
+                </div>
+                <div className="session-overview-stat">
+                  <span className="session-overview-stat-label">{copy.agent.sessionPanelFields.lastSync}</span>
+                  <strong>{formatDateTime(currentSession.updated_at, locale, copy.common.notStarted)}</strong>
+                </div>
+              </div>
+
+              <div className="session-runtime-meta">
+                <span className="eyebrow">{copy.agent.sessionPanelFields.runtime}</span>
+                <span className="mono" data-testid="session-runtime-id">
+                  {context?.session.copilot_session_id || copy.common.notStarted}
+                </span>
+              </div>
+
+              {currentSession.last_error && <div className="inline-alert">{currentSession.last_error}</div>}
             </div>
 
             <ContainerManager containers={context?.container ? [context.container] : []} onStop={handleStopContainer} />
 
-            {previewVideoSrc && previewVideoFormat && (
-              <VideoPlayer
-                src={previewVideoSrc}
-                format={previewVideoFormat}
-                downloadUrl={context?.latest_render_url}
-              />
-            )}
+            {hasRenderPreview ? (
+              <div className="card context-panel render-preview-panel" data-testid="render-preview-panel">
+                <div className="panel-heading">
+                  <div>
+                    <span className="eyebrow">{copy.video.eyebrow}</span>
+                    <h3>{copy.video.title}</h3>
+                  </div>
+                  <span className={`video-source-badge format-${previewVideoFormat}`}>{previewVideoFormat === "mp4" ? copy.video.sourceMp4 : copy.video.sourceHls}</span>
+                </div>
+
+                <div className="render-preview-summary" data-testid="render-preview-summary">
+                  <div className="render-preview-copy">
+                    <div className="render-preview-title" title={latestRenderName}>{latestRenderName}</div>
+                    <div className="render-preview-meta" title={activeProject?.filename || copy.common.notSpecified}>
+                      {activeProject?.filename || copy.common.notSpecified}
+                    </div>
+                  </div>
+
+                  <div className="render-preview-actions">
+                    <button
+                      type="button"
+                      className="btn-primary btn-sm"
+                      data-testid="render-preview-trigger"
+                      onClick={() => setIsRenderPreviewOpen(true)}
+                    >
+                      {copy.video.preview}
+                    </button>
+                    <a className="ghost-button btn-sm" href={context?.latest_render_url || previewVideoSrc || undefined} target="_blank" rel="noreferrer">
+                      {copy.video.open}
+                    </a>
+                  </div>
+                </div>
+              </div>
+            ) : null}
 
             <div className="card context-panel resources-panel">
               <div className="panel-heading">
@@ -3199,6 +3303,40 @@ export default function AgentPanel({
           </div>
         )}
       </aside>
+
+      {hasRenderPreview && isRenderPreviewOpen ? (
+        <div
+          className="render-preview-modal-backdrop"
+          data-testid="render-preview-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={copy.video.modalTitle}
+          onClick={() => setIsRenderPreviewOpen(false)}
+        >
+          <div className="render-preview-modal-shell" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="render-preview-modal-close icon-button"
+              data-testid="render-preview-modal-close"
+              aria-label={copy.video.close}
+              title={copy.video.close}
+              onClick={() => setIsRenderPreviewOpen(false)}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z" fill="currentColor"/>
+              </svg>
+            </button>
+
+            <VideoPlayer
+              src={previewVideoSrc!}
+              format={previewVideoFormat!}
+              downloadUrl={context?.latest_render_url || previewVideoSrc}
+              assetName={latestRenderName}
+              projectName={activeProject?.filename || null}
+            />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
