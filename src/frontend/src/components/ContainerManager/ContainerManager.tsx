@@ -43,14 +43,14 @@ export default function ContainerManager({ containers, onStop }: ContainerManage
           <div key={c._id} className={`container-item is-${c.status}`}>
             <div className="container-info">
               <div className="container-item-topline">
-                <div className="container-runtime-pill-group">
-                  <span className="container-runtime-pill">{copy.container.runtimeLabel}</span>
-                  <span className="container-image-label">{copy.container.imageLabel}</span>
-                </div>
+                <span className="container-runtime-pill">{copy.container.runtimeLabel}</span>
                 <span className={`status-badge status-${c.status}`}>{containerStatusLabels[c.status]}</span>
               </div>
               <div className="container-meta">
-                <div className="container-image">{c.image}</div>
+                <div className="container-image-stack">
+                  <span className="container-image-label">{copy.container.imageLabel}</span>
+                  <div className="container-image" title={c.image}>{c.image}</div>
+                </div>
                 <dl className="container-fact-grid">
                   <div className="container-fact">
                     <dt>{copy.container.dockerIdLabel}</dt>

@@ -14,6 +14,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
+  AgentSessionStreamConnection,
   createSession,
   deleteSession,
   exportProject,
@@ -100,6 +101,40 @@ type TimelinePresentation = {
   rawPayload: string | null;
 };
 
+type ExecutionStepPresentation = {
+  key: string;
+  title: string;
+  preview: string;
+  tone: TimelineTone;
+  leadEvent: SessionEvent;
+  timelinePresentation: TimelinePresentation;
+};
+
+type ExecutionGroupPresentation = {
+  key: string;
+  title: string;
+  preview: string;
+  tone: TimelineTone;
+  statusLabel: string;
+  stepCountLabel: string;
+  timelinePresentation: TimelinePresentation | null;
+  steps: ExecutionStepPresentation[];
+};
+
+type ExecutionStepDraft = {
+  startEvent: SessionEvent | null;
+  completeEvent: SessionEvent | null;
+  relatedEvents: SessionEvent[];
+};
+
+type ExecutionGroupDraft = {
+  key: string;
+  headerEvent: SessionEvent | null;
+  fallbackTitle: string | null;
+  events: SessionEvent[];
+  steps: ExecutionStepDraft[];
+};
+
 type PendingImageAttachment = ChatImageAttachment & {
   id: string;
 };
@@ -124,10 +159,6 @@ function clamp(value: number, min: number, max: number) {
 
 function isScrolledNearBottom(element: HTMLElement, threshold = 32) {
   return element.scrollTop + element.clientHeight >= element.scrollHeight - threshold;
-}
-
-function isScrolledNearTop(element: HTMLElement, threshold = 32) {
-  return element.scrollTop <= threshold;
 }
 
 function parseDateValue(value: string) {
@@ -258,6 +289,19 @@ function hasEventData(event: SessionEvent) {
   return Boolean(event.data && Object.keys(event.data).length);
 }
 
+function tryParseJsonText(value: string): unknown | null {
+  const trimmed = value.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
 function compactEventPayload(value: unknown): unknown | null {
   if (value == null) return null;
 
@@ -276,6 +320,13 @@ function compactEventPayload(value: unknown): unknown | null {
 
   if (typeof value === "string") {
     const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    const parsed = tryParseJsonText(trimmed);
+    if (parsed !== null) {
+      return compactEventPayload(parsed);
+    }
+
     return trimmed ? trimmed : null;
   }
 
@@ -283,7 +334,18 @@ function compactEventPayload(value: unknown): unknown | null {
 }
 
 function extractEventText(value: unknown): string {
-  if (typeof value === "string") return value.trim();
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return "";
+
+    const parsed = tryParseJsonText(trimmed);
+    if (parsed !== null) {
+      const parsedText = extractEventText(parsed);
+      if (parsedText) return parsedText;
+    }
+
+    return trimmed;
+  }
   if (typeof value === "number" || typeof value === "boolean") return String(value);
 
   if (Array.isArray(value)) {
@@ -292,14 +354,105 @@ function extractEventText(value: unknown): string {
 
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    return (
-      [record.message, record.error, record.summary, record.content, record.reason]
-        .map((entry) => extractEventText(entry))
-        .find(Boolean) || ""
-    );
+
+    const preferredText = [
+      record.message,
+      record.error,
+      record.summary,
+      record.content,
+      record.reason,
+      record.intent,
+      record.title,
+      record.display_name,
+      record.name,
+      record.filename,
+      record.entry_aep_file,
+      record.tool_name,
+      record.status,
+      record.image,
+    ]
+      .map((entry) => extractEventText(entry))
+      .find(Boolean);
+
+    if (preferredText) return preferredText;
+
+    return Object.values(record)
+      .map((entry) => extractEventText(entry))
+      .find(Boolean) || "";
   }
 
   return "";
+}
+
+function trimPreviewText(value: string, maxLength = 140) {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+}
+
+function collectPreviewTokens(value: unknown): string[] {
+  const compactValue = compactEventPayload(value);
+  if (compactValue == null) return [];
+
+  if (typeof compactValue === "string") {
+    return compactValue ? [trimPreviewText(compactValue)] : [];
+  }
+
+  if (typeof compactValue === "number" || typeof compactValue === "boolean") {
+    return [String(compactValue)];
+  }
+
+  if (Array.isArray(compactValue)) {
+    if (!compactValue.length) return [];
+    return compactValue.flatMap((entry) => collectPreviewTokens(entry));
+  }
+
+  const record = compactValue as Record<string, unknown>;
+
+  if (Array.isArray(record.projects)) {
+    if (!record.projects.length) {
+      return ["No uploaded projects"];
+    }
+
+    return record.projects.flatMap((entry) => collectPreviewTokens(entry));
+  }
+
+  const preferredKeys = [
+    "summary",
+    "message",
+    "error",
+    "content",
+    "reason",
+    "intent",
+    "display_name",
+    "name",
+    "filename",
+    "entry_aep_file",
+    "tool_name",
+    "status",
+    "image",
+    "path",
+  ];
+
+  const preferredTokens = preferredKeys
+    .flatMap((key) => collectPreviewTokens(record[key]))
+    .filter(Boolean);
+
+  if (preferredTokens.length) {
+    return preferredTokens;
+  }
+
+  return Object.entries(record)
+    .flatMap(([key, entry]) => {
+      if (entry == null) return [];
+
+      const text = extractEventText(entry);
+      if (!text) return [];
+      if (["session_id", "container_id", "docker_id", "project_id", "workspace_dir"].includes(key)) {
+        return [];
+      }
+
+      return [trimPreviewText(`${key}: ${text}`)];
+    })
+    .filter(Boolean);
 }
 
 function formatEventFieldValue(value: unknown): string {
@@ -345,15 +498,19 @@ function formatTimelineEventLabel(value: string) {
     .join(" ");
 }
 
+function getCompactEventPayloadRecord(event: SessionEvent): Record<string, unknown> {
+  const compactData = compactEventPayload(event.data);
+  return compactData && typeof compactData === "object" && !Array.isArray(compactData)
+    ? (compactData as Record<string, unknown>)
+    : {};
+}
+
 function getTimelinePreviewText(event: SessionEvent) {
   if (event.summary !== event.type) {
     return event.summary;
   }
 
-  const compactData = compactEventPayload(event.data);
-  const payload = compactData && typeof compactData === "object" && !Array.isArray(compactData)
-    ? (compactData as Record<string, unknown>)
-    : {};
+  const payload = getCompactEventPayloadRecord(event);
 
   const preview = [
     payload.tool_name,
@@ -449,10 +606,7 @@ function getTimelineResultLabel(event: SessionEvent, payload: Record<string, unk
 }
 
 function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): TimelinePresentation {
-  const compactData = compactEventPayload(event.data);
-  const payload = compactData && typeof compactData === "object" && !Array.isArray(compactData)
-    ? (compactData as Record<string, unknown>)
-    : {};
+  const payload = getCompactEventPayloadRecord(event);
   const tone = getTimelineEventTone(event, payload);
   const fields: TimelineDetailField[] = [];
   const blocks: TimelineDetailBlock[] = [];
@@ -537,6 +691,460 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
     fields,
     blocks,
     rawPayload: Object.keys(payload).length ? JSON.stringify(payload, null, 2) : null,
+  };
+}
+
+function formatExecutionStepCount(stepCount: number, locale: string) {
+  return locale === "zh-CN" ? `子步骤 ${stepCount}` : `${stepCount} substeps`;
+}
+
+function formatExecutionOverflowCount(extraCount: number, locale: string) {
+  return locale === "zh-CN" ? `+${extraCount} 项` : `+${extraCount} more`;
+}
+
+function summarizePreviewItems(items: string[], locale: string, limit = 2) {
+  const uniqueItems = Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+  const previewItems = uniqueItems.slice(0, limit);
+  const extraCount = uniqueItems.length - previewItems.length;
+
+  return [
+    ...previewItems,
+    extraCount > 0 ? formatExecutionOverflowCount(extraCount, locale) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function getEventToolName(event: SessionEvent | null): string | null {
+  if (!event) return null;
+  const payload = getCompactEventPayloadRecord(event);
+  const toolName = payload.tool_name ?? payload.toolName ?? payload.name;
+  return typeof toolName === "string" && toolName.trim() ? toolName.trim() : null;
+}
+
+function humanizeToolName(toolName: string) {
+  const overrides: Record<string, string> = {
+    rg: "Ran Rg",
+    glob: "Ran Glob",
+    glob_search: "Ran Glob",
+    report_intent: "Planned next step",
+    inspect_workspace: "Inspect workspace",
+    list_uploaded_projects: "Checked uploaded projects",
+    ensure_after_effects_container: "Ensure After Effects container",
+    create_after_effects_project: "Create managed project",
+    run_after_effects_jsx: "Run After Effects JSX",
+    stop_after_effects_container: "Stop After Effects container",
+    read_file: "Read file",
+    view: "Read file",
+  };
+
+  if (overrides[toolName]) {
+    return overrides[toolName];
+  }
+
+  return toolName
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function isGenericToolSummary(summary: string) {
+  return /^Tool (start|complete):/i.test(summary) || summary === "tool.execution_start" || summary === "tool.execution_complete";
+}
+
+function buildMergedExecutionEvent(stepDraft: ExecutionStepDraft): SessionEvent | null {
+  const leadEvent = stepDraft.completeEvent ?? stepDraft.startEvent ?? stepDraft.relatedEvents[stepDraft.relatedEvents.length - 1] ?? null;
+  if (!leadEvent) return null;
+
+  const startPayload = stepDraft.startEvent?.data ?? {};
+  const completePayload = stepDraft.completeEvent?.data ?? {};
+
+  return {
+    ...leadEvent,
+    data: {
+      ...startPayload,
+      ...completePayload,
+      tool_name: completePayload.tool_name ?? startPayload.tool_name,
+      toolName: completePayload.toolName ?? startPayload.toolName,
+      name: completePayload.name ?? startPayload.name,
+      arguments: completePayload.arguments ?? startPayload.arguments,
+      input: completePayload.input ?? startPayload.input,
+    },
+  };
+}
+
+function getStepTitleFromEvents(stepDraft: ExecutionStepDraft, mergedEvent: SessionEvent) {
+  const completeSummary = stepDraft.completeEvent ? getTimelineExpandedSummary(stepDraft.completeEvent).trim() : "";
+  if (completeSummary && !isGenericToolSummary(completeSummary) && completeSummary !== stepDraft.completeEvent?.type) {
+    return completeSummary;
+  }
+
+  const startSummary = stepDraft.startEvent ? getTimelineExpandedSummary(stepDraft.startEvent).trim() : "";
+  if (startSummary && !isGenericToolSummary(startSummary) && startSummary !== stepDraft.startEvent?.type) {
+    return startSummary;
+  }
+
+  const toolName = getEventToolName(mergedEvent) ?? getEventToolName(stepDraft.startEvent) ?? getEventToolName(stepDraft.completeEvent);
+  if (toolName === "report_intent") {
+    return extractEventText(stepDraft.startEvent?.data?.arguments ?? stepDraft.completeEvent?.data?.arguments) || humanizeToolName(toolName);
+  }
+
+  return toolName ? humanizeToolName(toolName) : getTimelineExpandedSummary(mergedEvent);
+}
+
+function getStepPreviewFromEvents(stepDraft: ExecutionStepDraft, mergedEvent: SessionEvent, locale: string) {
+  const payload = getCompactEventPayloadRecord(mergedEvent);
+  const errorText = extractEventText(payload.error);
+  if (errorText) {
+    return trimPreviewText(errorText);
+  }
+
+  const previewTokens = collectPreviewTokens(payload.output ?? payload.result ?? payload.content ?? payload.message ?? payload);
+  const title = getStepTitleFromEvents(stepDraft, mergedEvent);
+  const filteredTokens = previewTokens.filter((token) => token && token !== title);
+  if (filteredTokens.length) {
+    return summarizePreviewItems(filteredTokens, locale, 3);
+  }
+
+  const fallbackPreview = getTimelinePreviewText(mergedEvent);
+  return fallbackPreview !== title ? fallbackPreview : "";
+}
+
+function buildExecutionStepPresentation(
+  stepDraft: ExecutionStepDraft,
+  locale: string,
+  copy: TranslationCopy,
+): ExecutionStepPresentation | null {
+  const mergedEvent = buildMergedExecutionEvent(stepDraft);
+  if (!mergedEvent) return null;
+
+  const toolName = getEventToolName(mergedEvent) ?? getEventToolName(stepDraft.startEvent) ?? getEventToolName(stepDraft.completeEvent);
+  if (toolName === "report_intent") {
+    return null;
+  }
+
+  const timelinePresentation = buildTimelinePresentation(mergedEvent, copy);
+  return {
+    key: stepDraft.completeEvent?._id ?? stepDraft.startEvent?._id ?? mergedEvent._id,
+    title: getStepTitleFromEvents(stepDraft, mergedEvent),
+    preview: getStepPreviewFromEvents(stepDraft, mergedEvent, locale),
+    tone: timelinePresentation.tone,
+    leadEvent: mergedEvent,
+    timelinePresentation,
+  };
+}
+
+function getIntentLoggedCompletionDetail(event: SessionEvent) {
+  if (getEventToolName(event)) {
+    return null;
+  }
+
+  const payload = getCompactEventPayloadRecord(event);
+  const result = payload.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+
+  const resultRecord = result as Record<string, unknown>;
+  const content = extractEventText(resultRecord.content);
+  if (content !== "Intent logged") {
+    return null;
+  }
+
+  return extractEventText(resultRecord.detailed_content) || extractEventText(resultRecord.intent) || content;
+}
+
+function pickActiveStepForEvent(activeSteps: ExecutionStepDraft[], event: SessionEvent) {
+  const eventToolName = getEventToolName(event);
+  if (eventToolName) {
+    const matchingStep = [...activeSteps].reverse().find((step) => getEventToolName(step.startEvent) === eventToolName);
+    if (matchingStep) {
+      return matchingStep;
+    }
+  }
+
+  return activeSteps[activeSteps.length - 1] ?? null;
+}
+
+function takeCompletedStep(activeSteps: ExecutionStepDraft[], event: SessionEvent) {
+  const eventToolName = getEventToolName(event);
+  let targetIndex = -1;
+
+  if (eventToolName) {
+    targetIndex = activeSteps.findIndex((step) => getEventToolName(step.startEvent) === eventToolName);
+  }
+
+  if (targetIndex < 0) {
+    targetIndex = 0;
+  }
+
+  if (targetIndex < 0 || !activeSteps[targetIndex]) {
+    return null;
+  }
+
+  const [stepDraft] = activeSteps.splice(targetIndex, 1);
+  stepDraft.completeEvent = event;
+  stepDraft.relatedEvents.push(event);
+  return stepDraft;
+}
+
+function flushActiveSteps(activeSteps: ExecutionStepDraft[], groupDraft: ExecutionGroupDraft) {
+  while (activeSteps.length) {
+    const stepDraft = activeSteps.shift();
+    if (stepDraft) {
+      groupDraft.steps.push(stepDraft);
+    }
+  }
+}
+
+function buildGroupTitle(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPresentation[]) {
+  const headerEvent = groupDraft.headerEvent;
+  if (headerEvent?.type === "assistant.intent") {
+    return extractEventText(headerEvent.data.intent) || groupDraft.fallbackTitle || steps[0]?.title || getTimelineExpandedSummary(headerEvent);
+  }
+
+  if (headerEvent) {
+    return getTimelineExpandedSummary(headerEvent);
+  }
+
+  return groupDraft.fallbackTitle || steps[0]?.title || "Execution";
+}
+
+function getGroupTone(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPresentation[]) {
+  const tones = [
+    ...steps.map((step) => step.tone),
+    ...(groupDraft.headerEvent ? [getTimelineEventTone(groupDraft.headerEvent, getCompactEventPayloadRecord(groupDraft.headerEvent))] : []),
+  ];
+
+  if (tones.includes("danger")) return "danger";
+  if (tones.includes("success")) return "success";
+  if (tones.includes("accent")) return "accent";
+  if (tones.includes("muted")) return "muted";
+  return "neutral";
+}
+
+function buildExecutionGroupPresentation(
+  groupDraft: ExecutionGroupDraft,
+  locale: string,
+  copy: TranslationCopy,
+): ExecutionGroupPresentation | null {
+  const steps = groupDraft.steps
+    .map((stepDraft) => buildExecutionStepPresentation(stepDraft, locale, copy))
+    .filter((step): step is ExecutionStepPresentation => Boolean(step));
+
+  if (!steps.length && !groupDraft.headerEvent && !groupDraft.fallbackTitle) {
+    return null;
+  }
+
+  const title = buildGroupTitle(groupDraft, steps);
+  const tone = getGroupTone(groupDraft, steps);
+  const preview = summarizePreviewItems(
+    steps
+      .map((step) => step.preview || step.title)
+      .filter((value) => value && value !== title),
+    locale,
+    2,
+  );
+  const fallbackStatusLabel =
+    tone === "danger"
+      ? copy.agent.timelineDetails.result.failure
+      : tone === "success"
+        ? copy.agent.timelineDetails.result.success
+        : copy.agent.timelineDetails.result.pending;
+  const lastStep = steps[steps.length - 1] ?? null;
+  const statusLabel = lastStep
+    ? getTimelineResultLabel(lastStep.leadEvent, getCompactEventPayloadRecord(lastStep.leadEvent), copy) ?? fallbackStatusLabel
+    : fallbackStatusLabel;
+  const timelinePresentation =
+    groupDraft.headerEvent && groupDraft.headerEvent.type !== "assistant.intent"
+      ? buildTimelinePresentation(groupDraft.headerEvent, copy)
+      : null;
+
+  return {
+    key: groupDraft.key,
+    title,
+    preview,
+    tone,
+    statusLabel,
+    stepCountLabel: formatExecutionStepCount(steps.length, locale),
+    timelinePresentation,
+    steps,
+  };
+}
+
+function buildExecutionGroups(events: SessionEvent[], locale: string, copy: TranslationCopy) {
+  const groups: ExecutionGroupPresentation[] = [];
+  let currentGroup: ExecutionGroupDraft | null = null;
+  let activeSteps: ExecutionStepDraft[] = [];
+
+  const ensureGroup = () => {
+    if (!currentGroup) {
+      currentGroup = {
+        key: `group-${events[0]?._id ?? Date.now()}`,
+        headerEvent: null,
+        fallbackTitle: null,
+        events: [],
+        steps: [],
+      };
+    }
+
+    return currentGroup;
+  };
+
+  const finalizeCurrentGroup = () => {
+    if (!currentGroup) return;
+
+    flushActiveSteps(activeSteps, currentGroup);
+    const group = buildExecutionGroupPresentation(currentGroup, locale, copy);
+    if (group) {
+      groups.push(group);
+    }
+    currentGroup = null;
+  };
+
+  for (const event of events) {
+    const isHeaderEvent = event.type === "assistant.intent" || event.type.startsWith("skill.") || event.type.startsWith("agent.") || event.type.startsWith("subagent.");
+
+    if (isHeaderEvent) {
+      finalizeCurrentGroup();
+      currentGroup = {
+        key: `group-${event._id}`,
+        headerEvent: event,
+        fallbackTitle: event.type === "assistant.intent" ? extractEventText(event.data.intent) : null,
+        events: [event],
+        steps: [],
+      };
+      continue;
+    }
+
+    const groupDraft = ensureGroup();
+    groupDraft.events.push(event);
+
+    if (event.type === "tool.execution_start") {
+      const toolName = getEventToolName(event);
+      if (toolName === "report_intent") {
+        groupDraft.fallbackTitle = extractEventText(event.data.arguments) || groupDraft.fallbackTitle;
+        continue;
+      }
+
+      activeSteps.push({
+        startEvent: event,
+        completeEvent: null,
+        relatedEvents: [event],
+      });
+      continue;
+    }
+
+    if (event.type === "tool.execution_complete") {
+      const intentLoggedDetail = getIntentLoggedCompletionDetail(event);
+      if (intentLoggedDetail) {
+        groupDraft.fallbackTitle = intentLoggedDetail || groupDraft.fallbackTitle;
+        continue;
+      }
+
+      const completedStep = takeCompletedStep(activeSteps, event);
+      if (completedStep) {
+        groupDraft.steps.push(completedStep);
+      } else {
+        groupDraft.steps.push({
+          startEvent: null,
+          completeEvent: event,
+          relatedEvents: [event],
+        });
+      }
+      continue;
+    }
+
+    if (
+      event.type === "external_tool.requested" ||
+      event.type === "external_tool.completed" ||
+      event.type === "permission.requested" ||
+      event.type === "permission.completed"
+    ) {
+      const activeStep = pickActiveStepForEvent(activeSteps, event);
+      if (activeStep) {
+        activeStep.relatedEvents.push(event);
+      }
+      continue;
+    }
+
+    groupDraft.steps.push({
+      startEvent: event,
+      completeEvent: null,
+      relatedEvents: [event],
+    });
+  }
+
+  finalizeCurrentGroup();
+  return groups;
+}
+
+function getExecutionLeadEvent(events: SessionEvent[]) {
+  return (
+    events.find((event) => event.type.startsWith("skill.") && /(invoked|requested|start|submitted)/.test(event.type)) ??
+    events.find((event) => event.type.startsWith("tool.") && /(invoked|requested|start|submitted|complete)/.test(event.type)) ??
+    events.find((event) => !event.type.startsWith("session.")) ??
+    events[0]
+  );
+}
+
+function getExecutionBlockTone(events: SessionEvent[]) {
+  const tones = events.map((event) => getTimelineEventTone(event, getCompactEventPayloadRecord(event)));
+
+  if (tones.includes("danger")) return "danger";
+  if (tones.includes("success")) return "success";
+  if (tones.includes("accent")) return "accent";
+  if (tones.includes("muted")) return "muted";
+  return "neutral";
+}
+
+function buildExecutionBlockPresentation(
+  events: SessionEvent[],
+  locale: string,
+  copy: TranslationCopy,
+): ExecutionGroupPresentation {
+  const leadEvent = getExecutionLeadEvent(events);
+  const tone = getExecutionBlockTone(events);
+  const fallbackStatusLabel =
+    tone === "danger"
+      ? copy.agent.timelineDetails.result.failure
+      : tone === "success"
+        ? copy.agent.timelineDetails.result.success
+        : copy.agent.timelineDetails.result.pending;
+  const lastEvent = events[events.length - 1] ?? leadEvent;
+  const statusLabel =
+    getTimelineResultLabel(lastEvent, getCompactEventPayloadRecord(lastEvent), copy) ?? fallbackStatusLabel;
+
+  const summaryCandidates = Array.from(
+    new Set(
+      events
+        .filter((event) => event._id !== leadEvent._id && !event.type.startsWith("session."))
+        .map((event) => getTimelineExpandedSummary(event).trim())
+        .filter(Boolean),
+    ),
+  );
+
+  const previewItems = summaryCandidates.slice(0, 2);
+  const extraCount = summaryCandidates.length - previewItems.length;
+  const summary = [
+    ...previewItems,
+    extraCount > 0 ? formatExecutionOverflowCount(extraCount, locale) : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return {
+    key: leadEvent._id,
+    title: getTimelineExpandedSummary(leadEvent),
+    preview: summary,
+    tone,
+    statusLabel,
+    stepCountLabel: formatExecutionStepCount(events.length, locale),
+    timelinePresentation: buildTimelinePresentation(leadEvent, copy),
+    steps: events
+      .map((event) => buildExecutionStepPresentation({ startEvent: event, completeEvent: null, relatedEvents: [event] }, locale, copy))
+      .filter((step): step is ExecutionStepPresentation => Boolean(step)),
   };
 }
 
@@ -632,16 +1240,15 @@ function getEventTurnId(event: SessionEvent) {
 function shouldRenderInlineExecutionEvent(event: SessionEvent) {
   if (!getEventTurnId(event)) return false;
 
-  if (
-    event.type === "session.idle" ||
-    event.type === "session.created" ||
-    event.type.startsWith("assistant.") ||
-    event.type.startsWith("user.")
-  ) {
-    return false;
-  }
+  if (event.type === "assistant.intent") return true;
+  if (event.type.startsWith("tool.")) return true;
+  if (event.type.startsWith("skill.")) return true;
+  if (event.type.startsWith("external_tool.")) return true;
+  if (event.type.startsWith("permission.")) return true;
+  if (event.type.startsWith("agent.") || event.type.startsWith("subagent.")) return true;
+  if (event.type === "session.timeout" || event.type === "session.error") return true;
 
-  return true;
+  return false;
 }
 
 function buildTranscriptEntries(messages: ChatMessage[], events: SessionEvent[]): TranscriptEntry[] {
@@ -799,7 +1406,6 @@ export default function AgentPanel({
   const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
   const [draftModel, setDraftModel] = useState("");
   const [draftReasoning, setDraftReasoning] = useState<ReasoningEffort | null>(null);
-  const [expandedTimelineEventIds, setExpandedTimelineEventIds] = useState<string[]>([]);
   const [savingSessionSettings, setSavingSessionSettings] = useState(false);
   const [sessionsError, setSessionsError] = useState<UiError | null>(null);
   const [panelError, setPanelError] = useState<UiError | null>(null);
@@ -814,10 +1420,8 @@ export default function AgentPanel({
   const composerFooterRef = useRef<HTMLDivElement | null>(null);
   const composerAttachmentsRef = useRef<HTMLDivElement | null>(null);
   const chatStageBodyRef = useRef<HTMLDivElement | null>(null);
-  const timelineListRef = useRef<HTMLDivElement | null>(null);
-  const followTimelineRef = useRef(true);
   const activeSessionIdRef = useRef<string | null>(null);
-  const streamRef = useRef<EventSource | null>(null);
+  const streamRef = useRef<AgentSessionStreamConnection | null>(null);
   const sessionStatusLabels = copy.status.session;
   const projectStatusLabels = copy.status.project;
   const containerStatusLabels = copy.status.container;
@@ -899,8 +1503,6 @@ export default function AgentPanel({
     () => buildTranscriptEntries(visibleMessages, sortedEvents),
     [sortedEvents, visibleMessages]
   );
-  const timelineEvents = useMemo(() => [...sortedEvents].reverse(), [sortedEvents]);
-  const latestTimelineEventId = timelineEvents.length ? timelineEvents[0]._id : null;
 
   const lastVisibleMessageContent = visibleMessages.length ? visibleMessages[visibleMessages.length - 1].content : "";
   const selectedReasoningOptions = selectedModelOption?.supported_reasoning_efforts ?? [];
@@ -1203,26 +1805,6 @@ export default function AgentPanel({
   }, []);
 
   useEffect(() => {
-    followTimelineRef.current = true;
-  }, [currentSession?._id]);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !latestTimelineEventId || !followTimelineRef.current) return;
-
-    const frameId = window.requestAnimationFrame(() => {
-      const timelineList = timelineListRef.current;
-      if (!timelineList || !followTimelineRef.current) return;
-      timelineList.scrollTop = 0;
-    });
-
-    return () => window.cancelAnimationFrame(frameId);
-  }, [currentSession?._id, latestTimelineEventId]);
-
-  useEffect(() => {
-    setExpandedTimelineEventIds([]);
-  }, [currentSession?._id]);
-
-  useEffect(() => {
     setOptimisticTurn((previous) => {
       if (!previous) return null;
       return previous.sessionId === currentSession?._id ? previous : null;
@@ -1303,12 +1885,6 @@ export default function AgentPanel({
     }
   };
 
-  const toggleTimelineEvent = (eventId: string) => {
-    setExpandedTimelineEventIds((previous) =>
-      previous.includes(eventId) ? previous.filter((id) => id !== eventId) : [...previous, eventId]
-    );
-  };
-
   const handleNewSession = async () => {
     await createNewSession();
   };
@@ -1385,8 +1961,6 @@ export default function AgentPanel({
     const content = prompt.trim();
     const attachmentsToSend = pendingAttachments.map(({ id, ...attachment }) => attachment);
     if (!content && !attachmentsToSend.length) return;
-
-    followTimelineRef.current = true;
 
     const optimisticUserMessage = buildOptimisticMessage(sessionId, "user", content, {
       attachments: attachmentsToSend,
@@ -1519,12 +2093,6 @@ export default function AgentPanel({
 
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp);
-  };
-
-  const handleTimelineScroll = () => {
-    const timelineList = timelineListRef.current;
-    if (!timelineList) return;
-    followTimelineRef.current = isScrolledNearTop(timelineList);
   };
 
   const composerLayoutStyle = useMemo(
@@ -1839,48 +2407,51 @@ export default function AgentPanel({
                     );
                   }
 
+                  const executionGroups = buildExecutionGroups(entry.events, locale, copy);
+
+                  if (!executionGroups.length) {
+                    return null;
+                  }
+
                   return (
                     <section key={entry.key} className="chat-execution-block" data-testid="conversation-execution-block">
-                      <div className="chat-execution-header">
-                        <div>
-                          <span className="eyebrow">{copy.agent.executionInlineTitle}</span>
-                          <div className="chat-execution-title">{copy.agent.executionTitle}</div>
-                        </div>
-                        <span className="chat-execution-count">{entry.events.length}</span>
-                      </div>
+                      {executionGroups.map((group) => {
+                        const groupPresentation = group.timelinePresentation;
+                        const hasGroupDetails = Boolean(
+                          groupPresentation &&
+                          (groupPresentation.fields.length || groupPresentation.blocks.length || groupPresentation.rawPayload)
+                        );
 
-                      <div className="chat-execution-steps">
-                        {entry.events.map((event) => {
-                          const eventLabel = formatTimelineEventLabel(event.type);
-                          const timelinePresentation = buildTimelinePresentation(event, copy);
-                          const hasExecutionDetails = Boolean(
-                            timelinePresentation.fields.length || timelinePresentation.blocks.length
-                          );
-                          const inlineSummary = getTimelinePreviewText(event) || getTimelineExpandedSummary(event);
-
-                          return (
-                            <article
-                              key={event._id}
-                              className={`chat-execution-step tone-${timelinePresentation.tone}`}
-                              data-testid="conversation-execution-step"
+                        return (
+                          <details
+                            key={group.key}
+                            className={`chat-execution-group vscode-chat-tool-call tone-${group.tone}`}
+                            data-testid="conversation-execution-group"
+                          >
+                            <summary
+                              className="chat-execution-summary vscode-chat-tool-call-header"
+                              data-testid="conversation-execution-toggle"
                             >
-                              <div className="chat-execution-step-topline">
-                                <div className="chat-execution-step-heading">
-                                  <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
-                                  <span className="chat-execution-step-title">{eventLabel}</span>
+                              <span className="chat-execution-summary-chevron" aria-hidden="true" />
+                              <span className={`chat-execution-summary-marker tone-${group.tone}`} aria-hidden="true" />
+                              <span className="chat-execution-summary-text">{group.title}</span>
+                              {group.preview ? <span className="chat-execution-summary-preview">{group.preview}</span> : null}
+                            </summary>
+
+                            <div className="chat-execution-card vscode-chat-tool-call-body">
+                              <div className="chat-execution-card-header">
+                                <div className="chat-execution-card-meta">
+                                  <span className={`chat-execution-pill tone-${group.tone}`}>{group.statusLabel}</span>
+                                  <span className="chat-execution-pill tone-neutral">{group.stepCountLabel}</span>
                                 </div>
-                                <span className="timeline-time">{formatClockTime(event.created_at, locale, copy.common.notStarted)}</span>
                               </div>
 
-                              <p className="chat-execution-step-summary">{inlineSummary}</p>
-
-                              {hasExecutionDetails ? (
-                                <details className="chat-execution-step-details" data-testid="conversation-execution-step-details">
-                                  <summary>{copy.agent.executionInlineDetails}</summary>
-                                  {timelinePresentation.fields.length ? (
+                              {hasGroupDetails ? (
+                                <div className="chat-execution-group-details" data-testid="conversation-execution-group-details">
+                                  {groupPresentation?.fields.length ? (
                                     <dl className="timeline-detail-grid">
-                                      {timelinePresentation.fields.map((field) => (
-                                        <div key={`${event._id}-${field.label}-${field.value}`} className="timeline-detail-row">
+                                      {groupPresentation.fields.map((field) => (
+                                        <div key={`${group.key}-${field.label}-${field.value}`} className="timeline-detail-row">
                                           <dt>{field.label}</dt>
                                           <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
                                         </div>
@@ -1888,8 +2459,8 @@ export default function AgentPanel({
                                     </dl>
                                   ) : null}
 
-                                  {timelinePresentation.blocks.map((block) => (
-                                    <div key={`${event._id}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
+                                  {groupPresentation?.blocks.map((block) => (
+                                    <div key={`${group.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
                                       <div className="timeline-detail-block-label">{block.label}</div>
                                       {block.kind === "text" ? (
                                         <p className="timeline-detail-block-text">{block.value}</p>
@@ -1898,12 +2469,83 @@ export default function AgentPanel({
                                       )}
                                     </div>
                                   ))}
-                                </details>
+
+                                  {groupPresentation?.rawPayload ? (
+                                    <details className="timeline-raw-details">
+                                      <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
+                                      <pre className="timeline-event-data">{groupPresentation.rawPayload}</pre>
+                                    </details>
+                                  ) : null}
+                                </div>
                               ) : null}
-                            </article>
-                          );
-                        })}
-                      </div>
+
+                              <div className="chat-execution-steps">
+                                {group.steps.map((step) => {
+                                  const timelinePresentation = step.timelinePresentation;
+                                  const hasExecutionDetails = Boolean(
+                                    timelinePresentation.fields.length || timelinePresentation.blocks.length || timelinePresentation.rawPayload
+                                  );
+
+                                  return (
+                                    <details
+                                      key={step.key}
+                                      className={`chat-execution-step tone-${step.tone}`}
+                                      data-testid="conversation-execution-step"
+                                    >
+                                      <summary className="chat-execution-step-toggle" data-testid="conversation-execution-step-toggle">
+                                        <span className="chat-execution-step-chevron" aria-hidden="true" />
+                                        <span className={`chat-execution-step-marker tone-${step.tone}`} aria-hidden="true" />
+                                        <div className="chat-execution-step-copy">
+                                          <div className="chat-execution-step-title-row">
+                                            <span className="chat-execution-step-title">{step.title}</span>
+                                            <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
+                                          </div>
+                                          {step.preview && step.preview !== step.title ? (
+                                            <p className="chat-execution-step-summary">{step.preview}</p>
+                                          ) : null}
+                                        </div>
+                                      </summary>
+
+                                      {hasExecutionDetails ? (
+                                        <div className="chat-execution-step-body" data-testid="conversation-execution-step-details">
+                                          {timelinePresentation.fields.length ? (
+                                            <dl className="timeline-detail-grid">
+                                              {timelinePresentation.fields.map((field) => (
+                                                <div key={`${step.key}-${field.label}-${field.value}`} className="timeline-detail-row">
+                                                  <dt>{field.label}</dt>
+                                                  <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
+                                                </div>
+                                              ))}
+                                            </dl>
+                                          ) : null}
+
+                                          {timelinePresentation.blocks.map((block) => (
+                                            <div key={`${step.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
+                                              <div className="timeline-detail-block-label">{block.label}</div>
+                                              {block.kind === "text" ? (
+                                                <p className="timeline-detail-block-text">{block.value}</p>
+                                              ) : (
+                                                <pre className="timeline-event-data">{block.value}</pre>
+                                              )}
+                                            </div>
+                                          ))}
+
+                                          {timelinePresentation.rawPayload ? (
+                                            <details className="timeline-raw-details">
+                                              <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
+                                              <pre className="timeline-event-data">{timelinePresentation.rawPayload}</pre>
+                                            </details>
+                                          ) : null}
+                                        </div>
+                                      ) : null}
+                                    </details>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </details>
+                        );
+                      })}
                     </section>
                   );
                 })
@@ -2222,103 +2864,6 @@ export default function AgentPanel({
                 </div>
               ) : (
                 <p className="empty-side">{copy.agent.assetsEmpty}</p>
-              )}
-            </div>
-
-            <div className="card context-panel timeline-panel">
-              <div className="panel-heading">
-                <div>
-                  <span className="eyebrow">{copy.agent.executionEyebrow}</span>
-                  <h3>{copy.agent.executionTitle}</h3>
-                </div>
-                <span className="panel-count">{timelineEvents.length}</span>
-              </div>
-              {timelineEvents.length ? (
-                <div
-                  ref={timelineListRef}
-                  className="timeline-list panel-list-scroll"
-                  data-testid="session-timeline"
-                  onScroll={handleTimelineScroll}
-                >
-                  {timelineEvents.map((event) => {
-                    const isExpanded = expandedTimelineEventIds.includes(event._id);
-                    const eventLabel = formatTimelineEventLabel(event.type);
-                    const previewText = getTimelinePreviewText(event);
-                    const timelinePresentation = buildTimelinePresentation(event, copy);
-
-                    return (
-                    <div
-                      key={event._id}
-                      className={`timeline-entry ${isExpanded ? "expanded" : ""} tone-${timelinePresentation.tone}`}
-                      data-testid="timeline-entry"
-                    >
-                      <button
-                        type="button"
-                        className="timeline-entry-summary"
-                        data-testid="timeline-entry-toggle"
-                        aria-expanded={isExpanded}
-                        onClick={() => toggleTimelineEvent(event._id)}
-                      >
-                        <div className="timeline-entry-summary-layout">
-                          <span className="timeline-chevron" aria-hidden="true" />
-                          <div className="timeline-summary-stack">
-                            <div className="timeline-summary-topline">
-                              <div className="timeline-summary-heading">
-                                <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
-                                <span className="timeline-type">{eventLabel}</span>
-                              </div>
-                              <span className="timeline-time">{formatClockTime(event.created_at, locale, copy.common.notStarted)}</span>
-                            </div>
-                            {previewText ? <div className="timeline-summary-preview">{previewText}</div> : null}
-                          </div>
-                        </div>
-                      </button>
-                      {isExpanded ? (
-                        <div className="timeline-entry-body">
-                          <div className="timeline-body-header">
-                            <span className={`timeline-tone-marker tone-${timelinePresentation.tone}`} aria-hidden="true" />
-                            <div className="timeline-body-header-copy">
-                              <div className="timeline-event-code">{event.type}</div>
-                              <p className="timeline-summary-full">{getTimelineExpandedSummary(event)}</p>
-                            </div>
-                          </div>
-
-                          {timelinePresentation.fields.length ? (
-                            <dl className="timeline-detail-grid">
-                              {timelinePresentation.fields.map((field) => (
-                                <div key={`${field.label}-${field.value}`} className="timeline-detail-row">
-                                  <dt>{field.label}</dt>
-                                  <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
-                                </div>
-                              ))}
-                            </dl>
-                          ) : null}
-
-                          {timelinePresentation.blocks.map((block) => (
-                            <div key={`${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
-                              <div className="timeline-detail-block-label">{block.label}</div>
-                              {block.kind === "text" ? (
-                                <p className="timeline-detail-block-text">{block.value}</p>
-                              ) : (
-                                <pre className="timeline-event-data">{block.value}</pre>
-                              )}
-                            </div>
-                          ))}
-
-                          {timelinePresentation.rawPayload ? (
-                            <details className="timeline-raw-details">
-                              <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
-                              <pre className="timeline-event-data">{timelinePresentation.rawPayload}</pre>
-                            </details>
-                          ) : null}
-                        </div>
-                      ) : null}
-                    </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="empty-side">{copy.agent.executionEmpty}</p>
               )}
             </div>
           </>

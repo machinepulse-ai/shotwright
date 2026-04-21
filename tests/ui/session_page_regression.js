@@ -122,15 +122,11 @@ const eventsBySession = {
     {
       _id: "evt-1",
       session_id: primarySessionId,
-      type: "session.bootstrap.completed",
-      summary:
-        "Initialized a session with a long event summary to verify that the right sidebar timeline wraps within the available column width.",
+      type: "assistant.intent",
+      summary: "Preparing AE project",
       created_at: now,
       data: {
-        status: "ready",
-        path: "C:/workspace/src/frontend/src/components/AgentPanel/AgentPanel.tsx",
-        message:
-          "Hydrated session context, attached the session stream, and restored the existing transcript before the operator resumed work.",
+        intent: "Preparing AE project",
       },
       turn_id: "turn-initial-1",
       sequence: 1,
@@ -138,18 +134,193 @@ const eventsBySession = {
     {
       _id: "evt-2",
       session_id: primarySessionId,
-      type: "session.model.updated",
-      summary:
-        "Applied a session-specific model preference and kept the reasoning effort selector aligned with the selected model capabilities.",
+      type: "tool.execution_start",
+      summary: "Tool start: report_intent",
       created_at: now,
       data: {
-        previous_model: "gpt-5.4",
-        new_model: "gpt-5.4-mini",
-        reasoning_effort: "xhigh",
-        reason: "Session-specific Copilot override saved from the right sidebar.",
+        tool_name: "report_intent",
+        arguments: {
+          intent: "Preparing AE project",
+        },
       },
       turn_id: "turn-initial-1",
       sequence: 2,
+    },
+    {
+      _id: "evt-3",
+      session_id: primarySessionId,
+      type: "tool.execution_complete",
+      summary: "Tool complete: unknown (ok)",
+      created_at: now,
+      data: {
+        result: {
+          content: "Intent logged",
+          detailed_content: "Preparing AE project",
+        },
+      },
+      turn_id: "turn-initial-1",
+      sequence: 3,
+    },
+    {
+      _id: "evt-4",
+      session_id: primarySessionId,
+      type: "tool.execution_start",
+      summary: "Tool start: inspect_project_structure",
+      created_at: now,
+      data: {
+        tool_name: "inspect_project_structure",
+        tool_call_id: "tool-call-inspect-project-1",
+        arguments: {
+          path: "C:/workspace/validation-data",
+        },
+      },
+      turn_id: "turn-initial-1",
+      sequence: 4,
+    },
+    {
+      _id: "evt-5",
+      session_id: primarySessionId,
+      type: "tool.execution_complete",
+      summary: "Inspect project structure",
+      created_at: now,
+      data: {
+        tool_name: "inspect_project_structure",
+        success: true,
+        output: {
+          summary: "No uploaded projects · render-workflow.md · job-template.json",
+        },
+      },
+      turn_id: "turn-initial-1",
+      sequence: 5,
+    },
+    {
+      _id: "evt-6",
+      session_id: primarySessionId,
+      type: "tool.execution_start",
+      summary: "Tool start: glob_search",
+      created_at: now,
+      data: {
+        tool_name: "glob_search",
+        tool_call_id: "tool-call-glob-1",
+        input: {
+          pattern: "validation-data/**/*",
+        },
+      },
+      turn_id: "turn-initial-1",
+      sequence: 6,
+    },
+    {
+      _id: "evt-7",
+      session_id: primarySessionId,
+      type: "tool.execution_complete",
+      summary: "Ran Glob",
+      created_at: now,
+      data: {
+        tool_name: "glob_search",
+        success: true,
+        output: {
+          summary: "No files matched the pattern.",
+        },
+      },
+      turn_id: "turn-initial-1",
+      sequence: 7,
+    },
+    {
+      _id: "evt-8",
+      session_id: primarySessionId,
+      type: "assistant.intent",
+      summary: "Debugging JSX timeout",
+      created_at: now,
+      data: {
+        intent: "Debugging JSX timeout",
+      },
+      turn_id: "turn-initial-1",
+      sequence: 8,
+    },
+    {
+      _id: "evt-9",
+      session_id: primarySessionId,
+      type: "tool.execution_start",
+      summary: "Tool start: run_after_effects_jsx",
+      created_at: now,
+      data: {
+        tool_name: "run_after_effects_jsx",
+        tool_call_id: "tool-call-jsx-1",
+        arguments: {
+          script_path: "validation_patch.jsx",
+        },
+      },
+      turn_id: "turn-initial-1",
+      sequence: 9,
+    },
+    {
+      _id: "evt-10",
+      session_id: primarySessionId,
+      type: "permission.requested",
+      summary: "Permission requested to run JSX patch",
+      created_at: now,
+      data: {
+        tool_name: "run_after_effects_jsx",
+        reason: "Execute validation patch inside After Effects",
+      },
+      turn_id: "turn-initial-1",
+      sequence: 10,
+    },
+    {
+      _id: "evt-11",
+      session_id: primarySessionId,
+      type: "permission.completed",
+      summary: "Permission granted",
+      created_at: now,
+      data: {
+        tool_name: "run_after_effects_jsx",
+        approved: true,
+      },
+      turn_id: "turn-initial-1",
+      sequence: 11,
+    },
+    {
+      _id: "evt-12",
+      session_id: primarySessionId,
+      type: "external_tool.requested",
+      summary: "Sending JSX patch to After Effects",
+      created_at: now,
+      data: {
+        tool_name: "run_after_effects_jsx",
+        input: {
+          script_path: "validation_patch.jsx",
+        },
+      },
+      turn_id: "turn-initial-1",
+      sequence: 12,
+    },
+    {
+      _id: "evt-13",
+      session_id: primarySessionId,
+      type: "external_tool.completed",
+      summary: "After Effects returned an error",
+      created_at: now,
+      data: {
+        tool_name: "run_after_effects_jsx",
+        success: false,
+        error: "AfterFX JSX execution timed out.",
+      },
+      turn_id: "turn-initial-1",
+      sequence: 13,
+    },
+    {
+      _id: "evt-14",
+      session_id: primarySessionId,
+      type: "tool.execution_complete",
+      summary: "Run After Effects JSX",
+      created_at: now,
+      data: {
+        tool_name: "run_after_effects_jsx",
+        success: false,
+        error: "AfterFX JSX execution timed out.",
+      },
+      turn_id: "turn-initial-1",
+      sequence: 14,
     },
   ],
   [secondarySessionId]: [],
@@ -526,7 +697,7 @@ async function collectOverflowMetrics(page) {
       { name: "sidebar", element: sidebar },
       ...Array.from(
         sidebar.querySelectorAll(
-          ".context-panel, .session-settings-block, .inline-alert, .session-runtime-meta, .timeline-entry, .timeline-summary-preview, .timeline-time, .timeline-detail-grid, .timeline-detail-block, .timeline-raw-details"
+          ".context-panel, .session-settings-block, .inline-alert, .session-runtime-meta"
         )
       ).map((element, index) => ({
         name: `${element.className || element.tagName.toLowerCase()}-${index}`,
@@ -553,21 +724,15 @@ async function collectSidebarPanelMetrics(page) {
   return page.locator('[data-testid="session-context-sidebar"]').evaluate((sidebar) => {
     const overview = sidebar.querySelector('.session-overview-panel');
     const resources = sidebar.querySelector('.resources-panel');
-    const timeline = sidebar.querySelector('.timeline-panel');
     const modelSelect = sidebar.querySelector('[data-testid="session-model-select"]');
     const reasoningSelect = sidebar.querySelector('[data-testid="session-reasoning-select"]');
     const runtimeValue = sidebar.querySelector('[data-testid="session-runtime-id"]');
     const emptyState = sidebar.querySelector('.resources-panel .empty-side');
-    const timelineSummary = sidebar.querySelector('.timeline-entry-summary');
-    const timelineEntry = sidebar.querySelector('.timeline-entry');
     const rect = (element) => element ? element.getBoundingClientRect() : null;
 
     return {
       overviewRect: rect(overview),
       resourcesRect: rect(resources),
-      timelineRect: rect(timeline),
-      timelineEntryRect: rect(timelineEntry),
-      timelineSummaryRect: rect(timelineSummary),
       modelSelectRect: rect(modelSelect),
       modelSelectText: modelSelect?.selectedOptions?.[0]?.textContent?.trim() || null,
       reasoningSelectRect: rect(reasoningSelect),
@@ -612,34 +777,6 @@ async function collectWorkbenchLayoutMetrics(page) {
   });
 }
 
-async function collectTimelineEntryMetrics(page, index = 0) {
-  return page.locator('[data-testid="timeline-entry"]').nth(index).evaluate((entry) => {
-    const summary = entry.querySelector('.timeline-entry-summary');
-    const body = entry.querySelector('.timeline-entry-body');
-    const chevron = entry.querySelector('.timeline-chevron');
-    const heading = entry.querySelector('.timeline-summary-heading');
-    const type = entry.querySelector('.timeline-type');
-    const time = entry.querySelector('.timeline-time');
-    const preview = entry.querySelector('.timeline-summary-preview');
-    const rect = (element) => element ? element.getBoundingClientRect() : null;
-
-    return {
-      isOpen: entry.classList.contains('expanded'),
-      entryRect: rect(entry),
-      summaryRect: rect(summary),
-      bodyRect: rect(body),
-      chevronRect: rect(chevron),
-      headingRect: rect(heading),
-      typeRect: rect(type),
-      timeRect: rect(time),
-      previewRect: rect(preview),
-      labelInset: heading ? heading.getBoundingClientRect().left - entry.getBoundingClientRect().left : null,
-      chevronInset: chevron ? chevron.getBoundingClientRect().left - entry.getBoundingClientRect().left : null,
-      bodyDisplay: body ? getComputedStyle(body).display : null,
-    };
-  });
-}
-
 async function collectTitlebarMetrics(page) {
   return page.evaluate(() => {
     const titlebar = document.querySelector(".titlebar");
@@ -675,24 +812,69 @@ async function collectComposerMetrics(page) {
   });
 }
 
-async function collectTimelineListMetrics(page) {
-  return page.locator('[data-testid="session-timeline"]').evaluate((timeline) => {
-    const entries = Array.from(timeline.querySelectorAll('[data-testid="timeline-entry"]'));
-    const firstEntry = entries[0] || null;
-    const timelineRect = timeline.getBoundingClientRect();
-    const firstEntryRect = firstEntry ? firstEntry.getBoundingClientRect() : null;
+async function collectExecutionBlockMetrics(page, index = 0) {
+  return page.locator('[data-testid="conversation-execution-block"]').nth(index).evaluate((block) => {
+    return {
+      groupCount: block.querySelectorAll('[data-testid="conversation-execution-group"]').length,
+      text: block.textContent?.trim() || null,
+    };
+  });
+}
+
+async function collectExecutionGroupMetrics(page, blockIndex = 0, groupIndex = 0) {
+  return page
+    .locator('[data-testid="conversation-execution-block"]')
+    .nth(blockIndex)
+    .locator('[data-testid="conversation-execution-group"]')
+    .nth(groupIndex)
+    .evaluate((group) => {
+      const summary = group.querySelector('[data-testid="conversation-execution-toggle"]');
+      const title = group.querySelector('.chat-execution-summary-text');
+      const preview = group.querySelector('.chat-execution-summary-preview');
+      const card = group.querySelector('.chat-execution-card');
+      const pills = Array.from(group.querySelectorAll('.chat-execution-card .chat-execution-pill')).map(
+        (pill) => pill.textContent?.trim() || ''
+      );
+      const steps = Array.from(group.querySelectorAll('[data-testid="conversation-execution-step"]'));
+      const rect = (element) => element ? element.getBoundingClientRect() : null;
+
+      return {
+        open: group.hasAttribute('open'),
+        title: title?.textContent?.trim() || null,
+        preview: preview?.textContent?.trim() || null,
+        pills,
+        stepCount: steps.length,
+        summaryRect: rect(summary),
+        cardRect: rect(card),
+        cardDisplay: card ? getComputedStyle(card).display : null,
+      };
+    });
+}
+
+async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0, stepIndex = 0) {
+  return page
+    .locator('[data-testid="conversation-execution-block"]')
+    .nth(blockIndex)
+    .locator('[data-testid="conversation-execution-group"]')
+    .nth(groupIndex)
+    .locator('[data-testid="conversation-execution-step"]')
+    .nth(stepIndex)
+    .evaluate((step) => {
+    const summary = step.querySelector('[data-testid="conversation-execution-step-toggle"]');
+    const body = step.querySelector('[data-testid="conversation-execution-step-details"]');
+    const title = step.querySelector('.chat-execution-step-title');
+    const preview = step.querySelector('.chat-execution-step-summary');
+    const stage = step.querySelector('.timeline-stage-badge');
+    const rect = (element) => element ? element.getBoundingClientRect() : null;
 
     return {
-      count: entries.length,
-      scrollTop: timeline.scrollTop,
-      clientHeight: timeline.clientHeight,
-      scrollHeight: timeline.scrollHeight,
-      firstEntryText: firstEntry?.textContent?.trim() || null,
-      firstEntryVisible: Boolean(
-        firstEntryRect &&
-        firstEntryRect.top >= timelineRect.top - 4 &&
-        firstEntryRect.bottom <= timelineRect.bottom + 4
-      ),
+      open: step.hasAttribute('open'),
+      title: title?.textContent?.trim() || null,
+      preview: preview?.textContent?.trim() || null,
+      stage: stage?.textContent?.trim() || null,
+      summaryRect: rect(summary),
+      bodyRect: rect(body),
+      bodyDisplay: body ? getComputedStyle(body).display : null,
     };
   });
 }
@@ -707,14 +889,13 @@ async function collectTimelineListMetrics(page) {
     page = session.page;
 
     await page.waitForSelector('[data-testid="session-settings-card"]');
-    await page.waitForSelector('[data-testid="timeline-entry"]');
+    await page.waitForSelector('[data-testid="conversation-execution-block"]');
 
     assert.equal(await page.evaluate(() => window.location.pathname), `/sessions/${primarySessionId}`);
 
     const modelSelect = page.locator('[data-testid="session-model-select"]');
     const reasoningSelect = page.locator('[data-testid="session-reasoning-select"]');
     const saveButton = page.locator('[data-testid="session-settings-save"]');
-    const timelineEntries = page.locator('[data-testid="timeline-entry"]');
     const assistantMessage = page.locator(".chat-message.role-assistant .markdown-content");
     const previewBadge = page.locator(".video-source-badge");
     const previewVideo = page.locator(".video-element");
@@ -805,76 +986,104 @@ async function collectTimelineListMetrics(page) {
     assert.equal(await page.locator('.titlebar [data-testid="toggle-session-sidebar"]').count(), 1, 'Sidebar toggles should live in the top titlebar');
     assert.equal(await page.locator('.chat-stage-header [data-testid="toggle-session-sidebar"]').count(), 0, 'Sidebar toggles should no longer sit in the session header');
 
-    assert.equal(await timelineEntries.count(), 2, "Timeline entries should render as separate accordion panels");
-    assert.equal(await timelineEntries.nth(0).evaluate((entry) => entry.classList.contains("expanded")), false, "Timeline entries should be collapsed by default");
-    assert.ok(
-      ((await timelineEntries.nth(0).textContent()) || '').includes('Applied a session-specific model preference'),
-      'Timeline should render newest events first in the right sidebar'
-    );
-
-    const collapsedTimelineMetrics = await collectTimelineEntryMetrics(page, 0);
-    assert.equal(collapsedTimelineMetrics.isOpen, false, `Timeline entry should start collapsed: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`);
-    assert.equal(collapsedTimelineMetrics.bodyDisplay, null, `Collapsed timeline body should stay unmounted: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`);
-    assert.ok(
-      collapsedTimelineMetrics.entryRect && collapsedTimelineMetrics.entryRect.height >= 72,
-      `Collapsed timeline entry should keep a readable closed height: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
-    );
-    assert.ok(
-      collapsedTimelineMetrics.entryRect && collapsedTimelineMetrics.entryRect.height <= 116,
-      `Collapsed timeline entry should stay visually compact: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
-    );
-    assert.ok(
-      collapsedTimelineMetrics.typeRect &&
-        collapsedTimelineMetrics.timeRect &&
-        Math.abs(collapsedTimelineMetrics.typeRect.top - collapsedTimelineMetrics.timeRect.top) <= 6,
-      `Timeline title row should keep event label and time aligned on the same row: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
-    );
-    assert.ok(
-      collapsedTimelineMetrics.labelInset !== null && collapsedTimelineMetrics.labelInset <= 28,
-      `Timeline label inset should stay visually aligned with the card edge: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
-    );
-    assert.ok(
-      collapsedTimelineMetrics.chevronInset !== null && collapsedTimelineMetrics.chevronInset <= 18,
-      `Timeline chevron should stay close to the left card edge: ${JSON.stringify(collapsedTimelineMetrics, null, 2)}`
-    );
-
-    await timelineEntries.nth(0).locator('[data-testid="timeline-entry-toggle"]').click();
-    assert.equal(await timelineEntries.nth(0).evaluate((entry) => entry.classList.contains("expanded")), true, "Clicking a timeline summary should expand the entry");
-
-    const expandedTimelineMetrics = await collectTimelineEntryMetrics(page, 0);
-    assert.equal(expandedTimelineMetrics.isOpen, true, `Timeline entry should expand after clicking summary: ${JSON.stringify(expandedTimelineMetrics, null, 2)}`);
-    assert.equal(expandedTimelineMetrics.bodyDisplay, "flex", `Expanded timeline body should be visible: ${JSON.stringify(expandedTimelineMetrics, null, 2)}`);
-    assert.ok(
-      expandedTimelineMetrics.entryRect &&
-        collapsedTimelineMetrics.entryRect &&
-        expandedTimelineMetrics.entryRect.height > collapsedTimelineMetrics.entryRect.height + 40,
-      `Expanded timeline entry should clearly grow beyond its collapsed height: ${JSON.stringify({ collapsedTimelineMetrics, expandedTimelineMetrics }, null, 2)}`
-    );
-    assert.ok(await timelineEntries.nth(0).locator('.timeline-detail-grid').count(), 'Expanded timeline entries should render structured detail rows');
-    assert.ok(await timelineEntries.nth(0).locator('.timeline-raw-details').count(), 'Expanded timeline entries should keep the raw event payload available');
+    assert.equal(await page.locator('.timeline-panel').count(), 0, 'Right sidebar timeline should be removed entirely');
 
     assert.ok(await assistantMessage.locator("strong").count(), "Assistant Markdown should render strong text");
     assert.ok(await assistantMessage.locator("code").count(), "Assistant Markdown should render code spans or blocks");
 
     const inlineExecutionBlocks = page.locator('[data-testid="conversation-execution-block"]');
     assert.equal(await inlineExecutionBlocks.count(), 1, "Existing turn-scoped execution steps should render inline in the transcript");
+    assert.ok(
+      (await page.locator('.vscode-chat-tool-call').count()) >= 2,
+      'Execution flow should restore the VS Code-style grouped tool-call rows in the transcript'
+    );
+
+    const initialExecutionMetrics = await collectExecutionBlockMetrics(page, 0);
+    assert.ok(
+      initialExecutionMetrics.groupCount === 2,
+      `Inline execution block should rebuild multiple execution groups for a single turn: ${JSON.stringify(initialExecutionMetrics, null, 2)}`
+    );
+
+    const firstExecutionGroup = inlineExecutionBlocks.first().locator('[data-testid="conversation-execution-group"]').nth(0);
+    const secondExecutionGroup = inlineExecutionBlocks.first().locator('[data-testid="conversation-execution-group"]').nth(1);
+    const collapsedFirstGroupMetrics = await collectExecutionGroupMetrics(page, 0, 0);
+    assert.ok(
+      collapsedFirstGroupMetrics.title?.includes('Preparing AE project'),
+      `First execution group should use the assistant intent as its title: ${JSON.stringify(collapsedFirstGroupMetrics, null, 2)}`
+    );
     assert.equal(
-      await inlineExecutionBlocks.first().locator('[data-testid="conversation-execution-step"]').count(),
-      2,
-      "Inline execution trace should list each persisted step for the turn"
+      collapsedFirstGroupMetrics.open,
+      false,
+      `Execution groups should start collapsed by default: ${JSON.stringify(collapsedFirstGroupMetrics, null, 2)}`
     );
     assert.ok(
-      ((await inlineExecutionBlocks.first().textContent()) || "").includes("Activity"),
-      "Inline execution trace card should show its transcript label"
+      collapsedFirstGroupMetrics.preview?.includes('No uploaded projects') ||
+        collapsedFirstGroupMetrics.preview?.includes('No files matched the pattern.'),
+      `Collapsed group preview should summarize tool output instead of flattening the whole turn: ${JSON.stringify(collapsedFirstGroupMetrics, null, 2)}`
     );
     assert.equal(
-      await inlineExecutionBlocks.first().locator('[data-testid="conversation-execution-step-details"]').count(),
-      2,
-      'Inline execution steps should expose collapsible detail toggles for dense transcript rendering'
+      collapsedFirstGroupMetrics.cardDisplay,
+      'none',
+      `Collapsed execution groups should hide their detail card: ${JSON.stringify(collapsedFirstGroupMetrics, null, 2)}`
+    );
+
+    const collapsedSecondGroupMetrics = await collectExecutionGroupMetrics(page, 0, 1);
+    assert.equal(
+      collapsedSecondGroupMetrics.open,
+      false,
+      `Later execution groups should also start collapsed: ${JSON.stringify(collapsedSecondGroupMetrics, null, 2)}`
     );
     assert.ok(
-      ((await inlineExecutionBlocks.first().textContent()) || "").includes("Hydrated session context"),
-      "Inline execution trace should expose step details, not just the final assistant reply"
+      collapsedSecondGroupMetrics.title?.includes('Debugging JSX timeout'),
+      `Failure group should keep the debugging intent title visible: ${JSON.stringify(collapsedSecondGroupMetrics, null, 2)}`
+    );
+    assert.ok(
+      collapsedSecondGroupMetrics.preview?.includes('AfterFX JSX execution timed out.'),
+      `Failure group preview should surface the runtime error: ${JSON.stringify(collapsedSecondGroupMetrics, null, 2)}`
+    );
+
+    await firstExecutionGroup.locator('[data-testid="conversation-execution-toggle"]').click();
+    const expandedFirstGroupMetrics = await collectExecutionGroupMetrics(page, 0, 0);
+    assert.equal(expandedFirstGroupMetrics.open, true, `Execution group should expand after clicking summary: ${JSON.stringify(expandedFirstGroupMetrics, null, 2)}`);
+    assert.equal(expandedFirstGroupMetrics.cardDisplay, 'flex', `Expanded execution group should reveal its detail card: ${JSON.stringify(expandedFirstGroupMetrics, null, 2)}`);
+    assert.ok(
+      expandedFirstGroupMetrics.pills.includes('Succeeded') && expandedFirstGroupMetrics.pills.includes('2 substeps'),
+      `Expanded execution group should surface grouped status and substep count badges: ${JSON.stringify(expandedFirstGroupMetrics, null, 2)}`
+    );
+    assert.equal(
+      await firstExecutionGroup.locator('[data-testid="conversation-execution-step"]').count(),
+      2,
+      'First execution group should keep its nested step list intact'
+    );
+
+    const collapsedExecutionStepMetrics = await collectExecutionStepMetrics(page, 0, 0, 0);
+    assert.equal(collapsedExecutionStepMetrics.open, false, `Execution step should start collapsed: ${JSON.stringify(collapsedExecutionStepMetrics, null, 2)}`);
+    assert.equal(collapsedExecutionStepMetrics.bodyDisplay, 'none', `Collapsed execution step body should stay hidden: ${JSON.stringify(collapsedExecutionStepMetrics, null, 2)}`);
+    assert.ok(
+      collapsedExecutionStepMetrics.title?.includes('Inspect project structure'),
+      `Execution step title should stay readable in the collapsed state: ${JSON.stringify(collapsedExecutionStepMetrics, null, 2)}`
+    );
+
+    await firstExecutionGroup.locator('[data-testid="conversation-execution-step-toggle"]').first().click();
+    const expandedExecutionStepMetrics = await collectExecutionStepMetrics(page, 0, 0, 0);
+    assert.equal(expandedExecutionStepMetrics.open, true, `Execution step should expand after clicking summary: ${JSON.stringify(expandedExecutionStepMetrics, null, 2)}`);
+    assert.equal(expandedExecutionStepMetrics.bodyDisplay, 'flex', `Expanded execution step body should be visible: ${JSON.stringify(expandedExecutionStepMetrics, null, 2)}`);
+    assert.ok(
+      ((await firstExecutionGroup.textContent()) || "").includes("No uploaded projects"),
+      'Expanded execution step should expose detailed tool output, not just the final assistant reply'
+    );
+
+    await secondExecutionGroup.locator('[data-testid="conversation-execution-toggle"]').click();
+    const expandedSecondGroupMetrics = await collectExecutionGroupMetrics(page, 0, 1);
+    assert.equal(expandedSecondGroupMetrics.open, true, `Failure execution group should expand after clicking summary: ${JSON.stringify(expandedSecondGroupMetrics, null, 2)}`);
+    assert.ok(
+      expandedSecondGroupMetrics.pills.includes('Failed') && expandedSecondGroupMetrics.pills.includes('1 substeps'),
+      `Failure execution group should keep a visible failed state badge: ${JSON.stringify(expandedSecondGroupMetrics, null, 2)}`
+    );
+    const failureExecutionStepMetrics = await collectExecutionStepMetrics(page, 0, 1, 0);
+    assert.ok(
+      failureExecutionStepMetrics.preview?.includes('AfterFX JSX execution timed out.'),
+      `Failure step preview should preserve the JSX timeout message: ${JSON.stringify(failureExecutionStepMetrics, null, 2)}`
     );
 
     const chatAlignmentMetrics = await collectChatAlignmentMetrics(page);
@@ -962,9 +1171,6 @@ async function collectTimelineListMetrics(page) {
     assert.ok(initialPanelMetrics.runtimeValueRect && initialPanelMetrics.runtimeValueRect.height >= 30, `Runtime id row should have enough height to wrap long ids instead of truncating them: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.resourcesEmptyText, "No project files have been uploaded yet.", "Resources empty state should stay visible");
     assert.ok(initialPanelMetrics.overviewRect && initialPanelMetrics.overviewRect.height <= 520, `Overview panel should not consume the whole sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.ok(initialPanelMetrics.timelineRect && initialPanelMetrics.timelineRect.height >= 220, `Timeline panel collapsed unexpectedly: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.ok(initialPanelMetrics.timelineEntryRect && initialPanelMetrics.timelineEntryRect.height >= 72, `Timeline entry container collapsed unexpectedly: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.ok(initialPanelMetrics.timelineSummaryRect && initialPanelMetrics.timelineSummaryRect.height >= 48, `Timeline summaries should remain readable: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
 
     await modelSelect.selectOption("gpt-4.1");
     assert.equal(await reasoningSelect.isDisabled(), true, "Reasoning selector should disable for models without reasoning support");
@@ -1023,17 +1229,6 @@ async function collectTimelineListMetrics(page) {
     await page.waitForFunction(() => !document.querySelector('[data-testid="composer-status"]'));
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="conversation-execution-block"]').length >= 2);
 
-    let timelineListMetrics = await collectTimelineListMetrics(page);
-    assert.equal(
-      timelineListMetrics.count,
-      4,
-      `First follow-up should append two new timeline entries: ${JSON.stringify(timelineListMetrics, null, 2)}`
-    );
-    assert.ok(
-      timelineListMetrics.firstEntryText?.includes('inspect_workspace (1)'),
-      `Timeline should show the latest first follow-up event details: ${JSON.stringify(timelineListMetrics, null, 2)}`
-    );
-
     const postSendMeta = (await page.locator(".chat-stage-meta").textContent()) || "";
     assert.ok(postSendMeta.includes("Idle"), "Header status chip should return to idle after the streamed response completes");
 
@@ -1044,32 +1239,11 @@ async function collectTimelineListMetrics(page) {
     await page.waitForFunction(() => !document.querySelector('[data-testid="composer-status"]'));
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="conversation-execution-block"]').length >= 3);
 
-    timelineListMetrics = await collectTimelineListMetrics(page);
-    assert.equal(
-      timelineListMetrics.count,
-      6,
-      `Second follow-up should continue appending timeline entries without a manual refresh: ${JSON.stringify(timelineListMetrics, null, 2)}`
-    );
-    assert.ok(
-      timelineListMetrics.firstEntryText?.includes('inspect_workspace (2)'),
-      `Timeline should advance to the newest follow-up event: ${JSON.stringify(timelineListMetrics, null, 2)}`
-    );
-    if (timelineListMetrics.scrollHeight > timelineListMetrics.clientHeight + 12) {
-      assert.ok(
-        timelineListMetrics.scrollTop <= 4,
-        `Latest-first timeline should stay pinned to the top after follow-up events: ${JSON.stringify(timelineListMetrics, null, 2)}`
-      );
-      assert.ok(
-        timelineListMetrics.firstEntryVisible,
-        `Latest timeline entry should remain visible after a follow-up: ${JSON.stringify(timelineListMetrics, null, 2)}`
-      );
-    }
-
     const transcriptText = (await page.locator(".chat-transcript").textContent()) || "";
     assert.ok(transcriptText.includes("Streaming reply 1 ready."), "First streamed response should remain in the transcript");
     assert.ok(transcriptText.includes("Streaming reply 2 ready."), "Second streamed response should render without requiring a page refresh");
-    assert.ok(transcriptText.includes("Tool complete: inspect_workspace (1)"), "First streamed turn should surface its tool result inline in the transcript");
-    assert.ok(transcriptText.includes("Tool complete: inspect_workspace (2)"), "Second streamed turn should also append its tool result inline");
+    assert.ok(transcriptText.includes("Collected composition details for streamed reply 1."), "First streamed turn should surface its grouped tool result inline in the transcript");
+    assert.ok(transcriptText.includes("Collected composition details for streamed reply 2."), "Second streamed turn should also append its grouped tool result inline");
 
     await promptInput.evaluate((element) => {
       const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0ioAAAAASUVORK5CYII=';

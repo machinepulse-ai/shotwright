@@ -33,7 +33,35 @@ def test_build_nexrender_script_job_keeps_bootstrap_composition() -> None:
         composition=module.BOOTSTRAP_TEMPLATE_COMPOSITION,
     )
 
-    assert job["template"]["composition"] == "main"
+    assert job["template"]["composition"] == "Main"
+
+
+def test_build_nexrender_job_uses_direct_mp4_copy_pattern() -> None:
+    job = module.build_nexrender_job(
+        aep_path="C:/data/uploads/session/project.aep",
+        composition="Main",
+        output_path="C:/data/exports/session/output.mp4",
+        patch_script="C:/data/exports/session/patch.jsx",
+    )
+
+    assert job["template"] == {
+        "src": "file:///C:/data/uploads/session/project.aep",
+        "composition": "Main",
+        "outputExt": "mp4",
+    }
+    assert job["actions"]["postrender"] == [
+        {
+            "module": "@nexrender/action-copy",
+            "input": "result.mp4",
+            "output": "C:/data/exports/session/output.mp4",
+        }
+    ]
+    assert job["assets"] == [
+        {
+            "type": "script",
+            "src": "file:///C:/data/exports/session/patch.jsx",
+        }
+    ]
 
 
 def test_build_nexrender_cli_command_includes_skip_render(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,9 +85,12 @@ def test_build_jsx_wrapper_embeds_managed_project_path() -> None:
         "C:/data/exports/user-script.jsx",
         "C:/data/exports/script.log",
         "C:/data/uploads/session/project/scene.aep",
+        "Main",
     )
 
     assert 'var __shotwrightManagedProjectPath = "c:/data/uploads/session/project/scene.aep";' in wrapper
+    assert 'var __shotwrightBootstrapCompName = "Main";' in wrapper
+    assert "SHOTWRIGHT_BOOTSTRAP_COMP_RENAMED:main->" in wrapper
     assert "$.getenv(\"SHOTWRIGHT_PROJECT_FILE\")" not in wrapper
 
 

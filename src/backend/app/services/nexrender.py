@@ -22,7 +22,7 @@ CONTAINER_AFTER_EFFECTS_HOST_SCRIPT = Path("C:/workspace/scripts/after_effects_h
 ADOBE_INSTALL_BASE_ROOT = Path("C:/Program Files/Adobe")
 EXPORT_DIR = Path(settings.export_dir)
 CONTAINER_BOOTSTRAP_TEMPLATE = Path("C:/workspace/validation-data/templates/validation_motion.aep")
-BOOTSTRAP_TEMPLATE_COMPOSITION = "main"
+BOOTSTRAP_TEMPLATE_COMPOSITION = "Main"
 NEXRENDER_BINARY_CANDIDATES = (
     Path("C:/Users/ContainerAdministrator/AppData/Roaming/npm/nexrender-cli.cmd"),
     Path("C:/Users/Administrator/AppData/Roaming/npm/nexrender-cli.cmd"),
@@ -52,12 +52,14 @@ def _build_jsx_wrapper(
     user_script_path: str | Path,
     log_path: str | Path,
     managed_project_path: str | Path | None = None,
+    bootstrap_comp_name: str | None = None,
 ) -> str:
     normalized_script_path = Path(user_script_path).as_posix()
     normalized_log_path = Path(log_path).as_posix()
     normalized_managed_project_path = (
         Path(managed_project_path).as_posix().lower() if managed_project_path else ""
     )
+    normalized_bootstrap_comp_name = bootstrap_comp_name or ""
     return "\n".join(
         [
             "(function () {",
@@ -90,8 +92,32 @@ def _build_jsx_wrapper(
             "        }",
             "    }",
             f'    var __shotwrightManagedProjectPath = "{normalized_managed_project_path}";',
+            f'    var __shotwrightBootstrapCompName = "{normalized_bootstrap_comp_name}";',
+            "    function __shotwrightFindCompByName(name) {",
+            "        if (!name || !app.project) { return null; }",
+            "        for (var itemIndex = 1; itemIndex <= app.project.items.length; itemIndex += 1) {",
+            "            var item = app.project.items[itemIndex];",
+            "            if (item instanceof CompItem && item.name === name) {",
+            "                return item;",
+            "            }",
+            "        }",
+            "        return null;",
+            "    }",
+            "    function __shotwrightNormalizeBootstrapComp() {",
+            "        if (!__shotwrightBootstrapCompName || !app.project) { return; }",
+            "        if (__shotwrightFindCompByName(__shotwrightBootstrapCompName)) { return; }",
+            "        var __shotwrightLegacyComp = __shotwrightFindCompByName(\"main\");",
+            "        if (!__shotwrightLegacyComp || __shotwrightBootstrapCompName === \"main\") { return; }",
+            "        try {",
+            "            __shotwrightLegacyComp.name = __shotwrightBootstrapCompName;",
+            "            __shotwrightLog(\"SHOTWRIGHT_BOOTSTRAP_COMP_RENAMED:main->\" + __shotwrightBootstrapCompName);",
+            "        } catch (__shotwrightNormalizeBootstrapCompError) {",
+            "            __shotwrightLog(\"SHOTWRIGHT_BOOTSTRAP_COMP_RENAME_FAILED:\" + __shotwrightNormalizeBootstrapCompError.toString());",
+            "        }",
+            "    }",
             "    function __shotwrightSaveManagedProject() {",
             "        if (!__shotwrightManagedProjectPath || !app.project || typeof app.project.save !== \"function\") { return; }",
+            "        __shotwrightNormalizeBootstrapComp();",
             "        var __shotwrightTargetFile = new File(__shotwrightManagedProjectPath);",
             "        var __shotwrightCurrentProjectPath = app.project.file ? __shotwrightNormalizePath(app.project.file) : \"\";",
             "        __shotwrightLog(\"SHOTWRIGHT_PROJECT_SAVE_START:\" + __shotwrightDescribeFile(__shotwrightTargetFile));",
@@ -318,18 +344,14 @@ def build_nexrender_job(
         "template": {
             "src": _to_file_uri(aep_path),
             "composition": composition,
+            "outputExt": "mp4",
         },
         "assets": [],
         "actions": {
             "postrender": [
                 {
-                    "module": "@nexrender/action-encode",
-                    "preset": "mp4",
-                    "output": "encoded.mp4",
-                },
-                {
                     "module": "@nexrender/action-copy",
-                    "input": "encoded.mp4",
+                    "input": "result.mp4",
                     "output": output_path,
                 },
             ]
@@ -377,7 +399,6 @@ async def run_render(
     exit_code, raw_output = await exec_in_container(container["docker_id"], cmd)
     helper_result = _parse_after_effects_host_result(raw_output)
 
-    render_completed = bool(helper_result.get("render_completed"))
     output_exists = expected_output_path.exists()
     if not output_exists:
         fallback_result = _find_latest_rendered_mp4(work_dir)
@@ -386,7 +407,9 @@ async def run_render(
             shutil.copy2(fallback_result, expected_output_path)
             output_exists = True
 
-    success = bool(helper_result.get("success")) or (output_exists and render_completed)
+    render_completed = bool(helper_result.get("render_completed")) or output_exists
+
+    success = bool(helper_result.get("success")) or output_exists
 
     combined_output = helper_result.get("output") or raw_output
 
@@ -505,6 +528,7 @@ async def run_jsx_script(
             user_script_path,
             jsx_log_path,
             project_payload["entry_aep_path"] if project_payload else None,
+            BOOTSTRAP_TEMPLATE_COMPOSITION if template_path == bootstrap_project_path else None,
         ),
         encoding="utf-8",
     )
