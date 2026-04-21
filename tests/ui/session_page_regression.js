@@ -80,6 +80,85 @@ const sessionStates = {
   },
 };
 
+const referenceVideosBySession = {
+  [primarySessionId]: [
+    {
+      id: "reference-video-1",
+      session_id: primarySessionId,
+      filename: "lyrics.mp4",
+      file_path: "C:/data/uploads/session-ui-regression/_reference-videos/lyrics.mp4",
+      shared_relative_path: "session-ui-regression/_reference-videos/lyrics.mp4",
+      mime_type: "video/mp4",
+      size_bytes: 1698693,
+      duration_seconds: 15.8,
+      width: 1280,
+      height: 720,
+      created_at: now,
+    },
+  ],
+  [secondarySessionId]: [],
+};
+
+const storyboardBase = {
+  session_id: primarySessionId,
+  mime_type: "image/jpeg",
+  created_at: now,
+  source_video_path: "C:/data/uploads/session-ui-regression/_reference-videos/lyrics.mp4",
+  source_video_relative_path: "session-ui-regression/_reference-videos/lyrics.mp4",
+  source_video_filename: "lyrics.mp4",
+  source_video_duration_seconds: 15.8,
+  clip_start_seconds: 0,
+  clip_end_seconds: 6,
+  clip_duration_seconds: 6,
+  interval_seconds: 0.75,
+  columns: 4,
+  rows: 2,
+  tile_width: 220,
+  estimated_frames: 8,
+  ffmpeg_filter: "fps=1/0.75,scale=220:-1,tile=4x2:margin=8:padding=8:color=white",
+};
+
+const storyboardsBySession = {
+  [primarySessionId]: [
+    {
+      ...storyboardBase,
+      id: "storyboard-1",
+      filename: "lyrics_seq1_storyboard.jpg",
+      file_path: "C:/data/uploads/session-ui-regression/_storyboards/lyrics_seq1_storyboard.jpg",
+      shared_relative_path: "session-ui-regression/_storyboards/lyrics_seq1_storyboard.jpg",
+    },
+    {
+      ...storyboardBase,
+      id: "storyboard-2",
+      filename: "lyrics_seq2_storyboard.jpg",
+      file_path: "C:/data/uploads/session-ui-regression/_storyboards/lyrics_seq2_storyboard.jpg",
+      shared_relative_path: "session-ui-regression/_storyboards/lyrics_seq2_storyboard.jpg",
+    },
+    {
+      ...storyboardBase,
+      id: "storyboard-3",
+      filename: "lyrics_seq3_storyboard.jpg",
+      file_path: "C:/data/uploads/session-ui-regression/_storyboards/lyrics_seq3_storyboard.jpg",
+      shared_relative_path: "session-ui-regression/_storyboards/lyrics_seq3_storyboard.jpg",
+    },
+    {
+      ...storyboardBase,
+      id: "storyboard-4",
+      filename: "lyrics_seq4_storyboard.jpg",
+      file_path: "C:/data/uploads/session-ui-regression/_storyboards/lyrics_seq4_storyboard.jpg",
+      shared_relative_path: "session-ui-regression/_storyboards/lyrics_seq4_storyboard.jpg",
+    },
+    {
+      ...storyboardBase,
+      id: "storyboard-5",
+      filename: "lyrics_seq5_storyboard_really_long_file_name_that_should_wrap_inside_the_reference_media_card.jpg",
+      file_path: "C:/data/uploads/session-ui-regression/_storyboards/lyrics_seq5_storyboard_really_long_file_name_that_should_wrap_inside_the_reference_media_card.jpg",
+      shared_relative_path: "session-ui-regression/_storyboards/lyrics_seq5_storyboard_really_long_file_name_that_should_wrap_inside_the_reference_media_card.jpg",
+    },
+  ],
+  [secondarySessionId]: [],
+};
+
 const messagesBySession = {
   [primarySessionId]: [
     {
@@ -480,6 +559,8 @@ async function installMockRoutes(page) {
       session: sessionState,
       container: null,
       projects: [],
+      reference_videos: referenceVideosBySession[sessionId] || [],
+      storyboards: storyboardsBySession[sessionId] || [],
       latest_render_path: sessionState.latest_render_path,
       latest_render_url: sessionState.latest_render_path ? `/api/streams/renders/${sessionId}` : null,
       latest_stream_url: sessionState.latest_stream_url,
@@ -764,11 +845,21 @@ async function collectSessionWorkbenchPanelMetrics(page) {
     const composerShell = document.querySelector('.composer-shell');
     const composerCard = composerShell?.querySelector('.composer-card');
     const prompt = composerCard?.querySelector('#agent-prompt');
+    const attachments = composerCard?.querySelector('.composer-attachments');
+    const footer = composerCard?.querySelector('.composer-footer');
     const settingsCard = document.querySelector('[data-testid="session-settings-card"]');
     const modelSelect = document.querySelector('[data-testid="session-model-select"]');
     const reasoningSelect = document.querySelector('[data-testid="session-reasoning-select"]');
     const saveButton = document.querySelector('[data-testid="session-settings-save"]');
     const rect = (element) => element ? element.getBoundingClientRect() : null;
+    const readPx = (element, property) => {
+      if (!element) {
+        return null;
+      }
+
+      const value = Number.parseFloat(getComputedStyle(element)[property]);
+      return Number.isFinite(value) ? value : null;
+    };
 
     return {
       overviewRect: rect(overview),
@@ -782,6 +873,12 @@ async function collectSessionWorkbenchPanelMetrics(page) {
       composerShellRect: rect(composerShell),
       composerCardRect: rect(composerCard),
       promptRect: rect(prompt),
+      promptPaddingLeft: readPx(prompt, 'paddingLeft'),
+      promptPaddingRight: readPx(prompt, 'paddingRight'),
+      attachmentsPaddingLeft: readPx(attachments, 'paddingLeft'),
+      attachmentsPaddingRight: readPx(attachments, 'paddingRight'),
+      footerPaddingLeft: readPx(footer, 'paddingLeft'),
+      footerPaddingRight: readPx(footer, 'paddingRight'),
       settingsCardRect: rect(settingsCard),
       settingsInComposer: Boolean(composerShell && settingsCard && composerShell.contains(settingsCard)),
       settingsInSidebar: Boolean(sidebar && settingsCard && sidebar.contains(settingsCard)),
@@ -1390,7 +1487,16 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     );
     assert.equal(initialPanelMetrics.runtimeValueText, sessionStates[primarySessionId].copilot_session_id, `Runtime id should stay fully visible in the sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(initialPanelMetrics.runtimeValueRect && initialPanelMetrics.runtimeValueRect.height >= 30, `Runtime id row should have enough height to wrap long ids instead of truncating them: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.equal(initialPanelMetrics.resourcesEmptyText, "No project files have been uploaded yet.", "Resources empty state should stay visible");
+    assert.equal(initialPanelMetrics.resourcesEmptyText, "No AEP files are bound yet.", "Resources empty state should stay visible");
+    assert.equal(await page.locator('[data-testid="storyboard-gallery-trigger"]').count(), 5, "Reference media card should expose every storyboard image, not just the latest one");
+    assert.equal(initialPanelMetrics.promptPaddingLeft, 16, `Prompt should keep the corrected left gutter inside the composer card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.promptPaddingRight, 16, `Prompt should keep the corrected right gutter inside the composer card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.footerPaddingLeft, initialPanelMetrics.promptPaddingLeft, `Composer footer controls should align with the prompt gutter: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.footerPaddingRight, initialPanelMetrics.promptPaddingRight, `Composer footer trailing controls should align with the prompt gutter: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    if (initialPanelMetrics.attachmentsPaddingLeft !== null || initialPanelMetrics.attachmentsPaddingRight !== null) {
+      assert.equal(initialPanelMetrics.attachmentsPaddingLeft, initialPanelMetrics.promptPaddingLeft, `Composer attachment chips should align with the prompt gutter: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+      assert.equal(initialPanelMetrics.attachmentsPaddingRight, initialPanelMetrics.promptPaddingRight, `Composer attachment chips should align with the prompt gutter on the trailing edge: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    }
     assert.ok(initialPanelMetrics.overviewGridRect, `Session overview should use the new compact summary grid: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(initialPanelMetrics.previewPanelRect && initialPanelMetrics.previewTriggerRect, `Render preview summary should expose a trigger instead of a fixed inline player: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.previewPanelFlexShrink, '0', `Render preview card should not collapse under sidebar pressure: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
@@ -1398,6 +1504,41 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       assert.equal(initialPanelMetrics.containerPanelFlexShrink, '0', `Container card should not shrink away when the sidebar fills up: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     }
     assert.ok(initialPanelMetrics.overviewRect && initialPanelMetrics.overviewRect.height <= 460, `Overview panel should stay concise instead of expanding into a long fact sheet: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    const referenceMediaOverflowMetrics = await page.evaluate(() => {
+      const card = document.querySelector('.reference-media-card');
+      const strip = document.querySelector('.reference-media-storyboard-strip');
+
+      if (!card || !strip) {
+        return null;
+      }
+
+      return {
+        cardClientWidth: card.clientWidth,
+        cardScrollWidth: card.scrollWidth,
+        stripClientWidth: strip.clientWidth,
+        stripScrollWidth: strip.scrollWidth,
+      };
+    });
+    assert.ok(referenceMediaOverflowMetrics, 'Reference media metrics should be readable from the page');
+    assert.ok(
+      referenceMediaOverflowMetrics.cardScrollWidth <= referenceMediaOverflowMetrics.cardClientWidth + 1,
+      `Reference media card should wrap long storyboard filenames instead of overflowing horizontally: ${JSON.stringify(referenceMediaOverflowMetrics, null, 2)}`
+    );
+    assert.ok(
+      referenceMediaOverflowMetrics.stripScrollWidth > referenceMediaOverflowMetrics.stripClientWidth,
+      `Storyboard gallery should switch to horizontal scrolling when there are many images: ${JSON.stringify(referenceMediaOverflowMetrics, null, 2)}`
+    );
+
+    const lastStoryboardTrigger = page.locator('[data-testid="storyboard-gallery-trigger"]').last();
+    await lastStoryboardTrigger.scrollIntoViewIfNeeded();
+    await lastStoryboardTrigger.click();
+    await page.locator('[data-testid="media-preview-modal"]').waitFor();
+    assert.equal(
+      (await page.locator('.media-preview-panel h3').textContent())?.trim(),
+      storyboardsBySession[primarySessionId][4].filename,
+      'The preview modal should open the selected storyboard image, not only the latest one'
+    );
+    await page.locator('[data-testid="media-preview-modal-close"]').click();
 
     await modelSelect.selectOption("gpt-4.1");
     assert.equal(await reasoningSelect.isDisabled(), true, "Reasoning selector should disable for models without reasoning support");

@@ -16,6 +16,7 @@ services:
     #   https://github.com/docker-library/mongo (Windows Dockerfiles)
     # or use the community-maintained variant.
     container_name: shotwright-mongo
+    isolation: process
     restart: unless-stopped
     ports:
       - "27017:27017"
@@ -45,6 +46,7 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
         CHOCO_SOURCE: ${CHOCO_SOURCE:-}
     container_name: shotwright-api
+    isolation: process
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -57,6 +59,7 @@ services:
       SHOTWRIGHT_COPILOT_MODEL: ${SHOTWRIGHT_COPILOT_MODEL:-gpt-5.4}
       SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
       SHOTWRIGHT_SHOTWRIGHT_IMAGE: ${SHOTWRIGHT_SHOTWRIGHT_IMAGE:-shotwright:runtime}
+      SHOTWRIGHT_CONTAINER_ISOLATION: ${SHOTWRIGHT_CONTAINER_ISOLATION:-process}
     volumes:
       - uploads:C:/data/uploads
       - exports:C:/data/exports
@@ -89,6 +92,7 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
         CHOCO_SOURCE: ${CHOCO_SOURCE:-}
     container_name: shotwright-ui
+    isolation: process
     restart: unless-stopped
     ports:
       - "3000:3000"

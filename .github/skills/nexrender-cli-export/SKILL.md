@@ -18,16 +18,24 @@ disable-model-invocation: false
 
 ## Procedure
 
-1. Inspect the Shotwright workspace state first so you know whether a container, active project, or existing AEP already exists.
-2. Ensure there is a running After Effects container before any JSX or render action.
-3. If no suitable session project exists, create one through the managed project flow first. Use the project-creation tool so the new AEP is saved into a shared Shotwright workspace instead of an ad hoc container-only path.
-4. For project creation JSX, save to `$.getenv("SHOTWRIGHT_PROJECT_FILE")` and call `app.quit()` when finished. For later edits against an existing project, keep saving back to that same path.
-5. Keep JSX limited to project, composition, or layer edits. Do not trigger renders from JSX; let nexrender own the render queue and output handling.
-6. Start from [job-template.json](./assets/job-template.json) and replace the template source, composition, patch script path, and final output path.
-7. Include a script asset only when you need to patch the project before render. The JSX should read parameters from Nexrender and avoid container-specific hardcoding outside the incoming file paths.
-8. Run nexrender through the same code path Shotwright uses in `src/backend/app/services/nexrender.py`, with an explicit `aerender.exe` path and a stable work directory.
-9. Treat the copied mp4 output file as the success artifact even if nexrender exits non-zero. Shotwright already uses that recovery rule and you should keep the same behavior.
-10. If the user asks for the editable project artifact too, finish by exporting the managed project archive after the render succeeds.
+1. Inspect the Shotwright workspace state once at the start so you know the active project, container status, and any recent session image attachments.
+2. Ensure there is a running After Effects container before any JSX or render action, and keep the default runtime image unless the user explicitly asks for another image.
+3. If the user needs a blank AEP, prefer `create_empty_after_effects_project` instead of handwritten project-creation JSX.
+4. If the user supplied a reference video, prefer `generate_storyboard_from_reference_video` first so the common visual reference is a single image in the shared temporary workspace.
+5. If the user supplied inline images, prefer `stage_reference_images` or `create_reference_composition` so the assets land inside the shared project workspace. Do not copy them with shell commands.
+6. Use `create_reference_composition` for the common setup path: import a staged image or generated storyboard, create or update a comp, and keep the project save path stable.
+7. Use `create_after_effects_project` only when the user truly needs custom bootstrap JSX that the higher-level tools cannot cover.
+8. Keep `run_after_effects_jsx` for later creative edits against an existing managed project. Do not use JSX to perform renders.
+9. Run nexrender through the same code path Shotwright uses in `src/backend/app/services/nexrender.py`, with an explicit `aerender.exe` path and a stable work directory.
+10. Treat the copied mp4 output file as the success artifact even if nexrender exits non-zero. Shotwright already uses that recovery rule and you should keep the same behavior.
+11. If the user asks for the editable project artifact too, finish by exporting the managed project archive after the render succeeds.
+
+## Normal Flow Guardrails
+
+- Do not use `powershell`, `read_powershell`, `list_powershell`, `read_agent`, `task`, or subagents for the normal Shotwright render path when the built-in Shotwright tools can do the work.
+- Do not open validation scripts, job templates, or reference markdown files during a routine render run unless the user asks for repo archaeology or a tool behavior is unclear.
+- Do not override the container image, manually copy inline images, or hand-roll empty-project save boilerplate unless the user explicitly requests a nonstandard workflow.
+- Only fall back to `powershell` exploration after every relevant higher-level Shotwright tool for the requested workflow has already failed.
 
 ## Repo-specific Rules
 
@@ -39,6 +47,7 @@ disable-model-invocation: false
 
 ## References
 
+- These are fallback references, not a mandatory first step during a normal session run.
 - [render workflow reference](./references/render-workflow.md)
 - [gpt-5.4-mini checklist](./references/gpt-5.4-mini-checklist.md)
 - [job template](./assets/job-template.json)

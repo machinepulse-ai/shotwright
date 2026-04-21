@@ -48,7 +48,11 @@ async def list_model_options():
 @router.get("", response_model=list[SessionInDB])
 async def list_sessions():
     col = get_session_collection()
-    return await col.find().sort("created_at", -1).to_list(length=100)
+    docs = await col.find().sort("created_at", -1).to_list(length=100)
+    reconciled_docs: list[dict] = []
+    for doc in docs:
+        reconciled_docs.append(await runtime_manager.reconcile_session_status(doc["_id"], doc) or doc)
+    return reconciled_docs
 
 
 @router.get("/{session_id}", response_model=SessionInDB)
@@ -57,7 +61,7 @@ async def get_session(session_id: str):
     doc = await col.find_one({"_id": session_id})
     if not doc:
         raise HTTPException(404, "Session not found")
-    return doc
+    return await runtime_manager.reconcile_session_status(session_id, doc) or doc
 
 
 @router.patch("/{session_id}", response_model=SessionInDB)

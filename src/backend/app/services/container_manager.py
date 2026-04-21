@@ -88,7 +88,7 @@ async def create_container(session_id: str, image: str | None = None) -> dict:
         "name": f"shotwright-{session_id[:8]}-{uuid4().hex[:6]}",
         "environment": _build_container_environment(image),
         "volumes": volume_mounts,
-        "isolation": "process",
+        "isolation": settings.container_isolation,
     }
     if settings.container_network:
         run_kwargs["network"] = settings.container_network

@@ -61,6 +61,11 @@ export const uploadProject = (sessionId: string, file: File) => {
   form.append("file", file);
   return api.post(`/agent/sessions/${sessionId}/uploads`, form);
 };
+export const uploadReferenceVideo = (sessionId: string, file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post(`/agent/sessions/${sessionId}/reference-videos`, form);
+};
 export const exportProject = (sessionId: string, projectId: string) =>
   api.get(`/projects/${sessionId}/${projectId}/archive`, { responseType: "blob" });
 

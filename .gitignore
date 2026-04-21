@@ -35,3 +35,4 @@ validation-data/templates/*
 !validation-data/templates/.gitkeep
 validation-data/work/*
 !validation-data/work/.gitkeep
+.shotwright/inline-images/

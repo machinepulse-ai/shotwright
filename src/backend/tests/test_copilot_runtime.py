@@ -13,9 +13,12 @@ class DummyRuntime:
         self.pending_tasks: set[asyncio.Task] = set()
         self.turn_state = None
         self.event_sequence = 0
+        self.sent_messages: list[dict] = []
+        self.workspace_root = ""
         self.session = SimpleNamespace(send=self._send)
 
     async def _send(self, content: str, attachments=None) -> str:
+        self.sent_messages.append({"content": content, "attachments": attachments})
         return "copilot-message-id"
 
     def next_event_sequence(self) -> int:
@@ -25,6 +28,8 @@ class DummyRuntime:
 
 class DummyRuntimeCancelled(DummyRuntime):
     async def _send(self, content: str, attachments=None) -> str:
+        self.sent_messages.append({"content": content, "attachments": attachments})
+
         async def _cancel_turn() -> None:
             await asyncio.sleep(0)
             assert self.turn_state is not None
@@ -34,6 +39,80 @@ class DummyRuntimeCancelled(DummyRuntime):
 
         asyncio.create_task(_cancel_turn())
         return "copilot-message-id"
+
+
+class DummyRuntimeCompleted(DummyRuntime):
+    async def _send(self, content: str, attachments=None) -> str:
+        self.sent_messages.append({"content": content, "attachments": attachments})
+
+        async def _complete_turn() -> None:
+            await asyncio.sleep(0)
+            assert self.turn_state is not None
+            self.turn_state.content = "done"
+            self.turn_state.idle_event.set()
+
+        asyncio.create_task(_complete_turn())
+        return "copilot-message-id"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_session_status_marks_stale_running_sessions_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = DummyRuntime()
+    captured = {
+        "statuses": [],
+        "disconnects": 0,
+    }
+
+    async def fake_set_session_status(app_session_id: str, status: str, **extra) -> dict:
+        captured["statuses"].append({"app_session_id": app_session_id, "status": status, "extra": extra})
+        return {"_id": app_session_id, "status": status, **extra}
+
+    async def fake_disconnect_session(app_session_id: str) -> None:
+        captured["disconnects"] += 1
+
+    monkeypatch.setattr(runtime_manager, "_runtimes", {"session-stale": runtime})
+    monkeypatch.setattr(runtime_manager, "_set_session_status", fake_set_session_status)
+    monkeypatch.setattr(runtime_manager, "disconnect_session", fake_disconnect_session)
+
+    reconciled = await runtime_manager.reconcile_session_status(
+        "session-stale",
+        {"_id": "session-stale", "status": "running", "last_error": None},
+    )
+
+    assert reconciled["status"] == "error"
+    assert "active Copilot turn state" in reconciled["last_error"]
+    assert captured["statuses"] == [
+        {
+            "app_session_id": "session-stale",
+            "status": "error",
+            "extra": {"last_error": reconciled["last_error"]},
+        }
+    ]
+    assert captured["disconnects"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_session_status_keeps_live_running_turns(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = DummyRuntime()
+    runtime.turn_state = SimpleNamespace(finalized=False)
+    captured = {"statuses": 0, "disconnects": 0}
+
+    async def fake_set_session_status(app_session_id: str, status: str, **extra) -> dict:
+        captured["statuses"] += 1
+        return {"_id": app_session_id, "status": status, **extra}
+
+    async def fake_disconnect_session(app_session_id: str) -> None:
+        captured["disconnects"] += 1
+
+    monkeypatch.setattr(runtime_manager, "_runtimes", {"session-live": runtime})
+    monkeypatch.setattr(runtime_manager, "_set_session_status", fake_set_session_status)
+    monkeypatch.setattr(runtime_manager, "disconnect_session", fake_disconnect_session)
+
+    session_doc = {"_id": "session-live", "status": "running", "last_error": None}
+    reconciled = await runtime_manager.reconcile_session_status("session-live", session_doc)
+
+    assert reconciled == session_doc
+    assert captured == {"statuses": 0, "disconnects": 0}
 
 
 class FakeMessageCollection:
@@ -195,3 +274,89 @@ async def test_send_message_cancel_returns_idle_response(monkeypatch: pytest.Mon
     assert captured["events"][-1]["type"] == "session.cancelled"
     assert captured["events"][-1]["payload"]["partial_output"] is False
     assert captured["statuses"][-1] == {"status": "idle", "extra": {"last_error": None}}
+
+
+@pytest.mark.asyncio
+async def test_send_message_saves_inline_images_to_shared_uploads(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    runtime = DummyRuntimeCompleted()
+    assistant_doc_holder: dict[str, dict] = {}
+    captured_user_docs: list[dict] = []
+
+    async def fake_ensure_runtime(app_session_id: str):
+        return runtime
+
+    async def fake_persist_message(app_session_id: str, role: str, content: str, metadata: dict | None = None) -> dict:
+        doc = {
+            "_id": f"{role}-doc",
+            "session_id": app_session_id,
+            "role": role,
+            "content": content,
+            "metadata": metadata or {},
+        }
+        if role == "assistant":
+            assistant_doc_holder["doc"] = doc
+        else:
+            captured_user_docs.append(doc)
+        return doc
+
+    async def fake_persist_event(app_session_id: str, event_type: str, payload: dict, turn_id: str | None = None, sequence: int | None = None) -> None:
+        return None
+
+    async def fake_set_session_status(app_session_id: str, status: str, **extra) -> dict:
+        return {"_id": app_session_id, "status": status, **extra}
+
+    async def fake_sync_streaming_message(turn_state, *, content: str, version: int, streaming: bool, state: str) -> dict:
+        assistant_doc_holder["doc"] = {
+            **assistant_doc_holder["doc"],
+            "content": content,
+            "metadata": {
+                **assistant_doc_holder["doc"].get("metadata", {}),
+                "streaming": streaming,
+                "state": state,
+                "version": version,
+            },
+        }
+        return assistant_doc_holder["doc"]
+
+    monkeypatch.setattr(runtime_manager, "ensure_runtime", fake_ensure_runtime)
+    monkeypatch.setattr(runtime_manager, "resolve_turn_timeout_seconds", lambda: asyncio.sleep(0, result=900.0))
+    monkeypatch.setattr(runtime_manager, "_persist_message", fake_persist_message)
+    monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+    monkeypatch.setattr(runtime_manager, "_set_session_status", fake_set_session_status)
+    monkeypatch.setattr(runtime_manager, "_sync_streaming_message", fake_sync_streaming_message)
+    monkeypatch.setattr(module, "get_message_collection", lambda: FakeMessageCollection(assistant_doc_holder))
+    monkeypatch.setattr(module.settings, "upload_dir", str(tmp_path))
+
+    result = await runtime_manager.send_message(
+        "session-image-test",
+        "describe image",
+        [
+            {
+                "type": "image",
+                "mime_type": "image/png",
+                "data_url": "data:image/png;base64,QUJD",
+                "display_name": "reference-image.png",
+                "width": 1,
+                "height": 1,
+                "size_bytes": 3,
+            }
+        ],
+    )
+
+    assert result["session_status"] == "idle"
+    assert runtime.sent_messages
+
+    sent_attachments = runtime.sent_messages[0]["attachments"]
+    assert sent_attachments is not None
+    assert [attachment["type"] for attachment in sent_attachments] == ["blob", "file"]
+
+    file_attachment = sent_attachments[1]
+    assert file_attachment["path"].endswith("reference-image.png")
+    assert tmp_path in module.Path(file_attachment["path"]).parents
+    assert module.Path(file_attachment["path"]).read_bytes() == b"ABC"
+
+    persisted_attachment = captured_user_docs[0]["metadata"]["attachments"][0]
+    assert persisted_attachment["file_path"] == file_attachment["path"]
+    assert persisted_attachment["shared_relative_path"].startswith("session-image-test/")
+    assert persisted_attachment["workspace_relative_path"].endswith("reference-image.png")
+    assert persisted_attachment["display_name"] == "reference-image.png"

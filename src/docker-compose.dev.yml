@@ -30,6 +30,7 @@ services:
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     container_name: shotwright-dev
+    isolation: process
     restart: unless-stopped
     depends_on:
       - mongo
@@ -45,12 +46,15 @@ services:
       SHOTWRIGHT_COPILOT_MODEL: ${SHOTWRIGHT_COPILOT_MODEL:-gpt-5.4}
       SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
       SHOTWRIGHT_SHOTWRIGHT_IMAGE: ${SHOTWRIGHT_SHOTWRIGHT_IMAGE:-shotwright:runtime}
+      SHOTWRIGHT_CONTAINER_ISOLATION: ${SHOTWRIGHT_CONTAINER_ISOLATION:-process}
       SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_AUTO_DETECT: "false"
       SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE: ${SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE:-}
       SHOTWRIGHT_DEBUG: "true"
       SHOTWRIGHT_API_PROXY_TARGET: http://127.0.0.1:8000
       PYTHONPATH: C:/workspace/src/backend
     volumes:
+      - ../scripts:C:/workspace/scripts
+      - ../validation-data:C:/workspace/validation-data
       - ./backend/app:C:/workspace/src/backend/app
       - ./frontend:C:/workspace/src/frontend
       - frontend-node-modules:C:/workspace/src/frontend/node_modules

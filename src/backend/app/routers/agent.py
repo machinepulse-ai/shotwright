@@ -9,12 +9,14 @@ from fastapi.responses import StreamingResponse
 from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
 from app.models.chat import ChatMessage, ChatTurnCreate, ChatTurnResult, SessionEvent
 from app.models.container import ContainerInfo
+from app.models.media import ReferenceVideoInfo
 from app.models.project import ProjectInfo
 from app.models.session import SessionInDB
 from app.services.copilot_runtime import runtime_manager
 from app.services.session_streams import session_stream_broker
 from app.services import container_manager as cm
 from app.services import project_manager as pm
+from app.services import reference_media as rm
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -107,11 +109,31 @@ async def upload_session_project(session_id: str, file: UploadFile):
     return project
 
 
+@router.post("/sessions/{session_id}/reference-videos", response_model=ReferenceVideoInfo)
+async def upload_reference_video(session_id: str, file: UploadFile):
+    session = await get_session_collection().find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found")
+    if not file.filename:
+        raise HTTPException(400, "Reference video filename is required")
+
+    payload = await file.read()
+    try:
+        return rm.upload_reference_video(session_id, payload, file.filename)
+    except rm.ReferenceMediaUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 413 if "500 MB" in message else 400
+        raise HTTPException(status_code, message) from exc
+
+
 @router.get("/sessions/{session_id}/context")
 async def get_agent_context(session_id: str):
     session_doc = await get_session_collection().find_one({"_id": session_id})
     if not session_doc:
         raise HTTPException(404, "Session not found")
+    session_doc = await runtime_manager.reconcile_session_status(session_id, session_doc) or session_doc
 
     container_doc = None
     if session_doc.get("container_id"):
@@ -122,6 +144,8 @@ async def get_agent_context(session_id: str):
         "session": SessionInDB.model_validate(session_doc).model_dump(by_alias=True),
         "container": ContainerInfo.model_validate(container_doc).model_dump(by_alias=True) if container_doc else None,
         "projects": [ProjectInfo.model_validate(doc).model_dump(by_alias=True) for doc in project_docs],
+        "reference_videos": rm.list_reference_videos(session_id, limit=12),
+        "storyboards": rm.list_storyboards(session_id, limit=12),
         "latest_render_path": session_doc.get("latest_render_path"),
         "latest_render_url": f"/api/streams/renders/{session_id}" if session_doc.get("latest_render_path") else None,
         "latest_stream_url": session_doc.get("latest_stream_url"),

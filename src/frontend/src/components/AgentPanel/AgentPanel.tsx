@@ -29,6 +29,7 @@ import {
   stopContainer,
   updateSession,
   uploadProject,
+  uploadReferenceVideo,
 } from "../../services/api";
 import {
   AgentContext,
@@ -37,8 +38,10 @@ import {
   CopilotModelOption,
   ProjectInfo,
   ReasoningEffort,
+  ReferenceVideoInfo,
   Session,
   SessionEvent,
+  StoryboardInfo,
 } from "../../types";
 import { TranslationCopy, useI18n } from "../../i18n";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
@@ -55,6 +58,7 @@ type UiErrorKey =
   | "failedStopGeneration"
   | "failedSaveSessionSettings"
   | "uploadFailed"
+  | "referenceVideoUploadFailed"
   | "exportFailed"
   | "failedStopContainer"
   | "failedDeleteSession";
@@ -71,10 +75,13 @@ type MetaChip = {
 };
 
 const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const SUPPORTED_REFERENCE_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".wmv", ".mpeg", ".mpg"]);
 const MAX_COMPOSER_IMAGE_BYTES = 6 * 1024 * 1024;
 const MAX_COMPOSER_ATTACHMENTS = 4;
+const MAX_REFERENCE_VIDEO_BYTES = 500 * 1024 * 1024;
 const DEFAULT_COMPOSER_HEIGHT = 172;
-const MIN_COMPOSER_HEIGHT = 136;
+const MIN_COMPOSER_HEIGHT = 152;
+const RESPONDING_COMPOSER_MIN_HEIGHT = 170;
 const MIN_TRANSCRIPT_HEIGHT = 220;
 const COMPOSER_SPLITTER_HEIGHT = 14;
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 76;
@@ -148,6 +155,22 @@ type ExecutionGroupDraft = {
 
 type PendingImageAttachment = ChatImageAttachment & {
   id: string;
+};
+
+type ReferenceMediaCard = {
+  referenceVideo: ReferenceVideoInfo;
+  storyboards: StoryboardInfo[];
+  latestStoryboard: StoryboardInfo | null;
+  videoUrl: string | null;
+  latestStoryboardUrl: string | null;
+};
+
+type MediaPreviewState = {
+  kind: "video" | "image";
+  src: string;
+  eyebrow: string;
+  title: string;
+  meta: string | null;
 };
 
 function buildUiError(err: any, fallbackKey: UiErrorKey): UiError {
@@ -250,6 +273,47 @@ function basename(value: string | null | undefined, fallback: string) {
   return parts[parts.length - 1] || value;
 }
 
+function formatDurationSeconds(value: number | null | undefined, locale: string, fallback: string) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+
+  const maximumFractionDigits = value >= 10 ? 1 : 2;
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits }).format(value)} s`;
+}
+
+function formatFileSize(value: number | null | undefined, locale: string, fallback: string) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const maximumFractionDigits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits }).format(size)} ${units[unitIndex]}`;
+}
+
+function buildUploadAssetUrl(sharedRelativePath: string | null | undefined) {
+  if (!sharedRelativePath) {
+    return null;
+  }
+
+  const encodedPath = sharedRelativePath
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+
+  return encodedPath ? `/api/uploads/${encodedPath}` : null;
+}
+
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -309,8 +373,24 @@ function getClipboardImageFiles(event: ClipboardEvent<HTMLTextAreaElement>) {
     .filter((file): file is File => Boolean(file));
 }
 
-function getDroppedImageFiles(event: DragEvent<HTMLElement>) {
-  return Array.from(event.dataTransfer?.files || []).filter((file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()));
+function getFileExtension(fileName: string) {
+  const suffix = fileName.slice(Math.max(0, fileName.lastIndexOf(".")));
+  return suffix.trim().toLowerCase();
+}
+
+function isReferenceVideoFile(file: File) {
+  const mimeType = file.type.trim().toLowerCase();
+  if (mimeType.startsWith("video/")) {
+    return true;
+  }
+
+  return SUPPORTED_REFERENCE_VIDEO_EXTENSIONS.has(getFileExtension(file.name));
+}
+
+function getDroppedMediaFiles(event: DragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer?.files || []).filter(
+    (file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()) || isReferenceVideoFile(file),
+  );
 }
 
 function getComposerAttachmentErrorMessage(error: unknown, copy: TranslationCopy) {
@@ -845,6 +925,10 @@ function humanizeToolName(toolName: string) {
     list_uploaded_projects: "Checked uploaded projects",
     ensure_after_effects_container: "Ensure After Effects container",
     create_after_effects_project: "Create managed project",
+    create_empty_after_effects_project: "Create empty project",
+    generate_storyboard_from_reference_video: "Generate storyboard",
+    stage_reference_images: "Stage reference images",
+    create_reference_composition: "Create reference composition",
     run_after_effects_jsx: "Run After Effects JSX",
     stop_after_effects_container: "Stop After Effects container",
     read_file: "Read file",
@@ -1530,13 +1614,15 @@ export default function AgentPanel({
   );
   const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
   const [stoppingGenerationSessionId, setStoppingGenerationSessionId] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [uploadingProject, setUploadingProject] = useState(false);
+  const [uploadingReferenceVideo, setUploadingReferenceVideo] = useState(false);
   const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
   const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
   const [draftModel, setDraftModel] = useState("");
   const [draftReasoning, setDraftReasoning] = useState<ReasoningEffort | null>(null);
   const [savingSessionSettings, setSavingSessionSettings] = useState(false);
   const [isRenderPreviewOpen, setIsRenderPreviewOpen] = useState(false);
+  const [mediaPreview, setMediaPreview] = useState<MediaPreviewState | null>(null);
   const [sessionsError, setSessionsError] = useState<UiError | null>(null);
   const [panelError, setPanelError] = useState<UiError | null>(null);
   const [sessionSettingsError, setSessionSettingsError] = useState<UiError | null>(null);
@@ -1613,6 +1699,7 @@ export default function AgentPanel({
   const stoppingGeneration = Boolean(currentSession && stoppingGenerationSessionId === currentSession._id);
   const sessionStatus = context?.session.status || currentSession?.status || "idle";
   const isResponding = sending || sessionStatus === "running";
+  const composerMinHeight = isResponding ? RESPONDING_COMPOSER_MIN_HEIGHT : MIN_COMPOSER_HEIGHT;
   const visibleMessages = useMemo(() => {
     if (!currentSession || !optimisticTurn || optimisticTurn.sessionId !== currentSession._id) {
       return messages;
@@ -1649,6 +1736,37 @@ export default function AgentPanel({
   const previewVideoFormat = context?.latest_render_url ? "mp4" : context?.latest_stream_url ? "hls" : null;
   const hasRenderPreview = Boolean(context?.latest_render_path && previewVideoSrc && previewVideoFormat);
   const latestRenderName = basename(context?.latest_render_path, copy.common.notGenerated);
+  const referenceVideos = context?.reference_videos ?? [];
+  const storyboards = context?.storyboards ?? [];
+  const referenceMediaCards = useMemo<ReferenceMediaCard[]>(() => {
+    const storyboardsBySource = new Map<string, StoryboardInfo[]>();
+
+    for (const storyboard of storyboards) {
+      const sourceKey = storyboard.source_video_relative_path || storyboard.source_video_path;
+      if (!sourceKey) {
+        continue;
+      }
+
+      const bucket = storyboardsBySource.get(sourceKey) ?? [];
+      bucket.push(storyboard);
+      storyboardsBySource.set(sourceKey, bucket);
+    }
+
+    return referenceVideos.map((referenceVideo) => {
+      const relatedStoryboards = [...(storyboardsBySource.get(referenceVideo.shared_relative_path) ?? [])].sort(
+        (left, right) => parseDateValue(right.created_at).getTime() - parseDateValue(left.created_at).getTime()
+      );
+      const latestStoryboard = relatedStoryboards[0] ?? null;
+
+      return {
+        referenceVideo,
+        storyboards: relatedStoryboards,
+        latestStoryboard,
+        videoUrl: buildUploadAssetUrl(referenceVideo.shared_relative_path),
+        latestStoryboardUrl: latestStoryboard ? buildUploadAssetUrl(latestStoryboard.shared_relative_path) : null,
+      };
+    });
+  }, [referenceVideos, storyboards]);
   const sessionSettingsDirty = Boolean(currentSession) && (
     draftModel !== (currentSession?.copilot_model ?? "") ||
     effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
@@ -1738,10 +1856,10 @@ export default function AgentPanel({
     if (!stageBody) return;
 
     const maxComposerHeight = Math.max(
-      MIN_COMPOSER_HEIGHT,
+      composerMinHeight,
       stageBody.clientHeight - MIN_TRANSCRIPT_HEIGHT - COMPOSER_SPLITTER_HEIGHT,
     );
-    setComposerHeight((previous) => clamp(previous, MIN_COMPOSER_HEIGHT, maxComposerHeight));
+    setComposerHeight((previous) => clamp(previous, composerMinHeight, maxComposerHeight));
   };
 
   const resizeComposerTextarea = () => {
@@ -1768,6 +1886,11 @@ export default function AgentPanel({
   };
 
   const syncSessionRecord = (session: Session) => {
+    if (session.status !== "running") {
+      setSendingSessionId((previous) => (previous === session._id ? null : previous));
+      setStoppingGenerationSessionId((previous) => (previous === session._id ? null : previous));
+    }
+
     setCurrentSession((previous) => (previous && previous._id === session._id ? session : previous));
     setSessions((previous) => upsertSessionRecord(previous, session));
     setContext((previous) => {
@@ -1916,7 +2039,7 @@ export default function AgentPanel({
   }, [hasRenderPreview]);
 
   useEffect(() => {
-    if (typeof document === "undefined" || !isRenderPreviewOpen) {
+    if (typeof document === "undefined" || (!isRenderPreviewOpen && !mediaPreview)) {
       return;
     }
 
@@ -1924,6 +2047,7 @@ export default function AgentPanel({
     const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         setIsRenderPreviewOpen(false);
+        setMediaPreview(null);
       }
     };
 
@@ -1934,7 +2058,11 @@ export default function AgentPanel({
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", handleWindowKeyDown);
     };
-  }, [isRenderPreviewOpen]);
+  }, [isRenderPreviewOpen, mediaPreview]);
+
+  useEffect(() => {
+    setMediaPreview(null);
+  }, [currentSession?._id]);
 
   useEffect(() => {
     activeSessionIdRef.current = currentSession?._id ?? null;
@@ -1971,7 +2099,7 @@ export default function AgentPanel({
     });
 
     return () => window.cancelAnimationFrame(frameId);
-  }, [prompt, pendingAttachments.length, composerHeight, currentSession?._id]);
+  }, [prompt, pendingAttachments.length, composerHeight, currentSession?._id, isResponding]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2201,7 +2329,7 @@ export default function AgentPanel({
   };
 
   const handleSend = () => {
-    if (!currentSession || sending) return;
+    if (!currentSession || sending || uploadingReferenceVideo) return;
 
     const sessionId = currentSession._id;
     const content = prompt.trim();
@@ -2260,8 +2388,10 @@ export default function AgentPanel({
 
     try {
       await cancelChatTurn(sessionId);
+      await Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
     } catch (err) {
       setPanelError(buildUiError(err, "failedStopGeneration"));
+    } finally {
       setStoppingGenerationSessionId((previous) => (previous === sessionId ? null : previous));
     }
   };
@@ -2287,6 +2417,59 @@ export default function AgentPanel({
     }
   };
 
+  const handleUploadReferenceVideos = async (files: File[]) => {
+    if (!currentSession || !files.length) return;
+
+    setUploadingReferenceVideo(true);
+    setComposerAttachmentError(null);
+
+    try {
+      for (const file of files) {
+        if (!isReferenceVideoFile(file)) {
+          throw new Error("unsupported-image");
+        }
+        if (file.size > MAX_REFERENCE_VIDEO_BYTES) {
+          throw new Error("reference-video-too-large");
+        }
+
+        await uploadReferenceVideo(currentSession._id, file);
+      }
+
+      await Promise.allSettled([loadCurrentSession(currentSession._id), fetchSessions()]);
+      setPanelError(null);
+    } catch (error: any) {
+      if (error instanceof Error && error.message === "reference-video-too-large") {
+        setComposerAttachmentError(copy.agent.referenceVideoTooLarge);
+      } else if (error instanceof Error && error.message === "unsupported-image") {
+        setComposerAttachmentError(copy.agent.attachmentErrorUnsupported);
+      } else {
+        setPanelError(buildUiError(error, "referenceVideoUploadFailed"));
+      }
+    } finally {
+      setUploadingReferenceVideo(false);
+    }
+  };
+
+  const handleAppendMediaFiles = async (files: File[]) => {
+    if (!files.length) return;
+
+    const imageFiles = files.filter((file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()));
+    const videoFiles = files.filter((file) => isReferenceVideoFile(file));
+    const unsupportedCount = files.length - imageFiles.length - videoFiles.length;
+
+    if (imageFiles.length) {
+      await handleAppendAttachments(imageFiles);
+    }
+
+    if (videoFiles.length) {
+      await handleUploadReferenceVideos(videoFiles);
+    }
+
+    if (unsupportedCount > 0 && !imageFiles.length && !videoFiles.length) {
+      setComposerAttachmentError(copy.agent.attachmentErrorUnsupported);
+    }
+  };
+
   const handleComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const imageFiles = getClipboardImageFiles(event);
     if (!imageFiles.length) return;
@@ -2296,8 +2479,8 @@ export default function AgentPanel({
   };
 
   const handleComposerDragOver = (event: DragEvent<HTMLDivElement>) => {
-    const imageFiles = getDroppedImageFiles(event);
-    if (!imageFiles.length) return;
+    const mediaFiles = getDroppedMediaFiles(event);
+    if (!mediaFiles.length) return;
 
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
@@ -2310,12 +2493,12 @@ export default function AgentPanel({
   };
 
   const handleComposerDrop = (event: DragEvent<HTMLDivElement>) => {
-    const imageFiles = getDroppedImageFiles(event);
-    if (!imageFiles.length) return;
+    const mediaFiles = getDroppedMediaFiles(event);
+    if (!mediaFiles.length) return;
 
     event.preventDefault();
     setIsDraggingComposer(false);
-    void handleAppendAttachments(imageFiles);
+    void handleAppendMediaFiles(mediaFiles);
   };
 
   const handleRemoveAttachment = (attachmentId: string) => {
@@ -2325,14 +2508,14 @@ export default function AgentPanel({
   };
 
   const handleOpenComposerAttachmentPicker = () => {
-    if (!currentSession) return;
+    if (!currentSession || uploadingReferenceVideo) return;
     composerAttachmentInputRef.current?.click();
   };
 
   const handleComposerAttachmentInputChange = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     if (files.length) {
-      void handleAppendAttachments(files);
+      void handleAppendMediaFiles(files);
     }
     event.target.value = "";
   };
@@ -2351,10 +2534,10 @@ export default function AgentPanel({
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
       const maxComposerHeight = Math.max(
-        MIN_COMPOSER_HEIGHT,
+        composerMinHeight,
         stageBody.clientHeight - MIN_TRANSCRIPT_HEIGHT - COMPOSER_SPLITTER_HEIGHT,
       );
-      setComposerHeight(clamp(startHeight - (moveEvent.clientY - startY), MIN_COMPOSER_HEIGHT, maxComposerHeight));
+      setComposerHeight(clamp(startHeight - (moveEvent.clientY - startY), composerMinHeight, maxComposerHeight));
     };
 
     const handlePointerUp = () => {
@@ -2434,8 +2617,12 @@ export default function AgentPanel({
   };
 
   const composerLayoutStyle = useMemo(
-    () => ({ "--composer-height": `${composerHeight}px` } as CSSProperties),
-    [composerHeight],
+    () =>
+      ({
+        "--composer-height": `${composerHeight}px`,
+        "--composer-min-height": `${composerMinHeight}px`,
+      } as CSSProperties),
+    [composerHeight, composerMinHeight],
   );
   const workbenchLayoutStyle = useMemo(
     () =>
@@ -2486,9 +2673,9 @@ export default function AgentPanel({
     }
   };
 
-  const handleUpload = async (file: File) => {
+  const handleProjectUpload = async (file: File) => {
     if (!currentSession) return;
-    setUploading(true);
+    setUploadingProject(true);
     try {
       await uploadProject(currentSession._id, file);
       await loadCurrentSession(currentSession._id);
@@ -2497,7 +2684,7 @@ export default function AgentPanel({
     } catch (err: any) {
       setPanelError(buildUiError(err, "uploadFailed"));
     }
-    setUploading(false);
+    setUploadingProject(false);
   };
 
   const handleDownload = async (project: ProjectInfo) => {
@@ -2865,12 +3052,12 @@ export default function AgentPanel({
               </>
             )}
             <label className="toolbar-button chat-stage-action-button file-action">
-              {uploading ? copy.common.uploading : copy.common.uploadProject}
+              {uploadingProject ? copy.common.uploading : copy.common.uploadProject}
               <input
                 type="file"
                 accept=".zip"
                 hidden
-                onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files?.[0] && handleUpload(e.target.files[0])}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files?.[0] && handleProjectUpload(e.target.files[0])}
               />
             </label>
             {currentSession && (
@@ -3033,8 +3220,8 @@ export default function AgentPanel({
             data-testid="composer-resizer"
             role="separator"
             aria-orientation="horizontal"
-            aria-valuemin={MIN_COMPOSER_HEIGHT}
-            aria-valuemax={Math.max(MIN_COMPOSER_HEIGHT, composerHeight)}
+            aria-valuemin={composerMinHeight}
+            aria-valuemax={Math.max(composerMinHeight, composerHeight)}
             aria-valuenow={composerHeight}
             onPointerDown={handleComposerResizeStart}
           />
@@ -3064,7 +3251,7 @@ export default function AgentPanel({
               <input
                 ref={composerAttachmentInputRef}
                 type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
+                accept="image/png,image/jpeg,image/webp,image/gif,video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.wmv,.mpeg,.mpg"
                 hidden
                 multiple
                 onChange={handleComposerAttachmentInputChange}
@@ -3134,7 +3321,7 @@ export default function AgentPanel({
                     aria-label={copy.agent.composerAttachImage}
                     title={copy.agent.composerAttachImage}
                     onClick={handleOpenComposerAttachmentPicker}
-                    disabled={!currentSession}
+                    disabled={!currentSession || uploadingReferenceVideo}
                   >
                     <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                       <path d="M8 2.25a.75.75 0 0 1 .75.75v4.25H13a.75.75 0 0 1 0 1.5H8.75V13a.75.75 0 0 1-1.5 0V8.75H3a.75.75 0 0 1 0-1.5h4.25V3A.75.75 0 0 1 8 2.25Z" fill="currentColor"/>
@@ -3160,7 +3347,7 @@ export default function AgentPanel({
                     <button
                       className="btn-primary send-button"
                       onClick={handleSend}
-                      disabled={!currentSession || sending || (!prompt.trim() && !pendingAttachments.length)}
+                      disabled={!currentSession || sending || uploadingReferenceVideo || (!prompt.trim() && !pendingAttachments.length)}
                     >
                       <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                         <path d="M2.5 8.75 11 8.76 7.72 12.04a.75.75 0 1 0 1.06 1.06l4.56-4.57a.75.75 0 0 0 0-1.06L8.78 2.9a.75.75 0 0 0-1.06 1.06L11 7.25H2.5a.75.75 0 0 0 0 1.5Z" fill="currentColor"/>
@@ -3308,6 +3495,174 @@ export default function AgentPanel({
                 <p className="empty-side">{copy.agent.assetsEmpty}</p>
               )}
             </div>
+
+            <div className="card context-panel resources-panel">
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">{copy.agent.referenceMediaEyebrow}</span>
+                  <h3>{copy.agent.referenceMediaTitle}</h3>
+                </div>
+                <span className="panel-count">{referenceMediaCards.length}</span>
+              </div>
+
+              {referenceMediaCards.length ? (
+                <div className="project-list panel-list-scroll">
+                  {referenceMediaCards.map(({ latestStoryboard, latestStoryboardUrl, referenceVideo, storyboards: relatedStoryboards, videoUrl }) => {
+                    const referenceVideoMeta = [
+                      formatDurationSeconds(referenceVideo.duration_seconds, locale, copy.common.notSpecified),
+                      referenceVideo.width && referenceVideo.height ? `${referenceVideo.width} x ${referenceVideo.height}` : null,
+                      formatFileSize(referenceVideo.size_bytes, locale, copy.common.notSpecified),
+                    ]
+                      .filter(Boolean)
+                      .join(" · ");
+
+                    const storyboardMeta = latestStoryboard
+                      ? [
+                          `${formatDurationSeconds(latestStoryboard.interval_seconds, locale, copy.common.notSpecified)} / frame`,
+                          `${latestStoryboard.estimated_frames} frames`,
+                          `${latestStoryboard.columns} x ${latestStoryboard.rows}`,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")
+                      : null;
+                    const storyboardPreviewItems = relatedStoryboards
+                      .map((storyboard) => ({
+                        storyboard,
+                        url: buildUploadAssetUrl(storyboard.shared_relative_path),
+                      }))
+                      .filter((entry): entry is { storyboard: StoryboardInfo; url: string } => Boolean(entry.url));
+
+                    return (
+                      <div key={referenceVideo.shared_relative_path} className="reference-media-card">
+                        <div className="reference-media-card-header">
+                          <div className="project-copy">
+                            <div className="project-name">{referenceVideo.filename}</div>
+                            <div className="project-meta">{referenceVideoMeta}</div>
+                            <div className="project-submeta">{formatDateTime(referenceVideo.created_at, locale, copy.common.notStarted)}</div>
+                          </div>
+                          <span className="reference-media-badge">{`${relatedStoryboards.length} ${copy.agent.referenceMediaStoryboardCount}`}</span>
+                        </div>
+
+                        <div className="reference-media-preview-grid">
+                          <button
+                            type="button"
+                            className="reference-media-preview"
+                            data-testid="reference-video-preview-trigger"
+                            onClick={() => {
+                              if (!videoUrl) {
+                                return;
+                              }
+
+                              setMediaPreview({
+                                kind: "video",
+                                src: videoUrl,
+                                eyebrow: copy.agent.referenceMediaPreviewVideo,
+                                title: referenceVideo.filename,
+                                meta: referenceVideoMeta,
+                              });
+                            }}
+                            disabled={!videoUrl}
+                          >
+                            <span className="reference-media-preview-topline">
+                              <span className="reference-media-preview-label">{copy.agent.referenceMediaPreviewVideo}</span>
+                              <span className="reference-media-preview-action">{copy.video.preview}</span>
+                            </span>
+                            <video
+                              className="reference-media-preview-video"
+                              src={videoUrl || undefined}
+                              poster={latestStoryboardUrl || undefined}
+                              muted
+                              playsInline
+                              preload="metadata"
+                            />
+                            <span className="reference-media-preview-caption">{referenceVideo.filename}</span>
+                          </button>
+
+                          {latestStoryboard && latestStoryboardUrl ? (
+                            <button
+                              type="button"
+                              className="reference-media-preview"
+                              data-testid="storyboard-preview-trigger"
+                              onClick={() => {
+                                setMediaPreview({
+                                  kind: "image",
+                                  src: latestStoryboardUrl,
+                                  eyebrow: copy.agent.referenceMediaPreviewStoryboard,
+                                  title: latestStoryboard.filename,
+                                  meta: storyboardMeta,
+                                });
+                              }}
+                            >
+                              <span className="reference-media-preview-topline">
+                                <span className="reference-media-preview-label">{copy.agent.referenceMediaLatestStoryboard}</span>
+                                <span className="reference-media-preview-action">{copy.video.preview}</span>
+                              </span>
+                              <img className="reference-media-preview-image" src={latestStoryboardUrl} alt={latestStoryboard.filename} loading="lazy" />
+                              <span className="reference-media-preview-caption">{latestStoryboard.filename}</span>
+                            </button>
+                          ) : (
+                            <div className="reference-media-preview is-empty" data-testid="storyboard-preview-empty">
+                              <span className="reference-media-preview-topline">
+                                <span className="reference-media-preview-label">{copy.agent.referenceMediaPreviewStoryboard}</span>
+                              </span>
+                              <div className="reference-media-preview-placeholder">{copy.agent.referenceMediaStoryboardPending}</div>
+                            </div>
+                          )}
+                        </div>
+
+                        {latestStoryboard ? (
+                          <div className="reference-media-storyboard-summary">
+                            <div className="reference-media-storyboard-title">{copy.agent.referenceMediaLatestStoryboard}</div>
+                            <div className="project-meta">{storyboardMeta}</div>
+                            <div className="project-submeta">{formatDateTime(latestStoryboard.created_at, locale, copy.common.notStarted)}</div>
+                          </div>
+                        ) : null}
+
+                        {storyboardPreviewItems.length ? (
+                          <div className="reference-media-storyboard-gallery">
+                            <div className="reference-media-storyboard-title">{copy.agent.referenceMediaAllStoryboards}</div>
+                            <div className="reference-media-storyboard-strip" data-testid="reference-media-storyboard-strip">
+                              {storyboardPreviewItems.map(({ storyboard, url }) => {
+                                const itemMeta = [
+                                  formatDurationSeconds(storyboard.interval_seconds, locale, copy.common.notSpecified),
+                                  `${storyboard.estimated_frames} frames`,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ");
+
+                                return (
+                                  <button
+                                    key={storyboard.shared_relative_path}
+                                    type="button"
+                                    className={`reference-media-storyboard-chip${latestStoryboard?.shared_relative_path === storyboard.shared_relative_path ? " is-active" : ""}`}
+                                    data-testid="storyboard-gallery-trigger"
+                                    onClick={() => {
+                                      setMediaPreview({
+                                        kind: "image",
+                                        src: url,
+                                        eyebrow: copy.agent.referenceMediaPreviewStoryboard,
+                                        title: storyboard.filename,
+                                        meta: itemMeta,
+                                      });
+                                    }}
+                                  >
+                                    <img className="reference-media-storyboard-thumb" src={url} alt={storyboard.filename} loading="lazy" />
+                                    <span className="reference-media-storyboard-chip-title" title={storyboard.filename}>{storyboard.filename}</span>
+                                    <span className="reference-media-storyboard-chip-meta">{itemMeta}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="empty-side">{copy.agent.referenceMediaEmpty}</p>
+              )}
+            </div>
           </>
         ) : (
           <div className="card context-panel onboarding-panel">
@@ -3357,6 +3712,53 @@ export default function AgentPanel({
               assetName={latestRenderName}
               projectName={activeProject?.filename || null}
             />
+          </div>
+        </div>
+      ) : null}
+
+      {mediaPreview ? (
+        <div
+          className="render-preview-modal-backdrop"
+          data-testid="media-preview-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={mediaPreview.title}
+          onClick={() => setMediaPreview(null)}
+        >
+          <div className="render-preview-modal-shell media-preview-modal-shell" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="render-preview-modal-close icon-button"
+              data-testid="media-preview-modal-close"
+              aria-label={copy.video.close}
+              title={copy.video.close}
+              onClick={() => setMediaPreview(null)}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z" fill="currentColor"/>
+              </svg>
+            </button>
+
+            <div className="media-preview-panel card">
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">{mediaPreview.eyebrow}</span>
+                  <h3>{mediaPreview.title}</h3>
+                  {mediaPreview.meta ? <p className="panel-description media-preview-description">{mediaPreview.meta}</p> : null}
+                </div>
+                <a className="ghost-button btn-sm" href={mediaPreview.src} target="_blank" rel="noreferrer">
+                  {copy.video.open}
+                </a>
+              </div>
+
+              <div className={`media-preview-frame ${mediaPreview.kind === "video" ? "is-video" : "is-image"}`}>
+                {mediaPreview.kind === "video" ? (
+                  <video className="media-preview-video-element" src={mediaPreview.src} controls autoPlay playsInline preload="metadata" />
+                ) : (
+                  <img className="media-preview-image-element" src={mediaPreview.src} alt={mediaPreview.title} />
+                )}
+              </div>
+            </div>
           </div>
         </div>
       ) : null}

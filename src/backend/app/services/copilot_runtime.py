@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -41,6 +43,13 @@ _IN_MEMORY_MODEL_CACHE_TTL_SECONDS = 60
 _MONGO_MODEL_CACHE_TTL_SECONDS = 600
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_INLINE_ATTACHMENT_DIRECTORY = Path("_inline-images")
+_INLINE_ATTACHMENT_SUFFIXES = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 
 def _utcnow() -> datetime:
@@ -114,10 +123,59 @@ class TurnCancelledError(Exception):
     """Raised when a user manually stops an in-flight Copilot turn."""
 
 
+def _inline_attachment_file_name(display_name: str, mime_type: str, payload: bytes) -> str:
+    raw_name = Path(display_name).name if display_name else ""
+    fallback_stem = f"image-{hashlib.sha256(payload).hexdigest()[:12]}"
+    raw_stem = Path(raw_name).stem.strip() if raw_name else ""
+    safe_stem = "".join(char if char.isalnum() or char in {"-", "_", "."} else "-" for char in raw_stem)
+    safe_stem = safe_stem.strip(" .-") or fallback_stem
+
+    raw_suffix = Path(raw_name).suffix.lower() if raw_name else ""
+    fallback_suffix = _INLINE_ATTACHMENT_SUFFIXES.get(mime_type.lower(), ".bin")
+    safe_suffix = raw_suffix if raw_suffix else fallback_suffix
+    if not safe_suffix.startswith("."):
+        safe_suffix = f".{safe_suffix}"
+    return f"{safe_stem}{safe_suffix}"
+
+
+def _inline_attachment_storage_dir(app_session_id: str, storage_root: str) -> Path:
+    return Path(storage_root) / app_session_id / _INLINE_ATTACHMENT_DIRECTORY
+
+
+def _save_inline_attachment(
+    encoded_payload: str,
+    *,
+    mime_type: str,
+    display_name: str,
+    app_session_id: str,
+    storage_root: str,
+) -> tuple[Path, str] | None:
+    try:
+        payload = base64.b64decode(encoded_payload, validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning("Skipping undecodable inline image attachment for session %s", app_session_id)
+        return None
+
+    storage_path = Path(storage_root)
+    storage_dir = _inline_attachment_storage_dir(app_session_id, storage_root)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+
+    file_name = _inline_attachment_file_name(display_name, mime_type, payload)
+    file_path = storage_dir / file_name
+    file_path.write_bytes(payload)
+
+    try:
+        relative_path = file_path.relative_to(storage_path).as_posix()
+    except ValueError:
+        relative_path = file_path.name
+    return file_path, relative_path
+
+
 def _prepare_turn_attachments(
     attachments: list[dict] | None,
     *,
     app_session_id: str | None = None,
+    storage_root: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
     copilot_attachments: list[dict] = []
     persisted_attachments: list[dict] = []
@@ -138,8 +196,6 @@ def _prepare_turn_attachments(
             "data": encoded_payload,
             "mimeType": mime_type,
         }
-        if display_name:
-            copilot_attachment["displayName"] = display_name
         copilot_attachments.append(copilot_attachment)
 
         persisted_attachment = {
@@ -147,6 +203,28 @@ def _prepare_turn_attachments(
             "mime_type": mime_type,
             "data_url": data_url,
         }
+
+        if app_session_id and storage_root:
+            saved_attachment = _save_inline_attachment(
+                encoded_payload,
+                mime_type=mime_type,
+                display_name=display_name,
+                app_session_id=app_session_id,
+                storage_root=storage_root,
+            )
+            if saved_attachment:
+                file_path, relative_path = saved_attachment
+                file_attachment = {
+                    "type": "file",
+                    "path": str(file_path),
+                }
+                if file_path.name:
+                    file_attachment["displayName"] = file_path.name
+                copilot_attachments.append(file_attachment)
+                persisted_attachment["file_path"] = str(file_path)
+                persisted_attachment["shared_relative_path"] = relative_path
+                persisted_attachment["workspace_relative_path"] = relative_path
+
         for key in ("display_name", "width", "height", "size_bytes"):
             value = attachment.get(key)
             if value not in (None, ""):
@@ -157,11 +235,12 @@ def _prepare_turn_attachments(
 
 
 class _RuntimeHandle:
-    def __init__(self, app_session_id: str, client: CopilotClient, session, unsubscribe) -> None:
+    def __init__(self, app_session_id: str, client: CopilotClient, session, unsubscribe, workspace_root: str) -> None:
         self.app_session_id = app_session_id
         self.client = client
         self.session = session
         self.unsubscribe = unsubscribe
+        self.workspace_root = workspace_root
         self.lock = asyncio.Lock()
         self.pending_tasks: set[asyncio.Task] = set()
         self.turn_state: _StreamingTurnState | None = None
@@ -473,12 +552,19 @@ class ShotwrightCopilotRuntimeManager:
     def _system_prompt(self) -> str:
         return (
             "You are Shotwright's After Effects operator. "
-            "Your job is to help the user accomplish creative work by using the provided tools only for concrete runtime actions. "
+            "Your job is to help the user accomplish creative work by using Shotwright's provided tools for concrete runtime actions. "
             "Relevant repository skills loaded from the workspace are part of your operating instructions, not separate tools, and should be applied whenever they match the task. "
             "When the user explicitly mentions a skill or asks about a skill-defined workflow, answer directly from that skill before considering workspace inspection. "
-            "Always inspect the workspace state before taking action when the current container, project, or render state is unclear. "
+            "Inspect the workspace at most once at the start of a normal render workflow unless the session state changes or is genuinely unclear. "
             "Do not claim that an After Effects action happened unless a tool succeeded. "
             "Prefer starting or reusing a container before JSX or render actions. "
+            "For a blank project, prefer create_empty_after_effects_project instead of handwritten boilerplate JSX. "
+            "For user-supplied inline images, prefer inspect_workspace to discover recent image attachments, then use stage_reference_images or create_reference_composition instead of copying files with shell commands. "
+            "For user-supplied reference videos, prefer inspect_workspace to discover uploaded reference_videos, then use generate_storyboard_from_reference_video before creating the AEP composition. "
+            "If you need to inspect a generated storyboard visually, use the available file or image viewing tool on the storyboard path returned by the Shotwright tool. "
+            "Use run_after_effects_jsx only for creative edits that are not already covered by the higher-level Shotwright tools. "
+            "For normal Shotwright creative work, do not use powershell, read_powershell, list_powershell, read_agent, list_agents, task, subagents, or glob unless the user explicitly asks for repository inspection or every relevant higher-level Shotwright tool has already failed to perform the required action. "
+            "Do not override the container image unless the user explicitly asks for a different image. "
             "If the user asks to create a new AEP and no suitable project already exists, create a managed Shotwright project workspace first and save the .aep there before rendering or exporting. "
             "If multiple uploaded projects or AEP files exist and the intended target is ambiguous, ask the user a concise clarification question. "
             "When rendering succeeds, mention the preview stream and export archive when relevant."
@@ -489,8 +575,12 @@ class ShotwrightCopilotRuntimeManager:
             "inspect_workspace",
             "ensure_after_effects_container",
             "create_after_effects_project",
+            "create_empty_after_effects_project",
             "list_uploaded_projects",
             "select_active_project",
+            "generate_storyboard_from_reference_video",
+            "stage_reference_images",
+            "create_reference_composition",
             "run_after_effects_jsx",
             "render_after_effects_project",
             "export_project_archive",
@@ -635,6 +725,35 @@ class ShotwrightCopilotRuntimeManager:
             await publish_session_updated(app_session_id, updated_session)
         return updated_session
 
+    async def reconcile_session_status(self, app_session_id: str, session_doc: dict | None = None) -> dict | None:
+        if session_doc is None:
+            session_doc = await get_session_collection().find_one({"_id": app_session_id})
+        if not session_doc or session_doc.get("status") != "running":
+            return session_doc
+
+        runtime = self._runtimes.get(app_session_id)
+        if runtime and runtime.lock.locked():
+            return session_doc
+
+        turn_state = runtime.turn_state if runtime else None
+        if turn_state and not turn_state.finalized:
+            return session_doc
+
+        error_message = (
+            str(session_doc.get("last_error") or "").strip()
+            or "Shotwright lost the active Copilot turn state. The previous run likely failed or disconnected."
+        )
+
+        if runtime:
+            await self.disconnect_session(app_session_id)
+
+        updated_session = await self._set_session_status(
+            app_session_id,
+            "error",
+            last_error=error_message,
+        )
+        return updated_session or session_doc
+
     async def _build_runtime(self, app_session_id: str) -> _RuntimeHandle:
         session_doc = await get_session_collection().find_one({"_id": app_session_id})
         if not session_doc:
@@ -738,7 +857,13 @@ class ShotwrightCopilotRuntimeManager:
                 )
 
         unsubscribe = session.on(on_event)
-        handle = _RuntimeHandle(app_session_id, client, session, unsubscribe)
+        handle = _RuntimeHandle(
+            app_session_id,
+            client,
+            session,
+            unsubscribe,
+            str(runtime_settings["copilot_workspace_root"]),
+        )
         return handle
 
     async def ensure_runtime(self, app_session_id: str) -> _RuntimeHandle:
@@ -771,6 +896,7 @@ class ShotwrightCopilotRuntimeManager:
             copilot_attachments, persisted_attachments = _prepare_turn_attachments(
                 attachments,
                 app_session_id=app_session_id,
+                storage_root=settings.upload_dir,
             )
             user_metadata = {"turn_id": turn_id, "kind": "user_prompt"}
             if persisted_attachments:
@@ -969,10 +1095,12 @@ class ShotwrightCopilotRuntimeManager:
     async def cancel_turn(self, app_session_id: str) -> bool:
         runtime = self._runtimes.get(app_session_id)
         if not runtime or not runtime.turn_state:
+            await self.reconcile_session_status(app_session_id)
             return False
 
         turn_state = runtime.turn_state
         if turn_state.finalized:
+            await self.reconcile_session_status(app_session_id)
             return False
 
         turn_state.finalized = True

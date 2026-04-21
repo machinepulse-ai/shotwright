@@ -60,6 +60,43 @@ export interface ChatImageAttachment {
   size_bytes?: number | null;
 }
 
+export interface ReferenceVideoInfo {
+  id: string;
+  session_id: string;
+  filename: string;
+  file_path: string;
+  shared_relative_path: string;
+  mime_type?: string | null;
+  size_bytes: number;
+  duration_seconds: number;
+  width?: number | null;
+  height?: number | null;
+  created_at: string;
+}
+
+export interface StoryboardInfo {
+  id: string;
+  session_id: string;
+  filename: string;
+  file_path: string;
+  shared_relative_path: string;
+  mime_type?: string | null;
+  created_at: string;
+  source_video_path: string;
+  source_video_relative_path: string;
+  source_video_filename: string;
+  source_video_duration_seconds: number;
+  clip_start_seconds: number;
+  clip_end_seconds: number;
+  clip_duration_seconds: number;
+  interval_seconds: number;
+  columns: number;
+  rows: number;
+  tile_width: number;
+  estimated_frames: number;
+  ffmpeg_filter: string;
+}
+
 export interface SessionEvent {
   _id: string;
   session_id: string;
@@ -87,6 +124,8 @@ export interface AgentContext {
   session: Session;
   container: Container | null;
   projects: ProjectInfo[];
+  reference_videos: ReferenceVideoInfo[];
+  storyboards: StoryboardInfo[];
   latest_render_path: string | null;
   latest_render_url: string | null;
   latest_stream_url: string | null;

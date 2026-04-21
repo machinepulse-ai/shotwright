@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # --- Docker ---
     docker_host: str = "npipe:////./pipe/docker_engine"
     shotwright_image: str = "shotwright:runtime"
+    container_isolation: str = "process"
     container_network: str = ""
     container_data_root: str = "C:\\data"
     container_payload_mount_source: str = ""
