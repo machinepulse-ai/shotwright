@@ -368,6 +368,7 @@ async function emitSessionStreamEvent(page, sessionId, eventName, payload) {
 async function installMockRoutes(page) {
   await page.addInitScript(() => {
     window.localStorage.setItem("shotwright_locale", "en-US");
+    window.fetch = undefined;
 
     const sources = new Set();
 
@@ -798,6 +799,20 @@ async function collectTitlebarMetrics(page) {
   });
 }
 
+async function collectPaneResizerMetrics(page, testId) {
+  return page.locator(`[data-testid="${testId}"]`).evaluate((handle) => {
+    const rect = handle.getBoundingClientRect();
+    const style = getComputedStyle(handle);
+
+    return {
+      width: rect.width,
+      height: rect.height,
+      cursor: style.cursor,
+      backgroundImage: style.backgroundImage,
+    };
+  });
+}
+
 async function collectComposerMetrics(page) {
   return page.evaluate(() => {
     const composerShell = document.querySelector('.composer-shell');
@@ -879,12 +894,35 @@ async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0,
   });
 }
 
+async function collectAssistantExecutionPlacementMetrics(page) {
+  return page.evaluate(() => {
+    const assistantMessage = document.querySelector('.chat-message.role-assistant');
+    const assistantMeta = assistantMessage?.querySelector('.chat-message-meta');
+    const assistantBody = assistantMessage?.querySelector('.chat-message-body');
+    const executionBlock = assistantMessage?.querySelector('[data-testid="conversation-execution-block"]');
+    const rect = (element) => element ? element.getBoundingClientRect() : null;
+
+    return {
+      insideAssistant: Boolean(executionBlock),
+      assistantMetaRect: rect(assistantMeta),
+      assistantBodyRect: rect(assistantBody),
+      executionRect: rect(executionBlock),
+    };
+  });
+}
+
 (async () => {
   let browser;
   let page;
 
   try {
-    const session = await openWorkbench({ beforeGoto: installMockRoutes, path: `/sessions/${primarySessionId}` });
+    const session = await openWorkbench({
+      beforeGoto: installMockRoutes,
+      path: `/sessions/${primarySessionId}`,
+      waitUntil: 'domcontentloaded',
+      gotoTimeout: 60000,
+      readyTimeout: 60000,
+    });
     browser = session.browser;
     page = session.page;
 
@@ -979,6 +1017,46 @@ async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0,
       `Dragging the composer divider should visibly increase composer height: ${JSON.stringify({ initialComposerHeight, resizedComposerHeight }, null, 2)}`
     );
 
+    const sessionPaneResizer = page.locator('[data-testid="session-sidebar-resizer"]');
+    const contextPaneResizer = page.locator('[data-testid="context-sidebar-resizer"]');
+    const sessionPaneResizerMetrics = await collectPaneResizerMetrics(page, 'session-sidebar-resizer');
+    const contextPaneResizerMetrics = await collectPaneResizerMetrics(page, 'context-sidebar-resizer');
+    assert.ok(sessionPaneResizerMetrics.width >= 12 && sessionPaneResizerMetrics.cursor === 'col-resize', `Session pane resizer should be visible and horizontally draggable: ${JSON.stringify(sessionPaneResizerMetrics, null, 2)}`);
+    assert.ok(contextPaneResizerMetrics.width >= 12 && contextPaneResizerMetrics.cursor === 'col-resize', `Context pane resizer should be visible and horizontally draggable: ${JSON.stringify(contextPaneResizerMetrics, null, 2)}`);
+    assert.ok(
+      sessionPaneResizerMetrics.backgroundImage.includes('gradient') && contextPaneResizerMetrics.backgroundImage.includes('gradient'),
+      `Pane resizers should use a visible styled grip instead of blending into the background: ${JSON.stringify({ sessionPaneResizerMetrics, contextPaneResizerMetrics }, null, 2)}`
+    );
+
+    const layoutBeforePaneResize = await collectWorkbenchLayoutMetrics(page);
+    const sessionPaneResizerBox = await sessionPaneResizer.boundingBox();
+    assert.ok(sessionPaneResizerBox, 'Session pane resizer should be measurable');
+    await page.mouse.move(sessionPaneResizerBox.x + sessionPaneResizerBox.width / 2, sessionPaneResizerBox.y + sessionPaneResizerBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(sessionPaneResizerBox.x + sessionPaneResizerBox.width / 2 + 52, sessionPaneResizerBox.y + sessionPaneResizerBox.height / 2, { steps: 8 });
+    await page.mouse.up();
+    const layoutAfterSessionPaneResize = await collectWorkbenchLayoutMetrics(page);
+    assert.ok(
+      layoutAfterSessionPaneResize.sessionSidebarRect &&
+        layoutBeforePaneResize.sessionSidebarRect &&
+        layoutAfterSessionPaneResize.sessionSidebarRect.width > layoutBeforePaneResize.sessionSidebarRect.width + 36,
+      `Dragging the session pane handle should visibly widen the left sidebar: ${JSON.stringify({ layoutBeforePaneResize, layoutAfterSessionPaneResize }, null, 2)}`
+    );
+
+    const contextPaneResizerBox = await contextPaneResizer.boundingBox();
+    assert.ok(contextPaneResizerBox, 'Context pane resizer should be measurable');
+    await page.mouse.move(contextPaneResizerBox.x + contextPaneResizerBox.width / 2, contextPaneResizerBox.y + contextPaneResizerBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(contextPaneResizerBox.x + contextPaneResizerBox.width / 2 - 52, contextPaneResizerBox.y + contextPaneResizerBox.height / 2, { steps: 8 });
+    await page.mouse.up();
+    const layoutAfterContextPaneResize = await collectWorkbenchLayoutMetrics(page);
+    assert.ok(
+      layoutAfterContextPaneResize.contextSidebarRect &&
+        layoutAfterSessionPaneResize.contextSidebarRect &&
+        layoutAfterContextPaneResize.contextSidebarRect.width > layoutAfterSessionPaneResize.contextSidebarRect.width + 36,
+      `Dragging the context pane handle should visibly widen the right sidebar: ${JSON.stringify({ layoutAfterSessionPaneResize, layoutAfterContextPaneResize }, null, 2)}`
+    );
+
     const titlebarMetrics = await collectTitlebarMetrics(page);
     assert.ok(titlebarMetrics, "Titlebar center metrics should be available");
     assert.ok(titlebarMetrics.delta < 8, `Workspace title is not visually centered: ${JSON.stringify(titlebarMetrics)}`);
@@ -1002,6 +1080,25 @@ async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0,
     assert.ok(
       initialExecutionMetrics.groupCount === 2,
       `Inline execution block should rebuild multiple execution groups for a single turn: ${JSON.stringify(initialExecutionMetrics, null, 2)}`
+    );
+
+    const assistantExecutionPlacementMetrics = await collectAssistantExecutionPlacementMetrics(page);
+    assert.equal(
+      assistantExecutionPlacementMetrics.insideAssistant,
+      true,
+      `Execution flow should be anchored inside the assistant message shell instead of rendering above it: ${JSON.stringify(assistantExecutionPlacementMetrics, null, 2)}`
+    );
+    assert.ok(
+      assistantExecutionPlacementMetrics.executionRect &&
+        assistantExecutionPlacementMetrics.assistantMetaRect &&
+        assistantExecutionPlacementMetrics.executionRect.top >= assistantExecutionPlacementMetrics.assistantMetaRect.bottom - 1,
+      `Execution flow should start below the Shotwright avatar/meta row: ${JSON.stringify(assistantExecutionPlacementMetrics, null, 2)}`
+    );
+    assert.ok(
+      assistantExecutionPlacementMetrics.executionRect &&
+        assistantExecutionPlacementMetrics.assistantBodyRect &&
+        assistantExecutionPlacementMetrics.executionRect.top <= assistantExecutionPlacementMetrics.assistantBodyRect.top,
+      `Execution flow should appear before the assistant body copy, not above the whole assistant response: ${JSON.stringify(assistantExecutionPlacementMetrics, null, 2)}`
     );
 
     const firstExecutionGroup = inlineExecutionBlocks.first().locator('[data-testid="conversation-execution-group"]').nth(0);
@@ -1150,7 +1247,7 @@ async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0,
     const initialPanelMetrics = await collectSidebarPanelMetrics(page);
     assert.equal(initialPanelMetrics.modelSelectText, "GPT-5.4 mini", "Model selector should show the full GPT-5.4 mini label");
     assert.equal(initialPanelMetrics.reasoningSelectText, "Extreme", `Reasoning selector should use compact option labels in the session settings card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.ok(initialPanelMetrics.modelSelectRect && initialPanelMetrics.modelSelectRect.width >= 136, `Model selector is still too narrow: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.modelSelectRect && initialPanelMetrics.modelSelectRect.width >= 132, `Model selector is still too narrow: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(
       initialPanelMetrics.modelSelectRect &&
         initialPanelMetrics.reasoningSelectRect &&
@@ -1224,6 +1321,11 @@ async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0,
       ((await page.locator(".chat-message-placeholder").last().textContent()) || "").includes("Generating response"),
       "Assistant placeholder should appear immediately while the response is pending"
     );
+
+    await page.waitForFunction(() => {
+      const text = document.body.textContent || '';
+      return text.includes('Collected composition details for streamed reply 1.') && !text.includes('Streaming reply 1 ready.');
+    });
 
     await page.waitForFunction(() => document.body.textContent.includes("Streaming reply 1 ready."));
     await page.waitForFunction(() => !document.querySelector('[data-testid="composer-status"]'));

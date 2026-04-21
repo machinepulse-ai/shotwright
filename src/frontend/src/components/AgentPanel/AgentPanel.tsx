@@ -77,6 +77,16 @@ const MIN_TRANSCRIPT_HEIGHT = 220;
 const COMPOSER_SPLITTER_HEIGHT = 14;
 const COMPOSER_TEXTAREA_MIN_HEIGHT = 132;
 const COMPOSER_HEIGHT_STORAGE_KEY = "shotwright_composer_height";
+const DEFAULT_SESSION_SIDEBAR_WIDTH = 232;
+const MIN_SESSION_SIDEBAR_WIDTH = 196;
+const MAX_SESSION_SIDEBAR_WIDTH = 360;
+const DEFAULT_CONTEXT_SIDEBAR_WIDTH = 392;
+const MIN_CONTEXT_SIDEBAR_WIDTH = 320;
+const MAX_CONTEXT_SIDEBAR_WIDTH = 520;
+const SIDEBAR_RESIZER_WIDTH = 14;
+const MIN_CHAT_STAGE_WIDTH = 480;
+const SESSION_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_session_sidebar_width";
+const CONTEXT_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_context_sidebar_width";
 
 type TimelineTone = MetaChip["tone"];
 
@@ -157,6 +167,15 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+function readStoredDimension(storageKey: string, fallbackValue: number, min: number, max: number) {
+  if (typeof window === "undefined") {
+    return fallbackValue;
+  }
+
+  const storedValue = Number(window.localStorage.getItem(storageKey));
+  return Number.isFinite(storedValue) ? clamp(storedValue, min, max) : fallbackValue;
+}
+
 function isScrolledNearBottom(element: HTMLElement, threshold = 32) {
   return element.scrollTop + element.clientHeight >= element.scrollHeight - threshold;
 }
@@ -185,6 +204,27 @@ function formatDateTime(value: string | null | undefined, locale: string, fallba
     hour12: false,
     timeZone: getPreferredTimeZone(locale),
   }).format(date);
+}
+
+function renderExecutionMarker(tone: TimelineTone, variant: "group" | "step") {
+  return (
+    <span className={`chat-execution-status-icon ${variant === "group" ? "is-group" : "is-step"} tone-${tone}`} aria-hidden="true">
+      <svg viewBox="0 0 16 16" focusable="false">
+        {tone === "success" ? (
+          <path d="M4.2 8.15 6.8 10.8 11.8 5.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        ) : tone === "danger" ? (
+          <path d="M5.2 5.2 10.8 10.8M10.8 5.2 5.2 10.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        ) : tone === "accent" ? (
+          <>
+            <circle cx="8" cy="8" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.8" opacity="0.9" />
+            <path d="M8 5.4v2.9l2.1 1.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </>
+        ) : (
+          <circle cx="8" cy="8" r="2.25" fill="currentColor" />
+        )}
+      </svg>
+    </span>
+  );
 }
 
 function formatClockTime(value: string | null | undefined, locale: string, fallback: string) {
@@ -1251,9 +1291,7 @@ function shouldRenderInlineExecutionEvent(event: SessionEvent) {
   return false;
 }
 
-function buildTranscriptEntries(messages: ChatMessage[], events: SessionEvent[]): TranscriptEntry[] {
-  const entries: TranscriptEntry[] = [];
-  const emittedTurns = new Set<string>();
+function buildExecutionEventsByTurn(events: SessionEvent[]) {
   const eventsByTurn = new Map<string, SessionEvent[]>();
 
   for (const event of events) {
@@ -1265,23 +1303,24 @@ function buildTranscriptEntries(messages: ChatMessage[], events: SessionEvent[])
     eventsByTurn.set(turnId, turnEvents);
   }
 
+  return eventsByTurn;
+}
+
+function buildTranscriptEntries(messages: ChatMessage[], eventsByTurn: Map<string, SessionEvent[]>): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = [];
+  const assistantTurnIds = new Set(
+    messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => getMessageTurnId(message))
+      .filter((turnId): turnId is string => Boolean(turnId)),
+  );
+
   for (const message of messages) {
     entries.push({ kind: "message", key: `message-${message._id}`, message });
-
-    if (message.role !== "user") continue;
-
-    const turnId = getMessageTurnId(message);
-    if (!turnId || emittedTurns.has(turnId)) continue;
-
-    const turnEvents = eventsByTurn.get(turnId);
-    if (!turnEvents?.length) continue;
-
-    entries.push({ kind: "execution", key: `execution-${turnId}`, turnId, events: turnEvents });
-    emittedTurns.add(turnId);
   }
 
   for (const [turnId, turnEvents] of eventsByTurn) {
-    if (emittedTurns.has(turnId)) continue;
+    if (assistantTurnIds.has(turnId)) continue;
     entries.push({ kind: "execution", key: `execution-${turnId}`, turnId, events: turnEvents });
   }
 
@@ -1400,6 +1439,22 @@ export default function AgentPanel({
       ? clamp(storedValue, MIN_COMPOSER_HEIGHT, 420)
       : DEFAULT_COMPOSER_HEIGHT;
   });
+  const [sessionSidebarWidth, setSessionSidebarWidth] = useState(() =>
+    readStoredDimension(
+      SESSION_SIDEBAR_WIDTH_STORAGE_KEY,
+      DEFAULT_SESSION_SIDEBAR_WIDTH,
+      MIN_SESSION_SIDEBAR_WIDTH,
+      MAX_SESSION_SIDEBAR_WIDTH,
+    ),
+  );
+  const [contextSidebarWidth, setContextSidebarWidth] = useState(() =>
+    readStoredDimension(
+      CONTEXT_SIDEBAR_WIDTH_STORAGE_KEY,
+      DEFAULT_CONTEXT_SIDEBAR_WIDTH,
+      MIN_CONTEXT_SIDEBAR_WIDTH,
+      MAX_CONTEXT_SIDEBAR_WIDTH,
+    ),
+  );
   const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
@@ -1414,6 +1469,8 @@ export default function AgentPanel({
   const [draftSessionName, setDraftSessionName] = useState("");
   const [savingSessionName, setSavingSessionName] = useState(false);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const workbenchRef = useRef<HTMLDivElement | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerCardRef = useRef<HTMLDivElement | null>(null);
@@ -1422,6 +1479,7 @@ export default function AgentPanel({
   const chatStageBodyRef = useRef<HTMLDivElement | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const streamRef = useRef<AgentSessionStreamConnection | null>(null);
+  const shouldFollowTranscriptRef = useRef(true);
   const sessionStatusLabels = copy.status.session;
   const projectStatusLabels = copy.status.project;
   const containerStatusLabels = copy.status.container;
@@ -1450,6 +1508,8 @@ export default function AgentPanel({
     }),
     [events]
   );
+
+  const executionEventsByTurn = useMemo(() => buildExecutionEventsByTurn(sortedEvents), [sortedEvents]);
 
   const activeProject = useMemo(() => {
     if (!context?.projects.length || !context?.session.active_project_id) return null;
@@ -1500,8 +1560,8 @@ export default function AgentPanel({
   }, [visibleMessages]);
 
   const transcriptEntries = useMemo(
-    () => buildTranscriptEntries(visibleMessages, sortedEvents),
-    [sortedEvents, visibleMessages]
+    () => buildTranscriptEntries(visibleMessages, executionEventsByTurn),
+    [executionEventsByTurn, visibleMessages]
   );
 
   const lastVisibleMessageContent = visibleMessages.length ? visibleMessages[visibleMessages.length - 1].content : "";
@@ -1775,8 +1835,25 @@ export default function AgentPanel({
   useEffect(() => {
     if (!visibleMessages.length) return;
 
+    if (!shouldFollowTranscriptRef.current) return;
+
     messageEndRef.current?.scrollIntoView({ block: "end" });
-  }, [visibleMessages.length, lastVisibleMessageContent]);
+  }, [currentSession?._id, lastVisibleMessageContent, transcriptEntries.length, visibleMessages.length, sortedEvents.length]);
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+
+    const handleTranscriptScroll = () => {
+      shouldFollowTranscriptRef.current = isScrolledNearBottom(transcript, 72);
+    };
+
+    shouldFollowTranscriptRef.current = true;
+    handleTranscriptScroll();
+    transcript.addEventListener("scroll", handleTranscriptScroll);
+
+    return () => transcript.removeEventListener("scroll", handleTranscriptScroll);
+  }, [currentSession?._id]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1794,15 +1871,59 @@ export default function AgentPanel({
   }, [composerHeight]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(SESSION_SIDEBAR_WIDTH_STORAGE_KEY, String(sessionSidebarWidth));
+  }, [sessionSidebarWidth]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CONTEXT_SIDEBAR_WIDTH_STORAGE_KEY, String(contextSidebarWidth));
+  }, [contextSidebarWidth]);
+
+  const getMaxSessionSidebarWidth = () => {
+    const workbench = workbenchRef.current;
+    if (!workbench) return MAX_SESSION_SIDEBAR_WIDTH;
+
+    const oppositeWidth = isContextSidebarCollapsed ? 0 : contextSidebarWidth + SIDEBAR_RESIZER_WIDTH;
+    return Math.max(
+      MIN_SESSION_SIDEBAR_WIDTH,
+      Math.min(
+        MAX_SESSION_SIDEBAR_WIDTH,
+        workbench.clientWidth - oppositeWidth - SIDEBAR_RESIZER_WIDTH - MIN_CHAT_STAGE_WIDTH,
+      ),
+    );
+  };
+
+  const getMaxContextSidebarWidth = () => {
+    const workbench = workbenchRef.current;
+    if (!workbench) return MAX_CONTEXT_SIDEBAR_WIDTH;
+
+    const oppositeWidth = isSessionSidebarCollapsed ? 0 : sessionSidebarWidth + SIDEBAR_RESIZER_WIDTH;
+    return Math.max(
+      MIN_CONTEXT_SIDEBAR_WIDTH,
+      Math.min(
+        MAX_CONTEXT_SIDEBAR_WIDTH,
+        workbench.clientWidth - oppositeWidth - SIDEBAR_RESIZER_WIDTH - MIN_CHAT_STAGE_WIDTH,
+      ),
+    );
+  };
+
+  const clampSidebarWidths = () => {
+    setSessionSidebarWidth((previous) => clamp(previous, MIN_SESSION_SIDEBAR_WIDTH, getMaxSessionSidebarWidth()));
+    setContextSidebarWidth((previous) => clamp(previous, MIN_CONTEXT_SIDEBAR_WIDTH, getMaxContextSidebarWidth()));
+  };
+
+  useEffect(() => {
     clampComposerHeight();
 
     const handleResize = () => {
       clampComposerHeight();
+      clampSidebarWidths();
       resizeComposerTextarea();
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  }, [contextSidebarWidth, isContextSidebarCollapsed, isSessionSidebarCollapsed, sessionSidebarWidth]);
 
   useEffect(() => {
     setOptimisticTurn((previous) => {
@@ -1868,6 +1989,22 @@ export default function AgentPanel({
       stream.close();
     };
   }, [currentSession?._id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!currentSession || sessionStatus !== "running") return;
+
+    const sessionId = currentSession._id;
+    const intervalId = window.setInterval(() => {
+      if (activeSessionIdRef.current !== sessionId) return;
+
+      void loadCurrentSession(sessionId).catch((err) => {
+        setPanelError(buildUiError(err, "failedLoadSessionData"));
+      });
+    }, 1200);
+
+    return () => window.clearInterval(intervalId);
+  }, [currentSession, sessionStatus]);
 
   const createNewSession = async () => {
     try {
@@ -2095,9 +2232,81 @@ export default function AgentPanel({
     window.addEventListener("pointerup", handlePointerUp);
   };
 
+  const handleSessionSidebarResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isSessionSidebarCollapsed) return;
+
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    const startWidth = sessionSidebarWidth;
+    const startX = event.clientX;
+
+    handle.setPointerCapture(pointerId);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = clamp(
+        startWidth + (moveEvent.clientX - startX),
+        MIN_SESSION_SIDEBAR_WIDTH,
+        getMaxSessionSidebarWidth(),
+      );
+      setSessionSidebarWidth(nextWidth);
+    };
+
+    const handlePointerUp = () => {
+      if (handle.hasPointerCapture(pointerId)) {
+        handle.releasePointerCapture(pointerId);
+      }
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  };
+
+  const handleContextSidebarResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isContextSidebarCollapsed) return;
+
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    const startWidth = contextSidebarWidth;
+    const startX = event.clientX;
+
+    handle.setPointerCapture(pointerId);
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      const nextWidth = clamp(
+        startWidth - (moveEvent.clientX - startX),
+        MIN_CONTEXT_SIDEBAR_WIDTH,
+        getMaxContextSidebarWidth(),
+      );
+      setContextSidebarWidth(nextWidth);
+    };
+
+    const handlePointerUp = () => {
+      if (handle.hasPointerCapture(pointerId)) {
+        handle.releasePointerCapture(pointerId);
+      }
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  };
+
   const composerLayoutStyle = useMemo(
     () => ({ "--composer-height": `${composerHeight}px` } as CSSProperties),
     [composerHeight],
+  );
+  const workbenchLayoutStyle = useMemo(
+    () =>
+      ({
+        "--session-sidebar-width": `${sessionSidebarWidth}px`,
+        "--context-sidebar-width": `${contextSidebarWidth}px`,
+      } as CSSProperties),
+    [contextSidebarWidth, sessionSidebarWidth],
   );
   const handleModelChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextModel = event.target.value;
@@ -2198,8 +2407,156 @@ export default function AgentPanel({
     }
   };
 
+  const renderExecutionBlock = (key: string, turnEvents: SessionEvent[], options?: { inlineAssistant?: boolean }) => {
+    const executionGroups = buildExecutionGroups(turnEvents, locale, copy);
+
+    if (!executionGroups.length) {
+      return null;
+    }
+
+    return (
+      <section
+        key={key}
+        className={`chat-execution-block${options?.inlineAssistant ? " is-inline-assistant" : ""}`}
+        data-testid="conversation-execution-block"
+      >
+        {executionGroups.map((group) => {
+          const groupPresentation = group.timelinePresentation;
+          const hasGroupDetails = Boolean(
+            groupPresentation &&
+            (groupPresentation.fields.length || groupPresentation.blocks.length || groupPresentation.rawPayload)
+          );
+
+          return (
+            <details
+              key={group.key}
+              className={`chat-execution-group vscode-chat-tool-call tone-${group.tone}`}
+              data-testid="conversation-execution-group"
+            >
+              <summary
+                className="chat-execution-summary vscode-chat-tool-call-header"
+                data-testid="conversation-execution-toggle"
+              >
+                <span className="chat-execution-summary-chevron" aria-hidden="true" />
+                {renderExecutionMarker(group.tone, "group")}
+                <span className="chat-execution-summary-text">{group.title}</span>
+                {group.preview ? <span className="chat-execution-summary-preview">{group.preview}</span> : null}
+              </summary>
+
+              <div className="chat-execution-card vscode-chat-tool-call-body">
+                <div className="chat-execution-card-header">
+                  <div className="chat-execution-card-meta">
+                    <span className={`chat-execution-pill tone-${group.tone}`}>{group.statusLabel}</span>
+                    <span className="chat-execution-pill tone-neutral">{group.stepCountLabel}</span>
+                  </div>
+                </div>
+
+                {hasGroupDetails ? (
+                  <div className="chat-execution-group-details" data-testid="conversation-execution-group-details">
+                    {groupPresentation?.fields.length ? (
+                      <dl className="timeline-detail-grid">
+                        {groupPresentation.fields.map((field) => (
+                          <div key={`${group.key}-${field.label}-${field.value}`} className="timeline-detail-row">
+                            <dt>{field.label}</dt>
+                            <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ) : null}
+
+                    {groupPresentation?.blocks.map((block) => (
+                      <div key={`${group.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
+                        <div className="timeline-detail-block-label">{block.label}</div>
+                        {block.kind === "text" ? (
+                          <p className="timeline-detail-block-text">{block.value}</p>
+                        ) : (
+                          <pre className="timeline-event-data">{block.value}</pre>
+                        )}
+                      </div>
+                    ))}
+
+                    {groupPresentation?.rawPayload ? (
+                      <details className="timeline-raw-details">
+                        <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
+                        <pre className="timeline-event-data">{groupPresentation.rawPayload}</pre>
+                      </details>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                <div className="chat-execution-steps">
+                  {group.steps.map((step) => {
+                    const timelinePresentation = step.timelinePresentation;
+                    const hasExecutionDetails = Boolean(
+                      timelinePresentation.fields.length || timelinePresentation.blocks.length || timelinePresentation.rawPayload
+                    );
+
+                    return (
+                      <details
+                        key={step.key}
+                        className={`chat-execution-step tone-${step.tone}`}
+                        data-testid="conversation-execution-step"
+                      >
+                        <summary className="chat-execution-step-toggle" data-testid="conversation-execution-step-toggle">
+                          <span className="chat-execution-step-chevron" aria-hidden="true" />
+                          {renderExecutionMarker(step.tone, "step")}
+                          <div className="chat-execution-step-copy">
+                            <div className="chat-execution-step-title-row">
+                              <span className="chat-execution-step-title">{step.title}</span>
+                              <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
+                            </div>
+                            {step.preview && step.preview !== step.title ? (
+                              <p className="chat-execution-step-summary">{step.preview}</p>
+                            ) : null}
+                          </div>
+                        </summary>
+
+                        {hasExecutionDetails ? (
+                          <div className="chat-execution-step-body" data-testid="conversation-execution-step-details">
+                            {timelinePresentation.fields.length ? (
+                              <dl className="timeline-detail-grid">
+                                {timelinePresentation.fields.map((field) => (
+                                  <div key={`${step.key}-${field.label}-${field.value}`} className="timeline-detail-row">
+                                    <dt>{field.label}</dt>
+                                    <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            ) : null}
+
+                            {timelinePresentation.blocks.map((block) => (
+                              <div key={`${step.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
+                                <div className="timeline-detail-block-label">{block.label}</div>
+                                {block.kind === "text" ? (
+                                  <p className="timeline-detail-block-text">{block.value}</p>
+                                ) : (
+                                  <pre className="timeline-event-data">{block.value}</pre>
+                                )}
+                              </div>
+                            ))}
+
+                            {timelinePresentation.rawPayload ? (
+                              <details className="timeline-raw-details">
+                                <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
+                                <pre className="timeline-event-data">{timelinePresentation.rawPayload}</pre>
+                              </details>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </details>
+                    );
+                  })}
+                </div>
+              </div>
+            </details>
+          );
+        })}
+      </section>
+    );
+  };
+
   return (
-    <div className="agent-workbench">
+    <div className="agent-workbench" ref={workbenchRef} style={workbenchLayoutStyle}>
       <aside
         className="secondary-sidebar"
         data-testid="session-list-sidebar"
@@ -2255,6 +2612,20 @@ export default function AgentPanel({
           </ul>
         </div>
       </aside>
+
+      {!isSessionSidebarCollapsed ? (
+        <div
+          className="pane-resizer pane-resizer-session"
+          data-testid="session-sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={copy.agent.resizeSessions}
+          aria-valuemin={MIN_SESSION_SIDEBAR_WIDTH}
+          aria-valuemax={getMaxSessionSidebarWidth()}
+          aria-valuenow={sessionSidebarWidth}
+          onPointerDown={handleSessionSidebarResizeStart}
+        />
+      ) : null}
 
       <section className="chat-stage" data-testid="chat-stage">
         <header className="chat-stage-header">
@@ -2332,7 +2703,7 @@ export default function AgentPanel({
         </div>
 
         <div className="chat-stage-body" ref={chatStageBodyRef} style={composerLayoutStyle}>
-          <div className="chat-transcript">
+          <div className="chat-transcript" ref={transcriptRef}>
             {panelErrorMessage && <div className="notice-banner transcript-notice">{panelErrorMessage}</div>}
             {currentSession ? (
               transcriptEntries.length ? (
@@ -2343,6 +2714,9 @@ export default function AgentPanel({
                     const hasContent = hasRenderableMessageContent(message);
                     const messageImageAttachments = getMessageImageAttachments(message);
                     const hasRenderableBody = hasContent || messageImageAttachments.length > 0;
+                    const messageTurnId = getMessageTurnId(message);
+                    const inlineExecutionEvents =
+                      message.role === "assistant" && messageTurnId ? executionEventsByTurn.get(messageTurnId) ?? [] : [];
                     const roleLabel = message.role === "user" ? copy.agent.you : copy.agent.assistant;
                     const avatarLabel = message.role === "user" ? roleLabel.charAt(0).toUpperCase() : "SW";
 
@@ -2358,6 +2732,9 @@ export default function AgentPanel({
                               <span className="chat-message-author">{roleLabel}</span>
                               <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
                             </div>
+
+                            {inlineExecutionEvents.length ? renderExecutionBlock(`execution-${messageTurnId}`, inlineExecutionEvents, { inlineAssistant: true }) : null}
+
                             <div className={`chat-message-body markdown-content${streaming ? " streaming" : ""}`} aria-live={streaming ? "polite" : undefined}>
                               {hasContent ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : null}
 
@@ -2407,147 +2784,7 @@ export default function AgentPanel({
                     );
                   }
 
-                  const executionGroups = buildExecutionGroups(entry.events, locale, copy);
-
-                  if (!executionGroups.length) {
-                    return null;
-                  }
-
-                  return (
-                    <section key={entry.key} className="chat-execution-block" data-testid="conversation-execution-block">
-                      {executionGroups.map((group) => {
-                        const groupPresentation = group.timelinePresentation;
-                        const hasGroupDetails = Boolean(
-                          groupPresentation &&
-                          (groupPresentation.fields.length || groupPresentation.blocks.length || groupPresentation.rawPayload)
-                        );
-
-                        return (
-                          <details
-                            key={group.key}
-                            className={`chat-execution-group vscode-chat-tool-call tone-${group.tone}`}
-                            data-testid="conversation-execution-group"
-                          >
-                            <summary
-                              className="chat-execution-summary vscode-chat-tool-call-header"
-                              data-testid="conversation-execution-toggle"
-                            >
-                              <span className="chat-execution-summary-chevron" aria-hidden="true" />
-                              <span className={`chat-execution-summary-marker tone-${group.tone}`} aria-hidden="true" />
-                              <span className="chat-execution-summary-text">{group.title}</span>
-                              {group.preview ? <span className="chat-execution-summary-preview">{group.preview}</span> : null}
-                            </summary>
-
-                            <div className="chat-execution-card vscode-chat-tool-call-body">
-                              <div className="chat-execution-card-header">
-                                <div className="chat-execution-card-meta">
-                                  <span className={`chat-execution-pill tone-${group.tone}`}>{group.statusLabel}</span>
-                                  <span className="chat-execution-pill tone-neutral">{group.stepCountLabel}</span>
-                                </div>
-                              </div>
-
-                              {hasGroupDetails ? (
-                                <div className="chat-execution-group-details" data-testid="conversation-execution-group-details">
-                                  {groupPresentation?.fields.length ? (
-                                    <dl className="timeline-detail-grid">
-                                      {groupPresentation.fields.map((field) => (
-                                        <div key={`${group.key}-${field.label}-${field.value}`} className="timeline-detail-row">
-                                          <dt>{field.label}</dt>
-                                          <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
-                                        </div>
-                                      ))}
-                                    </dl>
-                                  ) : null}
-
-                                  {groupPresentation?.blocks.map((block) => (
-                                    <div key={`${group.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
-                                      <div className="timeline-detail-block-label">{block.label}</div>
-                                      {block.kind === "text" ? (
-                                        <p className="timeline-detail-block-text">{block.value}</p>
-                                      ) : (
-                                        <pre className="timeline-event-data">{block.value}</pre>
-                                      )}
-                                    </div>
-                                  ))}
-
-                                  {groupPresentation?.rawPayload ? (
-                                    <details className="timeline-raw-details">
-                                      <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
-                                      <pre className="timeline-event-data">{groupPresentation.rawPayload}</pre>
-                                    </details>
-                                  ) : null}
-                                </div>
-                              ) : null}
-
-                              <div className="chat-execution-steps">
-                                {group.steps.map((step) => {
-                                  const timelinePresentation = step.timelinePresentation;
-                                  const hasExecutionDetails = Boolean(
-                                    timelinePresentation.fields.length || timelinePresentation.blocks.length || timelinePresentation.rawPayload
-                                  );
-
-                                  return (
-                                    <details
-                                      key={step.key}
-                                      className={`chat-execution-step tone-${step.tone}`}
-                                      data-testid="conversation-execution-step"
-                                    >
-                                      <summary className="chat-execution-step-toggle" data-testid="conversation-execution-step-toggle">
-                                        <span className="chat-execution-step-chevron" aria-hidden="true" />
-                                        <span className={`chat-execution-step-marker tone-${step.tone}`} aria-hidden="true" />
-                                        <div className="chat-execution-step-copy">
-                                          <div className="chat-execution-step-title-row">
-                                            <span className="chat-execution-step-title">{step.title}</span>
-                                            <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
-                                          </div>
-                                          {step.preview && step.preview !== step.title ? (
-                                            <p className="chat-execution-step-summary">{step.preview}</p>
-                                          ) : null}
-                                        </div>
-                                      </summary>
-
-                                      {hasExecutionDetails ? (
-                                        <div className="chat-execution-step-body" data-testid="conversation-execution-step-details">
-                                          {timelinePresentation.fields.length ? (
-                                            <dl className="timeline-detail-grid">
-                                              {timelinePresentation.fields.map((field) => (
-                                                <div key={`${step.key}-${field.label}-${field.value}`} className="timeline-detail-row">
-                                                  <dt>{field.label}</dt>
-                                                  <dd className={`${field.mono ? "is-mono" : ""} tone-${field.tone ?? "neutral"}`}>{field.value}</dd>
-                                                </div>
-                                              ))}
-                                            </dl>
-                                          ) : null}
-
-                                          {timelinePresentation.blocks.map((block) => (
-                                            <div key={`${step.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
-                                              <div className="timeline-detail-block-label">{block.label}</div>
-                                              {block.kind === "text" ? (
-                                                <p className="timeline-detail-block-text">{block.value}</p>
-                                              ) : (
-                                                <pre className="timeline-event-data">{block.value}</pre>
-                                              )}
-                                            </div>
-                                          ))}
-
-                                          {timelinePresentation.rawPayload ? (
-                                            <details className="timeline-raw-details">
-                                              <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
-                                              <pre className="timeline-event-data">{timelinePresentation.rawPayload}</pre>
-                                            </details>
-                                          ) : null}
-                                        </div>
-                                      ) : null}
-                                    </details>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          </details>
-                        );
-                      })}
-                    </section>
-                  );
+                  return renderExecutionBlock(entry.key, entry.events);
                 })
               ) : showStarterCards ? (
                 <div className="chat-welcome">
@@ -2704,6 +2941,20 @@ export default function AgentPanel({
           </div>
         </div>
       </section>
+
+      {!isContextSidebarCollapsed ? (
+        <div
+          className="pane-resizer pane-resizer-context"
+          data-testid="context-sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={copy.agent.resizeDetails}
+          aria-valuemin={MIN_CONTEXT_SIDEBAR_WIDTH}
+          aria-valuemax={getMaxContextSidebarWidth()}
+          aria-valuenow={contextSidebarWidth}
+          onPointerDown={handleContextSidebarResizeStart}
+        />
+      ) : null}
 
       <aside
         className="context-sidebar"
