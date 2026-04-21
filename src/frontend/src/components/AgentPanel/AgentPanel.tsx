@@ -1643,7 +1643,7 @@ export default function AgentPanel({
   const effectiveDraftReasoning = reasoningSupported ? draftReasoning : null;
   const previewVideoSrc = context?.latest_render_url || context?.latest_stream_url || null;
   const previewVideoFormat = context?.latest_render_url ? "mp4" : context?.latest_stream_url ? "hls" : null;
-  const hasRenderPreview = Boolean(previewVideoSrc && previewVideoFormat);
+  const hasRenderPreview = Boolean(context?.latest_render_path && previewVideoSrc && previewVideoFormat);
   const latestRenderName = basename(context?.latest_render_path, copy.common.notGenerated);
   const sessionSettingsDirty = Boolean(currentSession) && (
     draftModel !== (currentSession?.copilot_model ?? "") ||
@@ -2755,9 +2755,6 @@ export default function AgentPanel({
                   >
                     <div className="session-item-top">
                       <div className="session-title-group">
-                        <span className={`session-status-orb status-${session.status}`} aria-hidden="true">
-                          <span className="session-status-core" />
-                        </span>
                         <div className="session-title-copy">
                           <span className="session-name">{session.name}</span>
                           <span className={`session-model-chip ${getSessionModelToneClass(session.copilot_model)}`}>
@@ -3123,13 +3120,6 @@ export default function AgentPanel({
                       <path d="M8 2.25a.75.75 0 0 1 .75.75v4.25H13a.75.75 0 0 1 0 1.5H8.75V13a.75.75 0 0 1-1.5 0V8.75H3a.75.75 0 0 1 0-1.5h4.25V3A.75.75 0 0 1 8 2.25Z" fill="currentColor"/>
                     </svg>
                   </button>
-
-                  <span className="composer-mode-pill" data-testid="composer-mode-pill">
-                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                      <path d="M8.1 1.75a1 1 0 0 1 .82.43l1.4 2a1 1 0 0 0 .68.42l2.39.39a1 1 0 0 1 .55 1.71l-1.72 1.77a1 1 0 0 0-.27.83l.4 2.46a1 1 0 0 1-1.45 1.03L8.6 12.23a1 1 0 0 0-.93 0l-2.3 1.33a1 1 0 0 1-1.45-1.03l.4-2.46a1 1 0 0 0-.27-.83L2.33 6.7a1 1 0 0 1 .55-1.71l2.39-.39a1 1 0 0 0 .68-.42l1.4-2a1 1 0 0 1 .75-.43Z" fill="currentColor"/>
-                    </svg>
-                    <span>{copy.app.agent}</span>
-                  </span>
 
                   {composerSessionSettings}
                 </div>

@@ -755,6 +755,7 @@ async function collectSessionWorkbenchPanelMetrics(page) {
     const sidebar = document.querySelector('[data-testid="session-context-sidebar"]');
     const overview = sidebar?.querySelector('.session-overview-panel');
     const overviewGrid = sidebar?.querySelector('[data-testid="session-overview-grid"]');
+    const containerPanel = sidebar?.querySelector('.container-manager');
     const resources = sidebar?.querySelector('.resources-panel');
     const previewPanel = document.querySelector('[data-testid="render-preview-panel"]');
     const previewTrigger = document.querySelector('[data-testid="render-preview-trigger"]');
@@ -772,8 +773,11 @@ async function collectSessionWorkbenchPanelMetrics(page) {
     return {
       overviewRect: rect(overview),
       overviewGridRect: rect(overviewGrid),
+      containerPanelRect: rect(containerPanel),
+      containerPanelFlexShrink: containerPanel ? getComputedStyle(containerPanel).flexShrink : null,
       resourcesRect: rect(resources),
       previewPanelRect: rect(previewPanel),
+      previewPanelFlexShrink: previewPanel ? getComputedStyle(previewPanel).flexShrink : null,
       previewTriggerRect: rect(previewTrigger),
       composerShellRect: rect(composerShell),
       composerCardRect: rect(composerCard),
@@ -1067,6 +1071,7 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       composerMetrics.composerHeight !== null && composerMetrics.composerHeight <= 196,
       `Composer should stay compact by default instead of consuming a tall footer block: ${JSON.stringify(composerMetrics, null, 2)}`
     );
+    assert.equal(await page.locator('[data-testid="composer-mode-pill"]').count(), 0, 'Composer should not render the extra Agent mode pill');
     assert.ok(await page.locator('.chat-avatar-assistant').count(), 'Assistant messages should render a Shotwright avatar');
     assert.ok(await page.locator('.chat-avatar-user').count(), 'User messages should render a user avatar');
 
@@ -1388,6 +1393,10 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.equal(initialPanelMetrics.resourcesEmptyText, "No project files have been uploaded yet.", "Resources empty state should stay visible");
     assert.ok(initialPanelMetrics.overviewGridRect, `Session overview should use the new compact summary grid: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(initialPanelMetrics.previewPanelRect && initialPanelMetrics.previewTriggerRect, `Render preview summary should expose a trigger instead of a fixed inline player: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.previewPanelFlexShrink, '0', `Render preview card should not collapse under sidebar pressure: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    if (initialPanelMetrics.containerPanelRect) {
+      assert.equal(initialPanelMetrics.containerPanelFlexShrink, '0', `Container card should not shrink away when the sidebar fills up: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    }
     assert.ok(initialPanelMetrics.overviewRect && initialPanelMetrics.overviewRect.height <= 460, `Overview panel should stay concise instead of expanding into a long fact sheet: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
 
     await modelSelect.selectOption("gpt-4.1");
@@ -1508,6 +1517,8 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     await page.waitForFunction((sessionId) => window.location.pathname === `/sessions/${sessionId}`, secondarySessionId);
     assert.equal(await page.evaluate(() => window.location.pathname), `/sessions/${secondarySessionId}`);
     assert.equal((await page.locator(".chat-stage-header h1").textContent())?.trim(), "Direct Link Target");
+    assert.equal(await page.locator('[data-testid="render-preview-panel"]').count(), 0, 'Sessions without a render result should not show the render preview card');
+    assert.equal(await page.locator('[data-testid="render-preview-modal"]').count(), 0, 'Preview modal should stay absent when no render exists');
 
     const starterCardMetrics = await collectStarterCardMetrics(page);
     assert.equal(starterCardMetrics.length, 3, "Starter prompt cards should render in the empty-session welcome state");

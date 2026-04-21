@@ -214,7 +214,7 @@
 
 .session-title-group {
   align-items: flex-start;
-  gap: 0.5rem;
+  gap: 0;
   min-width: 0;
 }
 
@@ -222,45 +222,6 @@
   flex-direction: column;
   gap: 3px;
   min-width: 0;
-}
-
-.session-status-orb {
-  width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  position: relative;
-  flex: none;
-  margin-top: 0.14rem;
-  box-shadow: inset 0 0 0 1px rgba(31, 35, 40, 0.08);
-}
-
-.session-status-orb .session-status-core {
-  position: absolute;
-  inset: 3.5px;
-  border-radius: inherit;
-  background: currentColor;
-}
-
-.session-status-orb.status-idle,
-.session-status-orb.status-closed {
-  color: var(--text-secondary);
-  background: rgba(87, 96, 106, 0.12);
-}
-
-.session-status-orb.status-running,
-.session-status-orb.status-active {
-  color: var(--success);
-  background: rgba(26, 127, 55, 0.14);
-}
-
-.session-status-orb.status-awaiting_input {
-  color: var(--warning);
-  background: rgba(191, 135, 0, 0.14);
-}
-
-.session-status-orb.status-error {
-  color: var(--danger);
-  background: rgba(207, 34, 46, 0.14);
 }
 
 .session-name {
@@ -1575,7 +1536,6 @@
 }
 
 .composer-tool-button,
-.composer-mode-pill,
 .composer-settings-save {
   flex: none;
 }
@@ -1599,29 +1559,10 @@
 
 .composer-tool-button svg,
 .composer-settings-save svg,
-.composer-mode-pill svg,
 .send-button svg {
   width: 14px;
   height: 14px;
   display: block;
-}
-
-.composer-mode-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(31, 35, 40, 0.08);
-  background: rgba(246, 248, 250, 0.96);
-  color: var(--text);
-  font-size: 0.76rem;
-  font-weight: 600;
-}
-
-.composer-mode-pill svg {
-  color: var(--primary);
 }
 
 .composer-actions {
@@ -2026,6 +1967,7 @@
 .render-preview-panel {
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
   gap: 10px;
 }
 
