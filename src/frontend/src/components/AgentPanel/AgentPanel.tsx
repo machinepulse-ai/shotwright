@@ -100,7 +100,7 @@ type TimelineDetailField = {
 type TimelineDetailBlock = {
   label: string;
   value: string;
-  kind: "text" | "code" | "error";
+  kind: "markdown" | "code" | "error";
 };
 
 type TimelinePresentation = {
@@ -108,7 +108,6 @@ type TimelinePresentation = {
   stage: string;
   fields: TimelineDetailField[];
   blocks: TimelineDetailBlock[];
-  rawPayload: string | null;
 };
 
 type ExecutionStepPresentation = {
@@ -518,6 +517,79 @@ function formatEventBlockValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function formatTimelineMarkdownFieldLabel(value: string) {
+  return value
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function unwrapTimelineMarkdownValue(value: unknown): unknown {
+  const compactValue = compactEventPayload(value);
+  if (!compactValue || typeof compactValue !== "object" || Array.isArray(compactValue)) {
+    return compactValue;
+  }
+
+  const record = compactValue as Record<string, unknown>;
+  const meaningfulEntries = Object.entries(record).filter(([, entry]) => compactEventPayload(entry) !== null);
+  const wrapperKeys = new Set(["content", "detailed_content", "contents", "kind"]);
+  const nonWrapperEntries = meaningfulEntries.filter(([key]) => !wrapperKeys.has(key));
+
+  if (!nonWrapperEntries.length) {
+    return unwrapTimelineMarkdownValue(record.detailed_content ?? record.content ?? record.contents ?? compactValue);
+  }
+
+  return compactValue;
+}
+
+function buildTimelineMarkdownLines(value: unknown, depth = 0): string[] {
+  const unwrappedValue = unwrapTimelineMarkdownValue(value);
+  if (unwrappedValue == null) {
+    return [];
+  }
+
+  const indent = "  ".repeat(depth);
+
+  if (typeof unwrappedValue === "string") {
+    return unwrappedValue
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => `${indent}${line}`);
+  }
+
+  if (typeof unwrappedValue === "number" || typeof unwrappedValue === "boolean") {
+    return [`${indent}${String(unwrappedValue)}`];
+  }
+
+  if (Array.isArray(unwrappedValue)) {
+    return unwrappedValue.flatMap((entry) => {
+      const childLines = buildTimelineMarkdownLines(entry, depth + 1);
+      if (!childLines.length) return [];
+      const [firstLine, ...restLines] = childLines;
+      return [`${indent}- ${firstLine.trimStart()}`, ...restLines.map((line) => `${indent}  ${line.trimStart()}`)];
+    });
+  }
+
+  const record = unwrappedValue as Record<string, unknown>;
+  return Object.entries(record).flatMap(([key, entry]) => {
+    const childLines = buildTimelineMarkdownLines(entry, depth + 1);
+    if (!childLines.length) return [];
+
+    const label = formatTimelineMarkdownFieldLabel(key);
+    if (childLines.length === 1 && !childLines[0].trimStart().startsWith("- ")) {
+      return [`${indent}- **${label}**: ${childLines[0].trim()}`];
+    }
+
+    return [`${indent}- **${label}**:`, ...childLines.map((line) => `${indent}  ${line.trimStart()}`)];
+  });
+}
+
+function formatEventMarkdownValue(value: unknown): string {
+  return buildTimelineMarkdownLines(value).join("\n").trim();
+}
+
 function formatCommandValue(command: unknown, args: unknown): string {
   const parts = [extractEventText(command)];
 
@@ -669,8 +741,8 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
     });
   };
 
-  const addBlock = (label: string, value: unknown, kind: TimelineDetailBlock["kind"] = "text") => {
-    const formattedValue = formatEventBlockValue(value).trim();
+  const addBlock = (label: string, value: unknown, kind: TimelineDetailBlock["kind"] = "markdown") => {
+    const formattedValue = (kind === "code" ? formatEventBlockValue(value) : formatEventMarkdownValue(value)).trim();
     if (!formattedValue) return;
 
     const key = `${label}:${kind}:${formattedValue}`;
@@ -705,7 +777,7 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
   if (errorText) {
     addBlock(copy.agent.timelineDetails.labels.error, errorText, "error");
   } else if (messageText) {
-    addBlock(copy.agent.timelineDetails.labels.message, messageText, tone === "danger" ? "error" : "text");
+    addBlock(copy.agent.timelineDetails.labels.message, messageText, tone === "danger" ? "error" : "markdown");
   }
 
   const commandValue = formatCommandValue(payload.command, payload.args);
@@ -713,16 +785,16 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
     addBlock(copy.agent.timelineDetails.labels.command, commandValue, "code");
   }
 
-  addBlock(copy.agent.timelineDetails.labels.arguments, payload.arguments, "code");
-  addBlock(copy.agent.timelineDetails.labels.input, payload.input, "code");
-  addBlock(copy.agent.timelineDetails.labels.output, payload.output ?? payload.result, "code");
+  addBlock(copy.agent.timelineDetails.labels.arguments, payload.arguments, "markdown");
+  addBlock(copy.agent.timelineDetails.labels.input, payload.input, "markdown");
+  addBlock(copy.agent.timelineDetails.labels.output, payload.output ?? payload.result, "markdown");
 
   if (typeof payload.content === "string") {
     if (payload.content.length <= 600) {
-      addBlock(copy.agent.timelineDetails.labels.content, payload.content, "code");
+      addBlock(copy.agent.timelineDetails.labels.content, payload.content, "markdown");
     }
   } else {
-    addBlock(copy.agent.timelineDetails.labels.content, payload.content, "code");
+    addBlock(copy.agent.timelineDetails.labels.content, payload.content, "markdown");
   }
 
   return {
@@ -730,7 +802,6 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
     stage: getTimelineEventStage(event, copy),
     fields,
     blocks,
-    rawPayload: Object.keys(payload).length ? JSON.stringify(payload, null, 2) : null,
   };
 }
 
@@ -2422,10 +2493,7 @@ export default function AgentPanel({
       >
         {executionGroups.map((group) => {
           const groupPresentation = group.timelinePresentation;
-          const hasGroupDetails = Boolean(
-            groupPresentation &&
-            (groupPresentation.fields.length || groupPresentation.blocks.length || groupPresentation.rawPayload)
-          );
+          const hasGroupDetails = Boolean(groupPresentation && (groupPresentation.fields.length || groupPresentation.blocks.length));
 
           return (
             <details
@@ -2467,29 +2535,22 @@ export default function AgentPanel({
                     {groupPresentation?.blocks.map((block) => (
                       <div key={`${group.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
                         <div className="timeline-detail-block-label">{block.label}</div>
-                        {block.kind === "text" ? (
-                          <p className="timeline-detail-block-text">{block.value}</p>
-                        ) : (
+                        {block.kind === "code" ? (
                           <pre className="timeline-event-data">{block.value}</pre>
+                        ) : (
+                          <div className={`timeline-detail-block-markdown markdown-content kind-${block.kind}`}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.value}</ReactMarkdown>
+                          </div>
                         )}
                       </div>
                     ))}
-
-                    {groupPresentation?.rawPayload ? (
-                      <details className="timeline-raw-details">
-                        <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
-                        <pre className="timeline-event-data">{groupPresentation.rawPayload}</pre>
-                      </details>
-                    ) : null}
                   </div>
                 ) : null}
 
                 <div className="chat-execution-steps">
                   {group.steps.map((step) => {
                     const timelinePresentation = step.timelinePresentation;
-                    const hasExecutionDetails = Boolean(
-                      timelinePresentation.fields.length || timelinePresentation.blocks.length || timelinePresentation.rawPayload
-                    );
+                    const hasExecutionDetails = Boolean(timelinePresentation.fields.length || timelinePresentation.blocks.length);
 
                     return (
                       <details
@@ -2527,20 +2588,15 @@ export default function AgentPanel({
                             {timelinePresentation.blocks.map((block) => (
                               <div key={`${step.key}-${block.label}-${block.value.slice(0, 48)}`} className={`timeline-detail-block kind-${block.kind}`}>
                                 <div className="timeline-detail-block-label">{block.label}</div>
-                                {block.kind === "text" ? (
-                                  <p className="timeline-detail-block-text">{block.value}</p>
-                                ) : (
+                                {block.kind === "code" ? (
                                   <pre className="timeline-event-data">{block.value}</pre>
+                                ) : (
+                                  <div className={`timeline-detail-block-markdown markdown-content kind-${block.kind}`}>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.value}</ReactMarkdown>
+                                  </div>
                                 )}
                               </div>
                             ))}
-
-                            {timelinePresentation.rawPayload ? (
-                              <details className="timeline-raw-details">
-                                <summary>{copy.agent.timelineDetails.labels.rawData}</summary>
-                                <pre className="timeline-event-data">{timelinePresentation.rawPayload}</pre>
-                              </details>
-                            ) : null}
                           </div>
                         ) : null}
                       </details>
@@ -2554,6 +2610,71 @@ export default function AgentPanel({
       </section>
     );
   };
+
+  const composerSessionSettings = currentSession ? (
+    <div className="session-settings-block composer-session-settings" data-testid="session-settings-card">
+      <div className="composer-session-settings-grid">
+        <label className="settings-field settings-field-model">
+          <span className="settings-label">{copy.agent.sessionSettingsFields.model}</span>
+          <div className={`settings-control-shell${modelOptionsLoading || !sessionModelOptions.length ? " is-disabled" : ""}`}>
+            <select
+              className="settings-select"
+              data-testid="session-model-select"
+              value={draftModel}
+              onChange={handleModelChange}
+              disabled={modelOptionsLoading || !sessionModelOptions.length}
+            >
+              {sessionModelOptions.length ? (
+                sessionModelOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.name}
+                  </option>
+                ))
+              ) : (
+                <option value="">{copy.agent.sessionSettingsNoOptions}</option>
+              )}
+            </select>
+          </div>
+        </label>
+
+        <label className="settings-field settings-field-reasoning">
+          <span className="settings-label">{copy.agent.sessionSettingsFields.reasoning}</span>
+          <div className={`settings-control-shell${!reasoningSupported ? " is-disabled" : ""}`}>
+            <select
+              className="settings-select"
+              data-testid="session-reasoning-select"
+              value={draftReasoning ?? ""}
+              onChange={handleReasoningChange}
+              disabled={!reasoningSupported}
+            >
+              {reasoningSupported ? (
+                selectedReasoningOptions.map((effort) => (
+                  <option key={effort} value={effort}>
+                    {getReasoningSelectLabel(effort, locale, copy)}
+                  </option>
+                ))
+              ) : (
+                <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
+              )}
+            </select>
+          </div>
+        </label>
+
+        <div className="session-settings-actions composer-session-settings-actions">
+          <button
+            className="btn-primary btn-sm"
+            data-testid="session-settings-save"
+            onClick={handleSaveSessionSettings}
+            disabled={savingSessionSettings || !draftModel || !sessionSettingsDirty}
+          >
+            {savingSessionSettings ? copy.common.saving : copy.common.save}
+          </button>
+        </div>
+      </div>
+      {modelOptionsLoading ? <p className="settings-help">{copy.agent.sessionSettingsLoading}</p> : null}
+      {sessionSettingsErrorMessage ? <div className="inline-alert composer-session-settings-alert">{sessionSettingsErrorMessage}</div> : null}
+    </div>
+  ) : null;
 
   return (
     <div className="agent-workbench" ref={workbenchRef} style={workbenchLayoutStyle}>
@@ -2865,6 +2986,8 @@ export default function AgentPanel({
 
             {composerAttachmentError ? <div className="inline-alert composer-alert">{composerAttachmentError}</div> : null}
 
+            {composerSessionSettings}
+
             <div
               ref={composerCardRef}
               className={`composer-card${isDraggingComposer ? " is-dragging" : ""}`}
@@ -2921,11 +3044,13 @@ export default function AgentPanel({
               />
 
               <div ref={composerFooterRef} className="composer-footer">
-                <div className="composer-meta">
-                  <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
-                  <span className="composer-hint">{copy.agent.composerImageHint}</span>
-                  <span className="composer-hint">{copy.agent.composerResizeHint}</span>
-                  <span className="composer-hint">{copy.common.autoRefreshHint}</span>
+                <div className="composer-footer-main">
+                  <div className="composer-meta">
+                    <span className="composer-hint">{copy.common.ctrlEnterHint}</span>
+                    <span className="composer-hint">{copy.agent.composerImageHint}</span>
+                    <span className="composer-hint">{copy.agent.composerResizeHint}</span>
+                    <span className="composer-hint">{copy.common.autoRefreshHint}</span>
+                  </div>
                 </div>
                 <div className="composer-actions">
                   <button
@@ -2971,73 +3096,6 @@ export default function AgentPanel({
                 </div>
               </div>
               <div className="session-overview-scroll">
-                <div className="session-settings-block" data-testid="session-settings-card">
-                  <div className="session-settings-heading">
-                    <div>
-                      <span className="eyebrow">{copy.agent.sessionSettingsEyebrow}</span>
-                      <h4>{copy.agent.sessionSettingsTitle}</h4>
-                    </div>
-                  </div>
-                  <div className="session-settings-grid">
-                    <label className="settings-field settings-field-model">
-                      <span className="settings-label">{copy.agent.sessionSettingsFields.model}</span>
-                      <div className={`settings-control-shell${modelOptionsLoading || !sessionModelOptions.length ? " is-disabled" : ""}`}>
-                        <select
-                          className="settings-select"
-                          data-testid="session-model-select"
-                          value={draftModel}
-                          onChange={handleModelChange}
-                          disabled={modelOptionsLoading || !sessionModelOptions.length}
-                        >
-                          {sessionModelOptions.length ? (
-                            sessionModelOptions.map((option) => (
-                              <option key={option.id} value={option.id}>
-                                {option.name}
-                              </option>
-                            ))
-                          ) : (
-                            <option value="">{copy.agent.sessionSettingsNoOptions}</option>
-                          )}
-                        </select>
-                      </div>
-                    </label>
-
-                    <label className="settings-field settings-field-reasoning">
-                      <span className="settings-label">{copy.agent.sessionSettingsFields.reasoning}</span>
-                      <div className={`settings-control-shell${!reasoningSupported ? " is-disabled" : ""}`}>
-                        <select
-                          className="settings-select"
-                          data-testid="session-reasoning-select"
-                          value={draftReasoning ?? ""}
-                          onChange={handleReasoningChange}
-                          disabled={!reasoningSupported}
-                        >
-                          {reasoningSupported ? (
-                            selectedReasoningOptions.map((effort) => (
-                              <option key={effort} value={effort}>
-                                {getReasoningSelectLabel(effort, locale, copy)}
-                              </option>
-                            ))
-                          ) : (
-                            <option value="">{copy.agent.sessionSettingsReasoningDisabled}</option>
-                          )}
-                        </select>
-                      </div>
-                    </label>
-                  </div>
-                  {modelOptionsLoading ? <p className="settings-help">{copy.agent.sessionSettingsLoading}</p> : null}
-                  {sessionSettingsErrorMessage && <div className="inline-alert">{sessionSettingsErrorMessage}</div>}
-                  <div className="session-settings-actions">
-                    <button
-                      className="btn-primary btn-sm"
-                      data-testid="session-settings-save"
-                      onClick={handleSaveSessionSettings}
-                      disabled={savingSessionSettings || !draftModel || !sessionSettingsDirty}
-                    >
-                      {savingSessionSettings ? copy.common.saving : copy.common.save}
-                    </button>
-                  </div>
-                </div>
                 <dl className="fact-list">
                   <div className="fact-row">
                     <dt>{copy.agent.sessionPanelFields.status}</dt>

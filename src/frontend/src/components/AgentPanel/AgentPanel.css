@@ -47,61 +47,72 @@
   min-width: 0;
 }
 
-.pane-resizer {
+.pane-resizer,
+.composer-resizer {
   position: relative;
-  flex: 0 0 14px;
-  width: 14px;
-  min-width: 14px;
-  cursor: col-resize;
   touch-action: none;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0), rgba(0, 120, 212, 0.05), rgba(255, 255, 255, 0)),
-    linear-gradient(180deg, rgba(246, 248, 250, 0.94), rgba(242, 246, 250, 0.98));
+  background: transparent;
 }
 
-.pane-resizer::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 16px;
-  bottom: 16px;
-  width: 2px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(0, 120, 212, 0.08), rgba(0, 120, 212, 0.3), rgba(0, 120, 212, 0.08));
-  transform: translateX(-50%);
+.pane-resizer {
+  flex: 0 0 12px;
+  width: 12px;
+  min-width: 12px;
+  cursor: col-resize;
 }
 
-.pane-resizer::after {
+.pane-resizer::before,
+.composer-resizer::before {
   content: "";
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 6px;
-  height: 52px;
   border-radius: 999px;
-  background:
-    radial-gradient(circle at 50% 7px, rgba(0, 120, 212, 0.68) 0 2px, transparent 2.6px),
-    radial-gradient(circle at 50% 18px, rgba(0, 120, 212, 0.68) 0 2px, transparent 2.6px),
-    radial-gradient(circle at 50% 29px, rgba(0, 120, 212, 0.68) 0 2px, transparent 2.6px),
-    radial-gradient(circle at 50% 40px, rgba(0, 120, 212, 0.68) 0 2px, transparent 2.6px);
-  transform: translate(-50%, -50%);
-  opacity: 0.72;
+  border: 1px solid rgba(0, 120, 212, 0.16);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(237, 244, 251, 0.98));
+  box-shadow: 0 1px 3px rgba(31, 35, 40, 0.08);
 }
 
-.pane-resizer:hover,
-.pane-resizer:active {
+.pane-resizer::before {
+  width: 7px;
+  height: 78px;
+  transform: translate(-50%, -50%);
+}
+
+.pane-resizer::after,
+.composer-resizer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 999px;
+  opacity: 0.8;
+}
+
+.pane-resizer::after {
+  width: 3px;
+  height: 36px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0), rgba(0, 120, 212, 0.1), rgba(255, 255, 255, 0)),
-    linear-gradient(180deg, rgba(243, 248, 255, 0.98), rgba(236, 244, 255, 0.98));
+    radial-gradient(circle at 50% 4px, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px),
+    radial-gradient(circle at 50% 12px, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px),
+    radial-gradient(circle at 50% 20px, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px),
+    radial-gradient(circle at 50% 28px, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px);
+  transform: translate(-50%, -50%);
 }
 
 .pane-resizer:hover::before,
-.pane-resizer:active::before {
-  background: linear-gradient(180deg, rgba(0, 120, 212, 0.12), rgba(0, 120, 212, 0.56), rgba(0, 120, 212, 0.12));
+.pane-resizer:active::before,
+.composer-resizer:hover::before,
+.composer-resizer:active::before {
+  border-color: rgba(0, 120, 212, 0.28);
+  background: linear-gradient(180deg, rgba(251, 254, 255, 0.98), rgba(225, 238, 255, 0.98));
+  box-shadow: 0 2px 8px rgba(0, 120, 212, 0.14);
 }
 
 .pane-resizer:hover::after,
-.pane-resizer:active::after {
+.pane-resizer:active::after,
+.composer-resizer:hover::after,
+.composer-resizer:active::after {
   opacity: 1;
 }
 
@@ -1338,29 +1349,27 @@
 }
 
 .composer-resizer {
-  position: relative;
+  min-height: 14px;
   border-top: none;
   border-bottom: none;
-  background: transparent;
   cursor: row-resize;
-  touch-action: none;
 }
 
 .composer-resizer::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 56px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(87, 96, 106, 0.18);
+  width: 78px;
+  height: 7px;
   transform: translate(-50%, -50%);
 }
 
-.composer-resizer:hover::before,
-.composer-resizer:active::before {
-  background: rgba(0, 120, 212, 0.28);
+.composer-resizer::after {
+  width: 36px;
+  height: 3px;
+  background:
+    radial-gradient(circle at 4px 50%, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px),
+    radial-gradient(circle at 12px 50%, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px),
+    radial-gradient(circle at 20px 50%, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px),
+    radial-gradient(circle at 28px 50%, rgba(0, 120, 212, 0.68) 0 1.3px, transparent 1.8px);
+  transform: translate(-50%, -50%);
 }
 
 .composer-status {
@@ -1553,12 +1562,20 @@
 .composer-footer {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-end;
   gap: 1rem;
   margin-top: auto;
   padding: 8px 10px 9px;
   border-top: 1px solid rgba(31, 35, 40, 0.08);
   background: transparent;
+}
+
+.composer-footer-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .composer-meta {
@@ -1704,6 +1721,50 @@
   border-radius: 8px;
   background: rgba(248, 249, 251, 0.92);
   min-width: 0;
+}
+
+.composer-session-settings {
+  gap: 9px;
+  margin-bottom: 0;
+  padding: 10px 12px;
+  border-color: rgba(0, 120, 212, 0.14);
+  background: linear-gradient(180deg, rgba(247, 251, 255, 0.98), rgba(241, 247, 255, 0.94));
+}
+
+.composer-session-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(148px, 208px) minmax(148px, 208px) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.composer-session-settings .settings-field {
+  gap: 5px;
+}
+
+.composer-session-settings .settings-label {
+  font-size: 0.64rem;
+}
+
+.composer-session-settings .settings-select {
+  min-height: 38px;
+  border-radius: 9px;
+  font-size: 0.8rem;
+}
+
+.composer-session-settings-actions {
+  justify-content: flex-start;
+  align-self: end;
+}
+
+.composer-session-settings-actions .btn-sm {
+  min-height: 38px;
+  padding-inline: 0.88rem;
+  white-space: nowrap;
+}
+
+.composer-session-settings-alert {
+  margin-top: 0;
 }
 
 .session-settings-heading h4 {
@@ -2230,7 +2291,7 @@
   letter-spacing: 0.08em;
 }
 
-.timeline-detail-block-text {
+.timeline-detail-block-markdown {
   margin: 0;
   padding: 8px 9px;
   border-radius: 6px;
@@ -2239,6 +2300,48 @@
   font-size: 0.73rem;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.timeline-detail-block-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.timeline-detail-block-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.timeline-detail-block-markdown p,
+.timeline-detail-block-markdown ul,
+.timeline-detail-block-markdown ol,
+.timeline-detail-block-markdown pre,
+.timeline-detail-block-markdown blockquote {
+  margin: 0.38rem 0;
+}
+
+.timeline-detail-block-markdown ul,
+.timeline-detail-block-markdown ol {
+  padding-left: 1.1rem;
+}
+
+.timeline-detail-block-markdown pre {
+  padding: 8px 9px;
+  border-radius: 6px;
+  background: #f6f8fa;
+  border: 1px solid var(--border);
+  overflow: auto;
+}
+
+.timeline-detail-block-markdown code {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding: 0.08rem 0.28rem;
+  border-radius: 4px;
+  background: rgba(31, 35, 40, 0.06);
+}
+
+.timeline-detail-block-markdown pre code {
+  padding: 0;
+  background: transparent;
 }
 
 .timeline-event-data {
@@ -2254,43 +2357,11 @@
   max-height: 260px;
 }
 
-.timeline-detail-block.kind-error .timeline-detail-block-text,
+.timeline-detail-block.kind-error .timeline-detail-block-markdown,
 .timeline-detail-block.kind-error .timeline-event-data {
   border-color: rgba(207, 34, 46, 0.18);
   background: rgba(207, 34, 46, 0.06);
   color: var(--danger);
-}
-
-.timeline-raw-details {
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.92);
-  overflow: hidden;
-}
-
-.timeline-raw-details summary {
-  cursor: pointer;
-  list-style: none;
-  padding: 8px 10px;
-  color: var(--text-secondary);
-  font-size: 0.66rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  background: rgba(246, 248, 250, 0.92);
-}
-
-.timeline-raw-details summary::-webkit-details-marker {
-  display: none;
-}
-
-.timeline-raw-details[open] summary {
-  border-bottom: 1px solid var(--border);
-}
-
-.timeline-raw-details .timeline-event-data {
-  border: none;
-  border-radius: 0;
-  background: transparent;
 }
 
 
@@ -2371,6 +2442,10 @@
     align-items: stretch;
   }
 
+  .composer-footer-main {
+    gap: 8px;
+  }
+
   .chat-stage-header {
     grid-template-columns: 1fr;
     align-items: stretch;
@@ -2414,6 +2489,10 @@
   }
 
   .session-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .composer-session-settings-grid {
     grid-template-columns: 1fr;
   }
 

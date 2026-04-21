@@ -721,23 +721,39 @@ async function collectOverflowMetrics(page) {
   });
 }
 
-async function collectSidebarPanelMetrics(page) {
-  return page.locator('[data-testid="session-context-sidebar"]').evaluate((sidebar) => {
-    const overview = sidebar.querySelector('.session-overview-panel');
-    const resources = sidebar.querySelector('.resources-panel');
-    const modelSelect = sidebar.querySelector('[data-testid="session-model-select"]');
-    const reasoningSelect = sidebar.querySelector('[data-testid="session-reasoning-select"]');
-    const runtimeValue = sidebar.querySelector('[data-testid="session-runtime-id"]');
-    const emptyState = sidebar.querySelector('.resources-panel .empty-side');
+async function collectSessionWorkbenchPanelMetrics(page) {
+  return page.evaluate(() => {
+    const sidebar = document.querySelector('[data-testid="session-context-sidebar"]');
+    const overview = sidebar?.querySelector('.session-overview-panel');
+    const resources = sidebar?.querySelector('.resources-panel');
+    const runtimeValue = sidebar?.querySelector('[data-testid="session-runtime-id"]');
+    const emptyState = sidebar?.querySelector('.resources-panel .empty-side');
+    const composerShell = document.querySelector('.composer-shell');
+    const composerCard = composerShell?.querySelector('.composer-card');
+    const settingsCard = document.querySelector('[data-testid="session-settings-card"]');
+    const modelSelect = document.querySelector('[data-testid="session-model-select"]');
+    const reasoningSelect = document.querySelector('[data-testid="session-reasoning-select"]');
+    const saveButton = document.querySelector('[data-testid="session-settings-save"]');
     const rect = (element) => element ? element.getBoundingClientRect() : null;
 
     return {
       overviewRect: rect(overview),
       resourcesRect: rect(resources),
+      composerShellRect: rect(composerShell),
+      composerCardRect: rect(composerCard),
+      settingsCardRect: rect(settingsCard),
+      settingsInComposer: Boolean(composerShell && settingsCard && composerShell.contains(settingsCard)),
+      settingsInSidebar: Boolean(sidebar && settingsCard && sidebar.contains(settingsCard)),
+      settingsBeforeComposerCard: Boolean(
+        settingsCard &&
+          composerCard &&
+          (settingsCard.compareDocumentPosition(composerCard) & Node.DOCUMENT_POSITION_FOLLOWING)
+      ),
       modelSelectRect: rect(modelSelect),
       modelSelectText: modelSelect?.selectedOptions?.[0]?.textContent?.trim() || null,
       reasoningSelectRect: rect(reasoningSelect),
       reasoningSelectText: reasoningSelect?.selectedOptions?.[0]?.textContent?.trim() || null,
+      saveButtonRect: rect(saveButton),
       runtimeValueRect: rect(runtimeValue),
       runtimeValueText: runtimeValue?.textContent?.trim() || null,
       resourcesEmptyText: emptyState?.textContent?.trim() || null,
@@ -803,12 +819,16 @@ async function collectPaneResizerMetrics(page, testId) {
   return page.locator(`[data-testid="${testId}"]`).evaluate((handle) => {
     const rect = handle.getBoundingClientRect();
     const style = getComputedStyle(handle);
+    const beforeStyle = getComputedStyle(handle, '::before');
+    const afterStyle = getComputedStyle(handle, '::after');
 
     return {
       width: rect.width,
       height: rect.height,
       cursor: style.cursor,
-      backgroundImage: style.backgroundImage,
+      gripBackgroundImage: beforeStyle.backgroundImage,
+      gripBorderRadius: beforeStyle.borderRadius,
+      accentBackgroundImage: afterStyle.backgroundImage,
     };
   });
 }
@@ -880,6 +900,8 @@ async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0,
     const title = step.querySelector('.chat-execution-step-title');
     const preview = step.querySelector('.chat-execution-step-summary');
     const stage = step.querySelector('.timeline-stage-badge');
+    const markdownBlocks = step.querySelectorAll('.timeline-detail-block-markdown.markdown-content').length;
+    const rawPayloadBlocks = step.querySelectorAll('.timeline-raw-details').length;
     const rect = (element) => element ? element.getBoundingClientRect() : null;
 
     return {
@@ -887,6 +909,8 @@ async function collectExecutionStepMetrics(page, blockIndex = 0, groupIndex = 0,
       title: title?.textContent?.trim() || null,
       preview: preview?.textContent?.trim() || null,
       stage: stage?.textContent?.trim() || null,
+      markdownBlockCount: markdownBlocks,
+      rawPayloadBlockCount: rawPayloadBlocks,
       summaryRect: rect(summary),
       bodyRect: rect(body),
       bodyDisplay: body ? getComputedStyle(body).display : null,
@@ -1005,8 +1029,10 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     const resizerHandle = page.locator('[data-testid="composer-resizer"]');
     const composerShell = page.locator('.composer-shell');
     const initialComposerHeight = await composerShell.evaluate((element) => element.getBoundingClientRect().height);
+    const composerResizerMetrics = await collectPaneResizerMetrics(page, 'composer-resizer');
     const resizerBox = await resizerHandle.boundingBox();
     assert.ok(resizerBox, 'Composer resizer should be measurable');
+    assert.ok(composerResizerMetrics.height >= 12 && composerResizerMetrics.cursor === 'row-resize', `Composer resizer should be visible and vertically draggable: ${JSON.stringify(composerResizerMetrics, null, 2)}`);
     await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y + resizerBox.height / 2);
     await page.mouse.down();
     await page.mouse.move(resizerBox.x + resizerBox.width / 2, resizerBox.y - 80, { steps: 8 });
@@ -1024,8 +1050,12 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.ok(sessionPaneResizerMetrics.width >= 12 && sessionPaneResizerMetrics.cursor === 'col-resize', `Session pane resizer should be visible and horizontally draggable: ${JSON.stringify(sessionPaneResizerMetrics, null, 2)}`);
     assert.ok(contextPaneResizerMetrics.width >= 12 && contextPaneResizerMetrics.cursor === 'col-resize', `Context pane resizer should be visible and horizontally draggable: ${JSON.stringify(contextPaneResizerMetrics, null, 2)}`);
     assert.ok(
-      sessionPaneResizerMetrics.backgroundImage.includes('gradient') && contextPaneResizerMetrics.backgroundImage.includes('gradient'),
-      `Pane resizers should use a visible styled grip instead of blending into the background: ${JSON.stringify({ sessionPaneResizerMetrics, contextPaneResizerMetrics }, null, 2)}`
+      sessionPaneResizerMetrics.gripBackgroundImage.includes('gradient') &&
+        contextPaneResizerMetrics.gripBackgroundImage.includes('gradient') &&
+        composerResizerMetrics.gripBackgroundImage.includes('gradient') &&
+        sessionPaneResizerMetrics.gripBorderRadius === contextPaneResizerMetrics.gripBorderRadius &&
+        contextPaneResizerMetrics.gripBorderRadius === composerResizerMetrics.gripBorderRadius,
+      `All three resize handles should share the same visible grip language instead of mixing styles: ${JSON.stringify({ sessionPaneResizerMetrics, contextPaneResizerMetrics, composerResizerMetrics }, null, 2)}`
     );
 
     const layoutBeforePaneResize = await collectWorkbenchLayoutMetrics(page);
@@ -1169,6 +1199,15 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       ((await firstExecutionGroup.textContent()) || "").includes("No uploaded projects"),
       'Expanded execution step should expose detailed tool output, not just the final assistant reply'
     );
+    assert.ok(
+      expandedExecutionStepMetrics.markdownBlockCount >= 1,
+      `Expanded execution step should render structured event details through markdown blocks: ${JSON.stringify(expandedExecutionStepMetrics, null, 2)}`
+    );
+    assert.equal(
+      expandedExecutionStepMetrics.rawPayloadBlockCount,
+      0,
+      `Expanded execution step should no longer expose a raw payload dump: ${JSON.stringify(expandedExecutionStepMetrics, null, 2)}`
+    );
 
     await secondExecutionGroup.locator('[data-testid="conversation-execution-toggle"]').click();
     const expandedSecondGroupMetrics = await collectExecutionGroupMetrics(page, 0, 1);
@@ -1244,26 +1283,30 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       `Initial session sidebar overflow detected: ${JSON.stringify(overflowMetrics, null, 2)}`
     );
 
-    const initialPanelMetrics = await collectSidebarPanelMetrics(page);
+    const initialPanelMetrics = await collectSessionWorkbenchPanelMetrics(page);
+    assert.equal(initialPanelMetrics.settingsInComposer, true, `Session settings card should move into the composer shell: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.settingsInSidebar, false, `Right sidebar should no longer host the session settings card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.settingsBeforeComposerCard, true, `Session settings should sit above the prompt card inside the composer shell: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.modelSelectText, "GPT-5.4 mini", "Model selector should show the full GPT-5.4 mini label");
-    assert.equal(initialPanelMetrics.reasoningSelectText, "Extreme", `Reasoning selector should use compact option labels in the session settings card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.ok(initialPanelMetrics.modelSelectRect && initialPanelMetrics.modelSelectRect.width >= 132, `Model selector is still too narrow: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.equal(initialPanelMetrics.reasoningSelectText, "Extreme", `Reasoning selector should use compact option labels in the composer settings row: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.modelSelectRect && initialPanelMetrics.modelSelectRect.width >= 148, `Model selector is still too narrow: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(
       initialPanelMetrics.modelSelectRect &&
         initialPanelMetrics.reasoningSelectRect &&
         Math.abs(initialPanelMetrics.modelSelectRect.top - initialPanelMetrics.reasoningSelectRect.top) <= 2,
-      `Session settings selects should align on the same top edge: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+      `Composer settings selects should align on the same top edge: ${JSON.stringify(initialPanelMetrics, null, 2)}`
     );
     assert.ok(
       initialPanelMetrics.modelSelectRect &&
         initialPanelMetrics.reasoningSelectRect &&
         initialPanelMetrics.reasoningSelectRect.left - initialPanelMetrics.modelSelectRect.right >= 12,
-      `Session settings selects should keep enough horizontal gap instead of crowding together: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+      `Composer settings selects should keep enough horizontal gap instead of crowding together: ${JSON.stringify(initialPanelMetrics, null, 2)}`
     );
     assert.ok(
       initialPanelMetrics.selectWidthDelta !== null && initialPanelMetrics.selectWidthDelta <= 2,
-      `Session settings selects should have matching widths: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+      `Composer settings selects should have matching widths: ${JSON.stringify(initialPanelMetrics, null, 2)}`
     );
+    assert.ok(initialPanelMetrics.saveButtonRect && initialPanelMetrics.saveButtonRect.height >= 36, `Save button should keep a usable hit area inside the composer row: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.runtimeValueText, sessionStates[primarySessionId].copilot_session_id, `Runtime id should stay fully visible in the sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(initialPanelMetrics.runtimeValueRect && initialPanelMetrics.runtimeValueRect.height >= 30, `Runtime id row should have enough height to wrap long ids instead of truncating them: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.resourcesEmptyText, "No project files have been uploaded yet.", "Resources empty state should stay visible");
