@@ -77,10 +77,10 @@ If the file has already been patched, the script reports `Setup.exe appears to b
 ## 3. Build the Shotwright image
 
 ```powershell
-docker build -t shotwright:latest .
+docker build -t shotwright:runtime .
 ```
 
-The Dockerfile defaults to `AUTO_INSTALL_AFTER_EFFECTS=1`.
+The Dockerfile now builds the all-in-one `shotwright:runtime` image. It copies the published After Effects setup payload from GHCR into the image and runs the installer during image build, so service-created worker containers do not depend on runtime payload mounts.
 
 ## 4. Run the end-to-end install and validation flow
 
@@ -88,7 +88,7 @@ Use `scripts/validate/run_validation.ps1`:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
-    -ImageTag shotwright:latest `
+    -ImageTag shotwright:runtime `
     -AfterEffectsPayloadRoot (Join-Path 'C:\data\payload' $setup.payload_dir_name) `
     -CreativeCloudHelperRoot (Join-Path 'C:\data\payload' $setup.helper_dir_name)
 ```

@@ -40,10 +40,9 @@ if (Test-FlagEnabled $autoInstallValue) {
         $DefaultInstallerPayloadRoot
     }
 
+    # The install script throws on real failures. Do not treat aerender -version's
+    # non-zero exit code as fatal here when AE is already installed.
     & $InstallScriptPath -InstallerPayloadRoot $payloadRoot
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
 }
 
 & $KeepaliveScriptPath

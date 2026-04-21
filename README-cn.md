@@ -101,20 +101,20 @@ flowchart LR
 
 ### 第 1 步 — 构建 Docker 镜像
 
-- 做什么：生成一个预装 Node.js、Python、ffmpeg 与 nexrender 的 Windows 容器镜像。
-- 结果：得到一个标签为 `shotwright:dev` 的本地 Docker 镜像。
+- 做什么：生成一个 all-in-one 的 Windows 工作容器镜像，内置 Node.js、Python、ffmpeg、nexrender，以及当前选中版本的 After Effects。
+- 结果：得到一个标签为 `shotwright:runtime` 的本地 Docker 镜像。
 - 能跳过吗：不能。这是后续所有步骤的基础。
 
 ```powershell
-docker build -t shotwright:dev .
+docker build -t shotwright:runtime .
 ```
 
-Dockerfile 默认启用 `AUTO_INSTALL_AFTER_EFFECTS=1`。容器启动时如果检测到挂载的安装缓存，就会自动安装 AE；如果没有检测到，则静默跳过。
+Dockerfile 现在会把发布在 GHCR 的 `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` 安装载荷复制到 runtime 镜像里，并在镜像构建阶段执行 `install_after_effects_in_container.ps1`。因此服务创建工作容器时，可以直接使用预装好的 `shotwright:runtime`，不再依赖单独的 payload 挂载流程。
 
-如需显式关闭自动安装：
+如需显式关闭启动时的安装检查：
 
 ```powershell
-docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:dev .
+docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:runtime .
 ```
 
 <details>
@@ -127,7 +127,7 @@ docker build `
 	--build-arg https_proxy=$proxy `
 	--build-arg HTTP_PROXY=$proxy `
 	--build-arg HTTPS_PROXY=$proxy `
-	-t shotwright:dev .
+	-t shotwright:runtime .
 ```
 
 </details>
@@ -139,7 +139,7 @@ docker build `
 - 能跳过吗：如果你只关心安装缓存模式，可以直接跳到第 3 步。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:dev
+powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:runtime
 ```
 
 ### 第 3 步 — 运行验证渲染（安装缓存模式）
@@ -188,7 +188,7 @@ python .\scripts\install\modify_setup_win.py $helperSetup
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
-	-ImageTag shotwright:dev `
+	-ImageTag shotwright:runtime `
 	-AfterEffectsPayloadRoot (Join-Path 'C:\data\payload' $setup.payload_dir_name) `
 	-CreativeCloudHelperRoot (Join-Path 'C:\data\payload' $setup.helper_dir_name)
 ```
@@ -233,9 +233,9 @@ validation-data/
 
 ## 📝 设计说明
 
-- Docker 镜像本身不包含 Adobe After Effects。
-- 运行时既可以挂载 `setup-versions.yml` 当前版本对应的宿主机 AE 安装目录，也可以把安装缓存中的同版本 AE 安装到容器内对应路径；安装缓存既可以来自 GHCR，也可以来自本地脚本构建结果，并统一挂载到 `C:\data\payload`。
-- 容器启动时会执行 `scripts/runtime_entrypoint.ps1`。当 `AUTO_INSTALL_AFTER_EFFECTS=1` 且检测到安装缓存目录时，会自动安装 AE；否则直接跳过。
+- 默认工作镜像是 `shotwright:runtime`，它会在镜像构建阶段把 GHCR 发布的 setup payload 复制进来，并完成 `setup-versions.yml` 当前选择版本的 AE 安装。
+- 如果你要显式验证宿主机挂载模式或安装缓存模式，验证脚本仍然支持这些路径；但服务创建的工作容器默认使用预装好的 runtime 镜像。
+- 容器启动时仍然会执行 `scripts/runtime_entrypoint.ps1`。如果 `aerender.exe` 已经存在，共用安装逻辑会立即返回。
 - 验证用 JSX 只负责补丁逻辑，渲染执行与输出管理由 nexrender 统一负责。
 - 验证任务通过 `outputExt: mp4` 和 `@nexrender/action-copy` 保证最终只留下一个稳定、可预期的视频产物。
 

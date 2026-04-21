@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import os
+import re
 import zipfile
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
@@ -21,6 +22,18 @@ def _ensure_dirs() -> None:
 
 def _list_relative_files(base_dir: Path) -> list[str]:
     return [str(path.relative_to(base_dir)) for path in base_dir.rglob("*") if path.is_file()]
+
+
+def _sanitize_windows_filename(value: str, fallback: str) -> str:
+    sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', '-', value).strip().strip('.')
+    return sanitized or fallback
+
+
+def _normalize_aep_filename(filename: str | None, fallback_stem: str) -> str:
+    candidate = _sanitize_windows_filename(filename or fallback_stem, fallback_stem)
+    if candidate.lower().endswith('.aep'):
+        return candidate
+    return f"{candidate}.aep"
 
 
 async def upload_project(session_id: str, file_bytes: bytes, filename: str) -> dict:
@@ -49,6 +62,8 @@ async def upload_project(session_id: str, file_bytes: bytes, filename: str) -> d
         "filename": filename,
         "workspace_dir": str(extract_dir),
         "aep_files": aep_files,
+        "entry_aep_file": aep_files[0] if aep_files else None,
+        "origin": "uploaded",
         "created_at": datetime.now(timezone.utc),
         "status": "uploaded",
     }
@@ -68,6 +83,77 @@ async def upload_project(session_id: str, file_bytes: bytes, filename: str) -> d
     await publish_context_refresh(session_id, "project.uploaded", project_id=project_id)
 
     return project_doc
+
+
+async def create_project_workspace(
+    session_id: str,
+    project_name: str | None = None,
+    aep_filename: str | None = None,
+    *,
+    set_active: bool = False,
+) -> dict:
+    """Create a managed workspace for a generated After Effects project."""
+    _ensure_dirs()
+    project_id = str(uuid4())
+    session_dir = UPLOAD_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    workspace_dir = session_dir / project_id
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    fallback_stem = f"project-{project_id[:8]}"
+    entry_stem = _sanitize_windows_filename(project_name, fallback_stem) if project_name else fallback_stem
+    entry_aep_file = _normalize_aep_filename(aep_filename, entry_stem)
+
+    project_doc = {
+        "_id": project_id,
+        "session_id": session_id,
+        "filename": entry_aep_file,
+        "workspace_dir": str(workspace_dir),
+        "aep_files": [],
+        "entry_aep_file": entry_aep_file,
+        "origin": "generated",
+        "created_at": datetime.now(timezone.utc),
+        "status": "uploaded",
+    }
+    await get_project_collection().insert_one(project_doc)
+
+    if set_active:
+        await set_active_project(session_id, project_id)
+        project_doc["status"] = "active"
+    else:
+        await publish_context_refresh(session_id, "project.created", project_id=project_id)
+
+    refreshed = await get_project(session_id, project_id)
+    return refreshed or project_doc
+
+
+async def refresh_project_files(session_id: str, project_id: str) -> dict | None:
+    """Rescan a managed project workspace after JSX changes."""
+    project = await get_project(session_id, project_id)
+    if not project:
+        return None
+
+    source_dir = Path(project["workspace_dir"])
+    if not source_dir.exists():
+        return None
+
+    relative_files = _list_relative_files(source_dir)
+    aep_files = sorted(path for path in relative_files if path.lower().endswith('.aep'))
+    entry_aep_file = project.get("entry_aep_file")
+    if not entry_aep_file and aep_files:
+        entry_aep_file = aep_files[0]
+    elif entry_aep_file and aep_files and entry_aep_file not in aep_files:
+        entry_aep_file = aep_files[0]
+
+    await get_project_collection().update_one(
+        {"_id": project_id, "session_id": session_id},
+        {"$set": {"aep_files": aep_files, "entry_aep_file": entry_aep_file}},
+    )
+
+    refreshed = await get_project(session_id, project_id)
+    await publish_context_refresh(session_id, "project.updated", project_id=project_id)
+    return refreshed
 
 
 async def list_projects(session_id: str) -> list[dict]:

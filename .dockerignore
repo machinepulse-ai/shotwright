@@ -10,6 +10,8 @@ node_modules/
 !.github/skills/**
 !scripts/
 !scripts/**
+!validation-data/templates/
+!validation-data/templates/validation_motion.aep
 !src/backend/pyproject.toml
 !src/backend/.python-version
 !src/backend/app/

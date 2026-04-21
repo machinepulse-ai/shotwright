@@ -77,6 +77,8 @@ export interface ProjectInfo {
   filename: string;
   workspace_dir: string;
   aep_files: string[];
+  entry_aep_file?: string | null;
+  origin?: "uploaded" | "generated";
   created_at: string;
   status: "uploaded" | "active" | "exported";
 }

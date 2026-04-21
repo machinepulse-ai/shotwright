@@ -1,11 +1,23 @@
 .video-player {
   overflow: hidden;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(247, 249, 251, 0.99));
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.08);
 }
 
 .video-player-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.video-player-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.45;
 }
 
 .video-source-badge {
@@ -32,7 +44,7 @@
   width: 100%;
   aspect-ratio: 16 / 9;
   max-height: 420px;
-  border-radius: 6px;
+  border-radius: 12px;
   background: #000;
   border: 1px solid var(--border);
 }

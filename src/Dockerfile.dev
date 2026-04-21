@@ -1,5 +1,4 @@
-ARG DEV_BASE_IMAGE=shotwright:latest
-ARG AE_SETUP_IMAGE=ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2
+ARG DEV_BASE_IMAGE=shotwright:runtime
 ARG http_proxy
 ARG https_proxy
 ARG HTTP_PROXY
@@ -8,8 +7,6 @@ ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 ARG PIP_DEFAULT_TIMEOUT=120
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-
-FROM ${AE_SETUP_IMAGE} AS after-effects-setup
 
 FROM ${DEV_BASE_IMAGE} AS dev
 
@@ -40,6 +37,7 @@ COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
 COPY .github/skills/ C:/workspace/.github/skills/
 COPY scripts/ C:/workspace/scripts/
+COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
 
 RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
         & python -m pip config --global set global.index-url $env:PIP_INDEX_URL; \
@@ -64,9 +62,6 @@ RUN Set-Location C:/workspace/src/frontend; \
     & 'C:/Program Files/nodejs/npm.cmd' install --no-progress --fetch-retries 5 --fetch-timeout 120000
 
 COPY src/scripts/start-dev-container.ps1 C:/workspace/src/scripts/start-dev-container.ps1
-
-COPY --from=after-effects-setup C:/payload C:/data/payload
-RUN & 'C:/workspace/scripts/install/install_after_effects_in_container.ps1' -RequirePayload
 
 COPY src/frontend/webpack.config.js C:/workspace/src/frontend/webpack.config.js
 COPY src/frontend/tsconfig.json C:/workspace/src/frontend/tsconfig.json

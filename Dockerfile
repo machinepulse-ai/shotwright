@@ -8,6 +8,7 @@ ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 ARG PIP_DEFAULT_TIMEOUT=120
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG CHOCO_SOURCE
+ARG AE_SETUP_IMAGE=ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2
 
 # =============================================================================
 # Stage: base — shared toolchain for all targets
@@ -65,8 +66,15 @@ RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
             & 'C:/Program Files/nodejs/npm.cmd' config set registry $env:NPM_CONFIG_REGISTRY; \
       }
 
+RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT psutil
+
 # =============================================================================
-# Stage: shotwright — AE runtime container (default target)
+# Stage: after-effects-setup — prebuilt AE installer payload from GHCR
+# =============================================================================
+FROM ${AE_SETUP_IMAGE} AS after-effects-setup
+
+# =============================================================================
+# Stage: shotwright — all-in-one AE runtime container (default target)
 # =============================================================================
 FROM base AS shotwright
 
@@ -89,6 +97,10 @@ COPY keepalive.ps1 C:/workspace/keepalive.ps1
 COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
 COPY scripts/ C:/workspace/scripts/
+COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
+COPY --from=after-effects-setup C:/payload C:/data/payload
+
+RUN & 'C:/workspace/scripts/install/install_after_effects_in_container.ps1' -RequirePayload
 
 CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/workspace/scripts/runtime_entrypoint.ps1"]
 
@@ -106,11 +118,12 @@ COPY AGENTS.md C:/workspace/AGENTS.md
 COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
 COPY scripts/ C:/workspace/scripts/
+COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
 COPY .github/skills/ C:/workspace/.github/skills/
 COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
 COPY src/backend/app/ C:/workspace/src/backend/app/
 WORKDIR C:/workspace/src/backend
-RUN & python -m uv pip install --system .
+RUN & python -m uv pip install --system --index-url $env:PIP_INDEX_URL .
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -140,3 +153,8 @@ COPY --from=frontend-build C:/frontend/dist ./dist/
 
 EXPOSE 3000
 CMD ["cmd", "/c", "serve", "-s", "C:\\frontend\\dist", "-l", "3000"]
+
+# =============================================================================
+# Stage: final — keep plain docker build aligned with the AE runtime image
+# =============================================================================
+FROM shotwright AS final

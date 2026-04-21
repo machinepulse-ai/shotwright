@@ -126,6 +126,19 @@ function Resolve-AfterEffectsInstallRoot {
     return (Join-Path $script:AdobeInstallBaseRoot "Adobe After Effects $(2000 + $majorVersion)")
 }
 
+function Join-OptionalPath {
+    param(
+        [string]$Path,
+        [string]$ChildPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+
+    return (Join-Path $Path $ChildPath)
+}
+
 function Find-LatestInstalledAfterEffectsRoot {
     if (-not (Test-Path $script:AdobeInstallBaseRoot)) {
         return ''
@@ -187,9 +200,9 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
     $InstallRoot = Find-LatestInstalledAfterEffectsRoot
 }
 
-$driverXmlPath = Join-Path $AfterEffectsPayloadRoot 'driver.xml'
-$helperSetupPath = Join-Path $CreativeCloudHelperRoot 'HDBox\Setup.exe'
-$helperIpcPath = Join-Path $CreativeCloudHelperRoot 'IPC'
+$driverXmlPath = Join-OptionalPath $AfterEffectsPayloadRoot 'driver.xml'
+$helperSetupPath = Join-OptionalPath $CreativeCloudHelperRoot 'HDBox\Setup.exe'
+$helperIpcPath = Join-OptionalPath $CreativeCloudHelperRoot 'IPC'
 $targetRoot = $ContainerPaths.desktopCommonRoot
 $targetSetupPath = Join-Path $targetRoot 'HDBox\Setup.exe'
 $aeRenderBinary = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
@@ -209,7 +222,9 @@ $missingPaths = @(
     $helperSetupPath,
     $helperIpcPath,
     $PatchScriptPath
-) | Where-Object { -not (Test-Path $_) }
+) | Where-Object {
+    [string]::IsNullOrWhiteSpace($_) -or -not (Test-Path $_)
+}
 
 if ($missingPaths.Count -gt 0) {
     if ($RequirePayload) {

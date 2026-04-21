@@ -16,9 +16,11 @@ class Settings(BaseSettings):
 
     # --- Docker ---
     docker_host: str = "npipe:////./pipe/docker_engine"
-    shotwright_image: str = "shotwright:latest"
+    shotwright_image: str = "shotwright:runtime"
     container_network: str = ""
     container_data_root: str = "C:\\data"
+    container_payload_mount_source: str = ""
+    container_payload_mount_auto_detect: bool = False
     shared_uploads_volume: str = "shotwright_uploads"
     shared_exports_volume: str = "shotwright_exports"
     shared_hls_volume: str = "shotwright_hls"

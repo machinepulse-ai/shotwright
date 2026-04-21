@@ -1,7 +1,12 @@
 """Docker container lifecycle management for shotwright AE instances."""
 
+import io
 import logging
+import os
+import tarfile
+import time
 from datetime import datetime, timezone
+from pathlib import PureWindowsPath
 from uuid import uuid4
 
 import docker
@@ -24,6 +29,33 @@ def _get_docker() -> docker.DockerClient:
     return _docker_client
 
 
+def _resolve_payload_mount_source() -> str | None:
+    explicit_source = settings.container_payload_mount_source.strip()
+    if explicit_source:
+        return explicit_source
+
+    if not settings.container_payload_mount_auto_detect:
+        return None
+
+    default_source = f"{settings.container_data_root}\\payload"
+    if os.path.isdir(default_source):
+        return default_source
+
+    return None
+
+
+def _uses_preinstalled_runtime_image(image: str) -> bool:
+    normalized = image.strip().lower()
+    return normalized.endswith(":runtime")
+
+
+def _build_container_environment(image: str) -> dict[str, str]:
+    if _uses_preinstalled_runtime_image(image):
+        return {"AUTO_INSTALL_AFTER_EFFECTS": "0"}
+
+    return {"AUTO_INSTALL_AFTER_EFFECTS": "1"}
+
+
 async def create_container(session_id: str, image: str | None = None) -> dict:
     """Create and start a new shotwright Windows container."""
     image = image or settings.shotwright_image
@@ -42,17 +74,19 @@ async def create_container(session_id: str, image: str | None = None) -> dict:
             "bind": "C:\\data\\hls",
             "mode": "rw",
         },
-        f"{settings.container_data_root}\\payload": {
+    }
+    payload_mount_source = _resolve_payload_mount_source()
+    if payload_mount_source:
+        volume_mounts[payload_mount_source] = {
             "bind": "C:\\data\\payload",
             "mode": "ro",
-        },
-    }
+        }
 
     run_kwargs = {
         "image": image,
         "detach": True,
         "name": f"shotwright-{session_id[:8]}-{uuid4().hex[:6]}",
-        "environment": {"AUTO_INSTALL_AFTER_EFFECTS": "1"},
+        "environment": _build_container_environment(image),
         "volumes": volume_mounts,
         "isolation": "process",
     }
@@ -171,3 +205,33 @@ async def exec_in_container(docker_id: str, cmd: list[str]) -> tuple[int, str]:
     result = container.exec_run(cmd, demux=False)
     output = result.output.decode("utf-8", errors="replace") if result.output else ""
     return result.exit_code, output
+
+
+async def put_text_files_in_container(docker_id: str, files: dict[str, str], *, encoding: str = "utf-8") -> None:
+    """Write one or more UTF-8 text files into an existing container via the Docker archive API."""
+    if not files:
+        return
+
+    grouped_files: dict[str, list[tuple[str, str]]] = {}
+    for raw_path, content in files.items():
+        container_path = PureWindowsPath(raw_path)
+        parent_dir = str(container_path.parent)
+        grouped_files.setdefault(parent_dir, []).append((container_path.name, content))
+
+    client = _get_docker()
+    container = client.containers.get(docker_id)
+
+    for parent_dir, group in grouped_files.items():
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as tar_handle:
+            for filename, content in group:
+                data = content.encode(encoding)
+                tar_info = tarfile.TarInfo(name=filename)
+                tar_info.size = len(data)
+                tar_info.mtime = int(time.time())
+                tar_handle.addfile(tar_info, io.BytesIO(data))
+
+        archive.seek(0)
+        success = container.put_archive(parent_dir, archive.read())
+        if not success:
+            raise RuntimeError(f"Failed to write files into container directory {parent_dir}")

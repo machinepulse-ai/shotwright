@@ -14,9 +14,25 @@ const api = axios.create({
   timeout: 30000,
 });
 
+const CHAT_TURN_TIMEOUT_MS = 16 * 60 * 1000;
+const STREAM_RECONNECT_DELAY_MS = 1000;
+const STREAM_RECONNECT_DELAY_MAX_MS = 5000;
+
+function getStoredAdminToken() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return window.localStorage.getItem("shotwright_token");
+  } catch {
+    return null;
+  }
+}
+
 // Attach admin token if present
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const token = localStorage.getItem("shotwright_token");
+  const token = getStoredAdminToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -55,11 +71,19 @@ export const getAgentEvents = (sessionId: string) => api.get(`/agent/sessions/${
 export const sendChatTurn = (
   sessionId: string,
   payload: { content: string; attachments?: ChatImageAttachment[] }
-) => api.post(`/agent/sessions/${sessionId}/messages`, payload);
+) => api.post(`/agent/sessions/${sessionId}/messages`, payload, { timeout: CHAT_TURN_TIMEOUT_MS });
 
 function parseStreamPayload<T>(event: MessageEvent<string>): T | null {
   try {
     return JSON.parse(event.data) as T;
+  } catch {
+    return null;
+  }
+}
+
+function parseStreamData<T>(data: string): T | null {
+  try {
+    return JSON.parse(data) as T;
   } catch {
     return null;
   }
@@ -75,8 +99,195 @@ export type AgentSessionStreamHandlers = {
   onContextRefresh?: (payload: SessionContextRefreshEvent) => void;
 };
 
-export function openAgentSessionStream(sessionId: string, handlers: AgentSessionStreamHandlers): EventSource {
+export type AgentSessionStreamConnection = {
+  close: () => void;
+};
+
+function dispatchAgentSessionStreamEvent(
+  eventType: string,
+  data: string,
+  handlers: AgentSessionStreamHandlers,
+) {
+  switch (eventType) {
+    case "session.updated": {
+      const payload = parseStreamData<Session>(data);
+      if (payload) handlers.onSessionUpdated?.(payload);
+      return;
+    }
+    case "message.upsert": {
+      const payload = parseStreamData<ChatMessage>(data);
+      if (payload) handlers.onMessageUpsert?.(payload);
+      return;
+    }
+    case "message.deleted": {
+      const payload = parseStreamData<ChatMessageDeletedEvent>(data);
+      if (payload) handlers.onMessageDeleted?.(payload);
+      return;
+    }
+    case "timeline.event": {
+      const payload = parseStreamData<SessionEvent>(data);
+      if (payload) handlers.onTimelineEvent?.(payload);
+      return;
+    }
+    case "context.refresh": {
+      const payload = parseStreamData<SessionContextRefreshEvent>(data);
+      if (payload) handlers.onContextRefresh?.(payload);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function consumeSseBuffer(buffer: string) {
+  const events: Array<{ type: string; data: string }> = [];
+  const blocks = buffer.split(/\r?\n\r?\n/);
+  const remainder = blocks.pop() ?? "";
+
+  for (const block of blocks) {
+    const trimmedBlock = block.trim();
+    if (!trimmedBlock) {
+      continue;
+    }
+
+    let eventType = "message";
+    const dataLines: string[] = [];
+
+    for (const line of block.split(/\r?\n/)) {
+      if (!line || line.startsWith(":")) {
+        continue;
+      }
+
+      if (line.startsWith("event:")) {
+        eventType = line.slice("event:".length).trim();
+        continue;
+      }
+
+      if (line.startsWith("data:")) {
+        dataLines.push(line.slice("data:".length).trimStart());
+      }
+    }
+
+    if (!dataLines.length) {
+      continue;
+    }
+
+    events.push({
+      type: eventType,
+      data: dataLines.join("\n"),
+    });
+  }
+
+  return { events, remainder };
+}
+
+function openFetchAgentSessionStream(
+  streamUrl: string,
+  token: string | null,
+  handlers: AgentSessionStreamHandlers,
+): AgentSessionStreamConnection {
+  let disposed = false;
+  let reconnectDelayMs = STREAM_RECONNECT_DELAY_MS;
+  let reconnectTimer: number | null = null;
+  let activeController: AbortController | null = null;
+
+  const scheduleReconnect = () => {
+    if (disposed || reconnectTimer !== null || typeof window === "undefined") {
+      return;
+    }
+
+    const delayMs = reconnectDelayMs;
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, STREAM_RECONNECT_DELAY_MAX_MS);
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      void connect();
+    }, delayMs);
+  };
+
+  const connect = async () => {
+    const controller = new AbortController();
+    activeController = controller;
+
+    try {
+      const headers: Record<string, string> = {
+        Accept: "text/event-stream",
+      };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const response = await fetch(streamUrl, {
+        method: "GET",
+        headers,
+        cache: "no-store",
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`SSE request failed with status ${response.status}`);
+      }
+
+      reconnectDelayMs = STREAM_RECONNECT_DELAY_MS;
+      handlers.onOpen?.();
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (!disposed) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const parsed = consumeSseBuffer(buffer);
+        buffer = parsed.remainder;
+
+        for (const event of parsed.events) {
+          dispatchAgentSessionStreamEvent(event.type, event.data, handlers);
+        }
+      }
+
+      if (!disposed) {
+        throw new Error("SSE stream closed unexpectedly");
+      }
+    } catch {
+      if (disposed || controller.signal.aborted) {
+        return;
+      }
+
+      handlers.onError?.(new Event("error"));
+      scheduleReconnect();
+    }
+  };
+
+  void connect();
+
+  return {
+    close: () => {
+      disposed = true;
+      if (reconnectTimer !== null && typeof window !== "undefined") {
+        window.clearTimeout(reconnectTimer);
+      }
+      reconnectTimer = null;
+      activeController?.abort();
+      activeController = null;
+    },
+  };
+}
+
+export function openAgentSessionStream(
+  sessionId: string,
+  handlers: AgentSessionStreamHandlers,
+): AgentSessionStreamConnection {
   const streamUrl = new URL(`/api/agent/sessions/${sessionId}/stream`, window.location.origin);
+  const token = getStoredAdminToken();
+
+  if (typeof window.fetch === "function") {
+    return openFetchAgentSessionStream(streamUrl.toString(), token, handlers);
+  }
+
   const stream = new EventSource(streamUrl.toString());
 
   if (handlers.onOpen) {

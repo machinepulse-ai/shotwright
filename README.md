@@ -110,20 +110,20 @@ flowchart LR
 
 ### Step 1 — Build the Docker image
 
-- What: Produce a Windows container image with Node.js, Python, ffmpeg, and nexrender preinstalled.
-- Result: A local Docker image tagged `shotwright:dev`.
+- What: Produce the all-in-one Windows worker image with Node.js, Python, ffmpeg, nexrender, and the selected After Effects install baked in.
+- Result: A local Docker image tagged `shotwright:runtime`.
 - Skip: This step is mandatory.
 
 ```powershell
-docker build -t shotwright:dev .
+docker build -t shotwright:runtime .
 ```
 
-The Dockerfile defaults to `AUTO_INSTALL_AFTER_EFFECTS=1`, so the container will try to install AE at startup when a mounted installer cache is present. If no installer cache is mounted, the install step is skipped quietly.
+The Dockerfile now copies the published `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` payload into the runtime image and runs `install_after_effects_in_container.ps1` during image build. Worker containers created by the service can therefore start from the preinstalled `shotwright:runtime` image without a separate payload-mount workflow.
 
-To disable auto-install explicitly:
+To disable the startup re-check explicitly:
 
 ```powershell
-docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:dev .
+docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:runtime .
 ```
 
 <details>
@@ -136,7 +136,7 @@ docker build `
 	--build-arg https_proxy=$proxy `
 	--build-arg HTTP_PROXY=$proxy `
 	--build-arg HTTPS_PROXY=$proxy `
-	-t shotwright:dev .
+	-t shotwright:runtime .
 ```
 
 </details>
@@ -148,7 +148,7 @@ docker build `
 - Skip: If you only care about installer-cache mode, jump to Step 3.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:dev
+powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:runtime
 ```
 
 ### Step 3 — Run validation in installer-cache mode
@@ -197,7 +197,7 @@ Run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
-	-ImageTag shotwright:dev `
+	-ImageTag shotwright:runtime `
 	-AfterEffectsPayloadRoot (Join-Path 'C:\data\payload' $setup.payload_dir_name) `
 	-CreativeCloudHelperRoot (Join-Path 'C:\data\payload' $setup.helper_dir_name)
 ```
@@ -242,9 +242,9 @@ validation-data/
 
 ## 📝 Design Notes
 
-- The Docker image does not bundle Adobe After Effects itself.
-- The runtime can either mount the host-side AE install resolved from `setup-versions.yml` or install into that same container path from a GHCR or locally built payload cache at `C:\data\payload`.
-- Container startup runs `scripts/runtime_entrypoint.ps1`. When `AUTO_INSTALL_AFTER_EFFECTS=1` and installer-cache directories are detected, AE is installed automatically. When they are absent, installation is skipped.
+- The default worker image is `shotwright:runtime`, which copies the published GHCR setup payload into the image and installs the `setup-versions.yml` selection during image build.
+- Validation can still exercise host-mount and installer-cache flows explicitly, but service-created worker containers now default to the preinstalled runtime image.
+- Container startup still runs `scripts/runtime_entrypoint.ps1`. When `aerender.exe` is already present, the shared installer path returns immediately.
 - Validation JSX is patch-only by design. nexrender owns render execution and output routing.
 - The validation job uses `outputExt: mp4` plus `@nexrender/action-copy` so the smoke test ends with a single predictable video artifact.
 

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 from time import monotonic
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,8 @@ logger = logging.getLogger(__name__)
 
 _IN_MEMORY_MODEL_CACHE_TTL_SECONDS = 60
 _MONGO_MODEL_CACHE_TTL_SECONDS = 600
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 
 
 def _utcnow() -> datetime:
@@ -191,13 +194,16 @@ class ShotwrightCopilotRuntimeManager:
 
     async def _resolve_runtime_settings(self) -> dict[str, str | bool]:
         doc = await get_admin_collection().find_one({"_id": "settings"}) or {}
-        return {
-            "copilot_cli_path": _first_non_empty(doc.get("copilot_cli_path"), settings.copilot_cli_path),
-            "copilot_workspace_root": _first_non_empty(
+        configured_workspace_root = (
+            _first_non_empty(
                 doc.get("copilot_workspace_root"),
                 settings.copilot_workspace_root,
             )
-            or "C:\\workspace",
+            or "C:\\workspace"
+        )
+        return {
+            "copilot_cli_path": _first_non_empty(doc.get("copilot_cli_path"), settings.copilot_cli_path),
+            "copilot_workspace_root": self._resolve_workspace_root(configured_workspace_root),
             "copilot_use_logged_in_user": bool(
                 doc.get("copilot_use_logged_in_user", settings.copilot_use_logged_in_user)
             ),
@@ -236,6 +242,37 @@ class ShotwrightCopilotRuntimeManager:
                 env[key] = value.strip()
         return env
 
+    def _workspace_root_candidates(self, configured_workspace_root: str | None) -> list[str]:
+        candidates: list[str] = []
+        for candidate in (
+            configured_workspace_root,
+            settings.copilot_workspace_root,
+            os.environ.get("SHOTWRIGHT_REPO_ROOT"),
+            os.getcwd(),
+            str(_REPO_ROOT),
+        ):
+            normalized = _first_non_empty(candidate)
+            if not normalized:
+                continue
+            resolved = os.path.abspath(normalized)
+            if resolved not in candidates:
+                candidates.append(resolved)
+        return candidates
+
+    def _resolve_workspace_root(self, configured_workspace_root: str) -> str:
+        configured_root = os.path.abspath(configured_workspace_root)
+        for candidate in self._workspace_root_candidates(configured_workspace_root):
+            if os.path.isdir(candidate):
+                if candidate != configured_root:
+                    logger.warning(
+                        "Configured Copilot workspace root %s is unavailable; falling back to %s",
+                        configured_workspace_root,
+                        candidate,
+                    )
+                return candidate
+
+        return configured_root
+
     async def get_runtime_settings(self) -> dict[str, str | bool]:
         return await self._resolve_runtime_settings()
 
@@ -248,13 +285,23 @@ class ShotwrightCopilotRuntimeManager:
             else settings.copilot_reasoning_effort
         )
 
-        try:
-            return await self.validate_model_choice(configured_model.strip(), configured_reasoning_effort)
-        except Exception:
+        # Do not block hot request paths such as session creation on a live model
+        # enumeration round-trip. If the Copilot CLI is slow or unhealthy, model
+        # validation here can make the whole API appear down. Explicit model edits
+        # still validate through validate_model_choice().
+        normalized_reasoning_effort = (
+            configured_reasoning_effort
+            if configured_reasoning_effort in _SUPPORTED_REASONING_EFFORTS
+            else settings.copilot_reasoning_effort
+        )
+        if configured_reasoning_effort and configured_reasoning_effort not in _SUPPORTED_REASONING_EFFORTS:
             logger.warning(
-                "Falling back to application Copilot defaults because the configured admin defaults could not be validated"
+                "Ignoring unsupported default Copilot reasoning effort %s and falling back to %s",
+                configured_reasoning_effort,
+                settings.copilot_reasoning_effort,
             )
-            return settings.copilot_model, settings.copilot_reasoning_effort
+
+        return configured_model.strip(), normalized_reasoning_effort
 
     def _build_client(self, github_token: str | None, runtime_settings: dict[str, str | bool]) -> CopilotClient:
         return CopilotClient(
@@ -409,6 +456,7 @@ class ShotwrightCopilotRuntimeManager:
             "Always inspect the workspace state before taking action when the current container, project, or render state is unclear. "
             "Do not claim that an After Effects action happened unless a tool succeeded. "
             "Prefer starting or reusing a container before JSX or render actions. "
+            "If the user asks to create a new AEP and no suitable project already exists, create a managed Shotwright project workspace first and save the .aep there before rendering or exporting. "
             "If multiple uploaded projects or AEP files exist and the intended target is ambiguous, ask the user a concise clarification question. "
             "When rendering succeeds, mention the preview stream and export archive when relevant."
         )
@@ -417,6 +465,7 @@ class ShotwrightCopilotRuntimeManager:
         tool_names = [
             "inspect_workspace",
             "ensure_after_effects_container",
+            "create_after_effects_project",
             "list_uploaded_projects",
             "select_active_project",
             "run_after_effects_jsx",
@@ -436,13 +485,21 @@ class ShotwrightCopilotRuntimeManager:
         return [agent]
 
     def _resolve_skill_directories(self, runtime_settings: dict[str, str | bool]) -> list[str]:
-        workspace_root = str(runtime_settings["copilot_workspace_root"])
-        candidates = [
-            os.path.join(workspace_root, ".github", "skills"),
-            os.path.join(workspace_root, ".agents", "skills"),
-            os.path.join(workspace_root, ".claude", "skills"),
-        ]
-        return [path for path in candidates if os.path.isdir(path)]
+        directories: list[str] = []
+        seen: set[str] = set()
+
+        for workspace_root in self._workspace_root_candidates(str(runtime_settings["copilot_workspace_root"])):
+            for path in (
+                os.path.join(workspace_root, ".github", "skills"),
+                os.path.join(workspace_root, ".agents", "skills"),
+                os.path.join(workspace_root, ".claude", "skills"),
+            ):
+                if path in seen or not os.path.isdir(path):
+                    continue
+                seen.add(path)
+                directories.append(path)
+
+        return directories
 
     def _resolve_skill_names(self, skill_directories: list[str]) -> list[str]:
         skill_names: set[str] = set()
@@ -761,9 +818,57 @@ class ShotwrightCopilotRuntimeManager:
                     "assistant_message": assistant_doc,
                     "session_status": "idle",
                 }
+            except TimeoutError:
+                timeout_message = (
+                    f"Shotwright timed out waiting for this turn after {settings.copilot_turn_timeout_seconds:g} seconds."
+                )
+                logger.warning(
+                    "Copilot turn timed out for %s after %ss",
+                    app_session_id,
+                    settings.copilot_turn_timeout_seconds,
+                )
+
+                partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
+                if runtime.turn_state:
+                    runtime.turn_state.finalized = True
+                    runtime.turn_state.version += 1
+                    updated_doc = await self._sync_streaming_message(
+                        runtime.turn_state,
+                        content=runtime.turn_state.content if partial_output else timeout_message,
+                        version=runtime.turn_state.version,
+                        streaming=False,
+                        state="error",
+                    )
+                    if updated_doc:
+                        assistant_doc = updated_doc
+
+                await self._persist_event(
+                    app_session_id,
+                    "session.timeout",
+                    {
+                        "message": timeout_message,
+                        "timeout_seconds": settings.copilot_turn_timeout_seconds,
+                        "partial_output": partial_output,
+                    },
+                    turn_id=turn_id,
+                    sequence=runtime.next_event_sequence(),
+                )
+                await self._set_session_status(app_session_id, "error", last_error=timeout_message)
+
+                if runtime.pending_tasks:
+                    await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
+                await self.disconnect_session(app_session_id)
+
+                if runtime.turn_state:
+                    assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+
+                return {
+                    "assistant_message": assistant_doc,
+                    "session_status": "error",
+                }
             except Exception as exc:
                 logger.exception("Copilot turn failed for %s", app_session_id)
-                timeout_error = isinstance(exc, TimeoutError)
+                error_message = str(exc).strip() or exc.__class__.__name__
                 if runtime.turn_state and runtime.turn_state.content.strip():
                     runtime.turn_state.finalized = True
                     runtime.turn_state.version += 1
@@ -777,29 +882,15 @@ class ShotwrightCopilotRuntimeManager:
                 else:
                     await get_message_collection().delete_one({"_id": assistant_doc["_id"]})
                     await publish_message_deleted(app_session_id, assistant_doc["_id"])
-                if timeout_error:
-                    await self._persist_event(
-                        app_session_id,
-                        "session.timeout",
-                        {
-                            "message": str(exc),
-                            "timeout_seconds": settings.copilot_turn_timeout_seconds,
-                            "partial_output": bool(runtime.turn_state and runtime.turn_state.content.strip()),
-                        },
-                        turn_id=turn_id,
-                        sequence=runtime.next_event_sequence(),
-                    )
-                elif not (runtime.turn_state and runtime.turn_state.error_event_seen):
+                if not (runtime.turn_state and runtime.turn_state.error_event_seen):
                     await self._persist_event(
                         app_session_id,
                         "session.error",
-                        {"message": str(exc)},
+                        {"message": error_message},
                         turn_id=turn_id,
                         sequence=runtime.next_event_sequence(),
                     )
-                await self._set_session_status(app_session_id, "error", last_error=str(exc))
-                if timeout_error:
-                    await self.disconnect_session(app_session_id)
+                await self._set_session_status(app_session_id, "error", last_error=error_message)
                 raise
             finally:
                 runtime.turn_state = None

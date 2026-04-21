@@ -18,6 +18,8 @@ class ProjectInfo(BaseModel):
     filename: str
     workspace_dir: str
     aep_files: list[str] = Field(default_factory=list)
+    entry_aep_file: str | None = None
+    origin: str = "uploaded"
     created_at: datetime
     status: ProjectStatus = ProjectStatus.uploaded
 

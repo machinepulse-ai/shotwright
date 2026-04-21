@@ -34,6 +34,14 @@ def _tool_failure(message: str, *, error: str | None = None) -> ToolResult:
 def build_shotwright_tools(app_session_id: str) -> list[Tool]:
     """Build session-scoped tools for the Copilot runtime."""
 
+    def _coerce_timeout_seconds(raw_value: object, default: int = 300) -> int:
+        if raw_value is None:
+            return default
+        try:
+            return max(30, int(raw_value))
+        except (TypeError, ValueError):
+            return default
+
     async def inspect_workspace(invocation: ToolInvocation) -> ToolResult:
         session_col = get_session_collection()
         session_doc = await session_col.find_one({"_id": app_session_id})
@@ -60,6 +68,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 {
                     "project_id": project["_id"],
                     "filename": project["filename"],
+                    "origin": project.get("origin", "uploaded"),
+                    "entry_aep_file": project.get("entry_aep_file"),
                     "aep_files": project.get("aep_files", []),
                 }
                 for project in projects
@@ -100,6 +110,68 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "Started a new Shotwright After Effects container",
         )
 
+    async def create_after_effects_project(invocation: ToolInvocation) -> ToolResult:
+        args = invocation.arguments or {}
+        script_content = (args.get("script_content") or "").strip()
+        if not script_content:
+            return _tool_failure("script_content is required.")
+
+        session_col = get_session_collection()
+        session_doc = await session_col.find_one({"_id": app_session_id})
+        if not session_doc:
+            return _tool_failure("Shotwright session not found.")
+        if not session_doc.get("container_id"):
+            return _tool_failure("No running After Effects container is attached to this session.")
+
+        project = await pm.create_project_workspace(
+            app_session_id,
+            project_name=args.get("project_name"),
+            aep_filename=args.get("aep_filename"),
+            set_active=False,
+        )
+        result = await nr.run_jsx_script(
+            session_doc["container_id"],
+            script_content,
+            project=project,
+            timeout_seconds=_coerce_timeout_seconds(args.get("timeout_seconds")),
+        )
+        refreshed_project = await pm.refresh_project_files(app_session_id, project["_id"])
+        if not refreshed_project or not refreshed_project.get("aep_files"):
+            payload = {
+                **result,
+                "project_id": project["_id"],
+                "workspace_dir": project["workspace_dir"],
+                "entry_aep_file": project.get("entry_aep_file"),
+                "entry_aep_path": str(Path(project["workspace_dir"]) / project["entry_aep_file"]),
+            }
+            return ToolResult(
+                text_result_for_llm=json.dumps(payload, ensure_ascii=False),
+                result_type="failure",
+                error=(
+                    "JSX did not save an .aep file into the managed project workspace. "
+                    "Save the project to SHOTWRIGHT_PROJECT_FILE and call app.quit()."
+                ),
+                session_log=args.get("description") or "Failed to create After Effects project",
+            )
+
+        await pm.set_active_project(app_session_id, refreshed_project["_id"])
+        active_project = await pm.get_project(app_session_id, refreshed_project["_id"]) or refreshed_project
+        entry_aep_file = active_project.get("entry_aep_file") or (active_project.get("aep_files") or [None])[0]
+        payload = {
+            **result,
+            "project_id": active_project["_id"],
+            "filename": active_project["filename"],
+            "origin": active_project.get("origin", "generated"),
+            "workspace_dir": active_project["workspace_dir"],
+            "entry_aep_file": entry_aep_file,
+            "entry_aep_path": str(Path(active_project["workspace_dir"]) / entry_aep_file) if entry_aep_file else None,
+            "aep_files": active_project.get("aep_files", []),
+        }
+        return _tool_success(
+            payload,
+            args.get("description") or f"Created After Effects project {active_project['filename']}",
+        )
+
     async def list_uploaded_projects(invocation: ToolInvocation) -> ToolResult:
         projects = await pm.list_projects(app_session_id)
         payload = {
@@ -107,13 +179,15 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 {
                     "project_id": project["_id"],
                     "filename": project["filename"],
+                    "origin": project.get("origin", "uploaded"),
+                    "entry_aep_file": project.get("entry_aep_file"),
                     "aep_files": project.get("aep_files", []),
                     "workspace_dir": project["workspace_dir"],
                 }
                 for project in projects
             ]
         }
-        return _tool_success(payload, "Listed uploaded project archives")
+        return _tool_success(payload, "Listed Shotwright session projects")
 
     async def select_active_project(invocation: ToolInvocation) -> ToolResult:
         args = invocation.arguments or {}
@@ -130,6 +204,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             {
                 "project_id": project_id,
                 "filename": project["filename"],
+                "origin": project.get("origin", "uploaded"),
+                "entry_aep_file": project.get("entry_aep_file"),
                 "aep_files": project.get("aep_files", []),
             },
             f"Selected project {project['filename']} as active",
@@ -146,10 +222,35 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         if not session_doc or not session_doc.get("container_id"):
             return _tool_failure("No running After Effects container is attached to this session.")
 
-        result = await nr.run_jsx_script(session_doc["container_id"], script_content)
-        result_type = "success" if result.get("exit_code") == 0 else "failure"
+        project_id = args.get("project_id") or session_doc.get("active_project_id")
+        project = None
+        if project_id:
+            project = await pm.get_project(app_session_id, project_id)
+            if not project:
+                return _tool_failure(f"Project {project_id} not found.")
+
+        result = await nr.run_jsx_script(
+            session_doc["container_id"],
+            script_content,
+            project=project,
+            timeout_seconds=_coerce_timeout_seconds(args.get("timeout_seconds")),
+        )
+        payload = dict(result)
+        if project:
+            refreshed_project = await pm.refresh_project_files(app_session_id, project["_id"])
+            if refreshed_project:
+                entry_aep_file = refreshed_project.get("entry_aep_file") or (refreshed_project.get("aep_files") or [None])[0]
+                payload["project_id"] = refreshed_project["_id"]
+                payload["workspace_dir"] = refreshed_project["workspace_dir"]
+                payload["entry_aep_file"] = entry_aep_file
+                payload["entry_aep_path"] = (
+                    str(Path(refreshed_project["workspace_dir"]) / entry_aep_file) if entry_aep_file else None
+                )
+                payload["aep_files"] = refreshed_project.get("aep_files", [])
+
+        result_type = "success" if result.get("success", result.get("exit_code") == 0) else "failure"
         return ToolResult(
-            text_result_for_llm=json.dumps(result, ensure_ascii=False),
+            text_result_for_llm=json.dumps(payload, ensure_ascii=False),
             result_type=result_type,
             error=result.get("output") if result_type == "failure" else None,
             session_log=args.get("description") or "Executed After Effects JSX script",
@@ -273,8 +374,45 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             skip_permission=True,
         ),
         Tool(
+            name="create_after_effects_project",
+            description=(
+                "Create a new managed Shotwright project workspace, run an After Effects JSX script to save an .aep into it, "
+                "and make that project active for later render/export steps."
+            ),
+            handler=create_after_effects_project,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_name": {
+                        "type": "string",
+                        "description": "Human-readable project name used for the default .aep file name",
+                    },
+                    "aep_filename": {
+                        "type": "string",
+                        "description": "Optional .aep filename to save inside the managed workspace",
+                    },
+                    "script_content": {
+                        "type": "string",
+                        "description": (
+                            "Complete JSX script source. Save the project to SHOTWRIGHT_PROJECT_FILE and call app.quit() when finished."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short human-readable description of the creation step",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional timeout for AfterFX.jsx execution",
+                    },
+                },
+                "required": ["script_content"],
+            },
+            skip_permission=True,
+        ),
+        Tool(
             name="list_uploaded_projects",
-            description="List all AEP archives uploaded for the current session, including discovered .aep files.",
+            description="List all managed or uploaded Shotwright session projects, including discovered .aep files.",
             handler=list_uploaded_projects,
             parameters={"type": "object", "properties": {}},
             skip_permission=True,
@@ -297,11 +435,18 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         ),
         Tool(
             name="run_after_effects_jsx",
-            description="Execute a JSX script inside the active After Effects container.",
+            description=(
+                "Execute a JSX script inside the active After Effects container. When a project_id or active project exists, "
+                "the script can use SHOTWRIGHT_PROJECT_ROOT and SHOTWRIGHT_PROJECT_FILE to save updates back into the managed workspace."
+            ),
             handler=run_after_effects_jsx,
             parameters={
                 "type": "object",
                 "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier; defaults to the active project",
+                    },
                     "script_content": {
                         "type": "string",
                         "description": "Complete JSX script source",
@@ -310,6 +455,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                         "type": "string",
                         "description": "Short human-readable description of the operation",
                     },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional timeout for AfterFX.jsx execution",
+                    },
                 },
                 "required": ["script_content"],
             },
@@ -317,7 +466,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         ),
         Tool(
             name="render_after_effects_project",
-            description="Render an uploaded After Effects project through nexrender-cli and prepare an HLS preview.",
+            description="Render a managed or uploaded After Effects project through nexrender-cli and prepare an HLS preview.",
             handler=render_after_effects_project,
             parameters={
                 "type": "object",

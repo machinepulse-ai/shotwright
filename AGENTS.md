@@ -15,11 +15,12 @@ This repository should stay:
 ## Current Working Model
 
 - The Docker image includes Node.js, Python 3.13, ffmpeg, Git, and the runtime dependencies required by nexrender.
-- Adobe After Effects is intentionally not included in the image.
-- Two runtime modes are supported:
+- The default worker image is `shotwright:runtime`.
+- `shotwright:runtime` copies the published `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` payload into the image and completes the After Effects install during image build.
+- Validation still supports two explicit smoke-test paths when needed:
   1. **Host mount** — mount the host-side AE install resolved from `setup-versions.yml` into the container.
   2. **Installer-cache mode** — pull a pre-built installer payload image from GHCR first, or build the cache locally with `scripts/install/download_after_effects_payload.py`, then mount it at `C:\data\payload` and let the container install AE at startup through `scripts/runtime_entrypoint.ps1`.
-- `AUTO_INSTALL_AFTER_EFFECTS=1` is enabled by default in the Dockerfile. If no installer cache is mounted, the install step is skipped.
+- `AUTO_INSTALL_AFTER_EFFECTS` still controls the shared startup check, but the default runtime image already has AE installed so the installer path returns immediately.
 - Validation uses `scripts/validate/create_validation_animation_project.jsx` to generate the test project and `scripts/validate/validation_patch.jsx` to make composition-level edits only.
 - nexrender owns the final render execution and output handling. Do not move render-queue logic into the validation patch script.
 
@@ -84,7 +85,7 @@ No `.done` marker files are required for the local smoke test.
 
 Last validated on **2026-04-17**:
 
-- Image: `shotwright:latest` on Windows Server LTSC 2025 with process isolation
+- Image: `shotwright:runtime` on Windows Server LTSC 2025 with process isolation
 - After Effects: version 26.2 (`aerender 26.2x49`)
 - nexrender: `@nexrender/cli@1.63.3`, `@nexrender/action-copy@1.49.4`, `@nexrender/action-encode@1.46.8`
 - Output artifact: `validation.mp4`, 4 seconds, H.264, roughly 5 MB

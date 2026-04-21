@@ -56,7 +56,7 @@ services:
       SHOTWRIGHT_GITHUB_TOKEN: ${SHOTWRIGHT_GITHUB_TOKEN:-}
       SHOTWRIGHT_COPILOT_MODEL: ${SHOTWRIGHT_COPILOT_MODEL:-gpt-5.4}
       SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
-      SHOTWRIGHT_SHOTWRIGHT_IMAGE: shotwright:latest
+      SHOTWRIGHT_SHOTWRIGHT_IMAGE: ${SHOTWRIGHT_SHOTWRIGHT_IMAGE:-shotwright:runtime}
     volumes:
       - uploads:C:/data/uploads
       - exports:C:/data/exports
