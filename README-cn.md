@@ -43,7 +43,7 @@
 ## ✨ 验证演示
 
 <p align="center">
-	<img src="https://github.com/LiuChangFreeman/shotwright/blob/main/docs/assets/validation-preview.gif?raw=1" alt="Shotwright 验证渲染 GIF 预览" width="640" />
+	<img src="./docs/assets/validation-preview.gif" alt="Shotwright 验证渲染 GIF 预览" width="640" />
 </p>
 
 上方 GIF 截取自 validation mp4，是一个 4 秒循环的仓库内演示预览。冒烟测试本身仍会通过 Windows 容器、宿主机挂载的 After Effects 安装与 nexrender，稳定产出真实的 mp4 文件。

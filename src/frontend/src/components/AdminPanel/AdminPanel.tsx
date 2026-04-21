@@ -19,6 +19,7 @@ const defaultAdminSettings: AdminSettings = {
   github_token_set: false,
   default_copilot_model: "gpt-5.4",
   default_copilot_reasoning_effort: "high",
+  copilot_turn_timeout_seconds: 900,
   copilot_cli_path: "",
   copilot_workspace_root: "C:/workspace",
   copilot_use_logged_in_user: false,
@@ -39,6 +40,10 @@ function normalizeAdminSettings(settings: Partial<AdminSettings> | null | undefi
       settings && "default_copilot_reasoning_effort" in settings
         ? settings.default_copilot_reasoning_effort ?? null
         : defaultAdminSettings.default_copilot_reasoning_effort,
+    copilot_turn_timeout_seconds:
+      typeof settings?.copilot_turn_timeout_seconds === "number" && settings.copilot_turn_timeout_seconds > 0
+        ? settings.copilot_turn_timeout_seconds
+        : defaultAdminSettings.copilot_turn_timeout_seconds,
     copilot_cli_path: settings?.copilot_cli_path ?? defaultAdminSettings.copilot_cli_path,
     copilot_workspace_root: settings?.copilot_workspace_root ?? defaultAdminSettings.copilot_workspace_root,
     copilot_http_proxy: settings?.copilot_http_proxy ?? defaultAdminSettings.copilot_http_proxy,
@@ -205,6 +210,7 @@ export default function AdminPanel() {
         default_copilot_reasoning_effort: defaultReasoningSupported
           ? runtimeSettings.default_copilot_reasoning_effort
           : null,
+        copilot_turn_timeout_seconds: runtimeSettings.copilot_turn_timeout_seconds,
         copilot_cli_path: runtimeSettings.copilot_cli_path,
         copilot_workspace_root: runtimeSettings.copilot_workspace_root,
         copilot_use_logged_in_user: runtimeSettings.copilot_use_logged_in_user,
@@ -376,6 +382,23 @@ export default function AdminPanel() {
             </label>
 
             <label className="form-field">
+              <span className="field-label">{copy.admin.fields.turnTimeout}</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={runtimeSettings.copilot_turn_timeout_seconds}
+                onChange={(event) => {
+                  const nextValue = Number.parseFloat(event.target.value);
+                  handleRuntimeSettingChange(
+                    "copilot_turn_timeout_seconds",
+                    Number.isFinite(nextValue) && nextValue > 0 ? nextValue : 0,
+                  );
+                }}
+              />
+            </label>
+
+            <label className="form-field">
               <span className="field-label">{copy.admin.fields.workspaceRoot}</span>
               <input
                 value={runtimeSettings.copilot_workspace_root}
@@ -444,7 +467,12 @@ export default function AdminPanel() {
             <button
               className="btn-primary"
               onClick={handleSaveSettings}
-              disabled={savingSettings || !runtimeSettings.copilot_workspace_root.trim() || !runtimeSettings.default_copilot_model.trim()}
+              disabled={
+                savingSettings ||
+                !runtimeSettings.copilot_workspace_root.trim() ||
+                !runtimeSettings.default_copilot_model.trim() ||
+                runtimeSettings.copilot_turn_timeout_seconds <= 0
+              }
             >
               {savingSettings ? copy.common.saving : copy.common.save}
             </button>

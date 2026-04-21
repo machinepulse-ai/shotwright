@@ -32,6 +32,7 @@ async def get_admin_settings():
             if "default_copilot_reasoning_effort" in doc
             else settings.copilot_reasoning_effort
         ),
+        copilot_turn_timeout_seconds=await runtime_manager.resolve_turn_timeout_seconds(),
         **runtime_settings,
     )
 
@@ -41,6 +42,7 @@ async def update_admin_settings(body: CopilotSettingsUpdate):
     col = get_admin_collection()
     payload = body.model_dump()
     payload["default_copilot_model"] = payload["default_copilot_model"].strip() or settings.copilot_model
+    payload["copilot_turn_timeout_seconds"] = float(payload["copilot_turn_timeout_seconds"])
     payload["copilot_cli_path"] = payload["copilot_cli_path"].strip()
     payload["copilot_workspace_root"] = payload["copilot_workspace_root"].strip()
     payload["copilot_http_proxy"] = payload["copilot_http_proxy"].strip()
@@ -58,6 +60,7 @@ async def update_admin_settings(body: CopilotSettingsUpdate):
             if "default_copilot_reasoning_effort" in doc
             else settings.copilot_reasoning_effort
         ),
+        copilot_turn_timeout_seconds=await runtime_manager.resolve_turn_timeout_seconds(),
         **runtime_settings,
     )
 

@@ -118,6 +118,7 @@ export interface AdminSettings {
   github_token_set: boolean;
   default_copilot_model: string;
   default_copilot_reasoning_effort: ReasoningEffort | null;
+  copilot_turn_timeout_seconds: number;
   copilot_cli_path: string;
   copilot_workspace_root: string;
   copilot_use_logged_in_user: boolean;

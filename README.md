@@ -52,7 +52,7 @@ Build Windows render workers, mount a real After Effects install or auto-install
 ## ✨ Validation Demo
 
 <p align="center">
-	<img src="https://github.com/LiuChangFreeman/shotwright/blob/main/docs/assets/validation-preview.gif?raw=1" alt="Shotwright validation render GIF preview" width="640" />
+	<img src="./docs/assets/validation-preview.gif" alt="Shotwright validation render GIF preview" width="640" />
 </p>
 
 The GIF above is a short looping repository preview cut from the validation mp4. The smoke test itself still renders a real mp4 through a Windows container, a mounted host After Effects installation, and nexrender.

@@ -15,6 +15,7 @@ import remarkGfm from "remark-gfm";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   AgentSessionStreamConnection,
+  cancelChatTurn,
   createSession,
   deleteSession,
   exportProject,
@@ -51,6 +52,7 @@ type UiErrorKey =
   | "failedLoadModelOptions"
   | "failedRenameSession"
   | "failedSendPrompt"
+  | "failedStopGeneration"
   | "failedSaveSessionSettings"
   | "uploadFailed"
   | "exportFailed"
@@ -1527,6 +1529,7 @@ export default function AgentPanel({
     ),
   );
   const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
+  const [stoppingGenerationSessionId, setStoppingGenerationSessionId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
   const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
@@ -1607,6 +1610,7 @@ export default function AgentPanel({
   }, [copy.common.copilot, currentSession, sessionModelOptions]);
 
   const sending = Boolean(currentSession && sendingSessionId === currentSession._id);
+  const stoppingGeneration = Boolean(currentSession && stoppingGenerationSessionId === currentSession._id);
   const sessionStatus = context?.session.status || currentSession?.status || "idle";
   const isResponding = sending || sessionStatus === "running";
   const visibleMessages = useMemo(() => {
@@ -2062,6 +2066,7 @@ export default function AgentPanel({
         syncSessionRecord(session);
         if (session.status !== "running") {
           setSendingSessionId((previous) => (previous === sessionId ? null : previous));
+          setStoppingGenerationSessionId((previous) => (previous === sessionId ? null : previous));
         }
       },
       onMessageUpsert: (message) => {
@@ -2244,6 +2249,21 @@ export default function AgentPanel({
       .finally(() => {
         setSendingSessionId((previous) => (previous === sessionId ? null : previous));
       });
+  };
+
+  const handleStopGeneration = async () => {
+    if (!currentSession || !isResponding || stoppingGeneration) return;
+
+    const sessionId = currentSession._id;
+    setPanelError(null);
+    setStoppingGenerationSessionId(sessionId);
+
+    try {
+      await cancelChatTurn(sessionId);
+    } catch (err) {
+      setPanelError(buildUiError(err, "failedStopGeneration"));
+      setStoppingGenerationSessionId((previous) => (previous === sessionId ? null : previous));
+    }
   };
 
   const handleAppendAttachments = async (files: File[]) => {
@@ -3125,16 +3145,29 @@ export default function AgentPanel({
                 </div>
                 <div className="composer-actions">
                   <span className="composer-shortcut">{copy.common.ctrlEnterHint}</span>
-                  <button
-                    className="btn-primary send-button"
-                    onClick={handleSend}
-                    disabled={!currentSession || sending || (!prompt.trim() && !pendingAttachments.length)}
-                  >
-                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                      <path d="M2.5 8.75 11 8.76 7.72 12.04a.75.75 0 1 0 1.06 1.06l4.56-4.57a.75.75 0 0 0 0-1.06L8.78 2.9a.75.75 0 0 0-1.06 1.06L11 7.25H2.5a.75.75 0 0 0 0 1.5Z" fill="currentColor"/>
-                    </svg>
-                    <span>{sending ? copy.common.working : copy.common.send}</span>
-                  </button>
+                  {isResponding ? (
+                    <button
+                      className="btn-danger send-button"
+                      onClick={() => void handleStopGeneration()}
+                      disabled={!currentSession || stoppingGeneration}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                        <path d="M4 3.25A.75.75 0 0 1 4.75 2.5h6.5A.75.75 0 0 1 12 3.25v9.5a.75.75 0 0 1-.75.75h-6.5A.75.75 0 0 1 4 12.75v-9.5Z" fill="currentColor"/>
+                      </svg>
+                      <span>{stoppingGeneration ? copy.agent.stoppingGeneration : copy.agent.stopGenerating}</span>
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-primary send-button"
+                      onClick={handleSend}
+                      disabled={!currentSession || sending || (!prompt.trim() && !pendingAttachments.length)}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                        <path d="M2.5 8.75 11 8.76 7.72 12.04a.75.75 0 1 0 1.06 1.06l4.56-4.57a.75.75 0 0 0 0-1.06L8.78 2.9a.75.75 0 0 0-1.06 1.06L11 7.25H2.5a.75.75 0 0 0 0 1.5Z" fill="currentColor"/>
+                      </svg>
+                      <span>{sending ? copy.common.working : copy.common.send}</span>
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

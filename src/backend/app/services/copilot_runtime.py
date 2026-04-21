@@ -75,6 +75,8 @@ def _event_type_name(event) -> str:
 def _event_summary(event_type: str, data: dict) -> str:
     if event_type == "session.turn.started":
         return "Turn submitted to Copilot runtime"
+    if event_type == "session.cancelled":
+        return data.get("message") or "Turn cancelled"
     if event_type == "session.timeout":
         timeout_seconds = data.get("timeout_seconds")
         return f"Turn timed out after {timeout_seconds}s" if timeout_seconds else "Turn timed out"
@@ -108,7 +110,15 @@ def _first_non_empty(*values: str | None) -> str:
     return ""
 
 
-def _prepare_turn_attachments(attachments: list[dict] | None) -> tuple[list[dict], list[dict]]:
+class TurnCancelledError(Exception):
+    """Raised when a user manually stops an in-flight Copilot turn."""
+
+
+def _prepare_turn_attachments(
+    attachments: list[dict] | None,
+    *,
+    app_session_id: str | None = None,
+) -> tuple[list[dict], list[dict]]:
     copilot_attachments: list[dict] = []
     persisted_attachments: list[dict] = []
 
@@ -116,6 +126,8 @@ def _prepare_turn_attachments(attachments: list[dict] | None) -> tuple[list[dict
         data_url = str(attachment.get("data_url") or "")
         _, _, encoded_payload = data_url.partition(",")
         if not encoded_payload:
+            if app_session_id:
+                logger.warning("Skipping malformed inline image attachment for session %s", app_session_id)
             continue
 
         mime_type = str(attachment.get("mime_type") or "application/octet-stream")
@@ -275,6 +287,17 @@ class ShotwrightCopilotRuntimeManager:
 
     async def get_runtime_settings(self) -> dict[str, str | bool]:
         return await self._resolve_runtime_settings()
+
+    def _normalize_turn_timeout_seconds(self, value: object | None) -> float:
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return settings.copilot_turn_timeout_seconds
+        return normalized if normalized > 0 else settings.copilot_turn_timeout_seconds
+
+    async def resolve_turn_timeout_seconds(self) -> float:
+        doc = await get_admin_collection().find_one({"_id": "settings"}) or {}
+        return self._normalize_turn_timeout_seconds(doc.get("copilot_turn_timeout_seconds"))
 
     async def resolve_default_session_settings(self) -> tuple[str, ReasoningEffort | None]:
         doc = await get_admin_collection().find_one({"_id": "settings"}) or {}
@@ -678,6 +701,8 @@ class ShotwrightCopilotRuntimeManager:
                         )
 
                 if turn_state and event_type == "assistant.message":
+                    if turn_state.finalized:
+                        return
                     final_content = getattr(event_data, "content", None)
                     if isinstance(final_content, str) and final_content:
                         turn_state.content = final_content
@@ -742,7 +767,11 @@ class ShotwrightCopilotRuntimeManager:
         runtime = await self.ensure_runtime(app_session_id)
         async with runtime.lock:
             turn_id = str(uuid4())
-            copilot_attachments, persisted_attachments = _prepare_turn_attachments(attachments)
+            turn_timeout_seconds = await self.resolve_turn_timeout_seconds()
+            copilot_attachments, persisted_attachments = _prepare_turn_attachments(
+                attachments,
+                app_session_id=app_session_id,
+            )
             user_metadata = {"turn_id": turn_id, "kind": "user_prompt"}
             if persisted_attachments:
                 user_metadata["attachments"] = persisted_attachments
@@ -779,15 +808,17 @@ class ShotwrightCopilotRuntimeManager:
                     app_session_id,
                     "session.turn.started",
                     {
+                        "attachment_count": len(persisted_attachments),
+                        "attachment_mime_types": [attachment.get("mime_type") for attachment in persisted_attachments],
                         "copilot_message_id": copilot_message_id,
-                        "timeout_seconds": settings.copilot_turn_timeout_seconds,
+                        "timeout_seconds": turn_timeout_seconds,
                     },
                     turn_id=turn_id,
                     sequence=runtime.next_event_sequence(),
                 )
                 await asyncio.wait_for(
                     runtime.turn_state.idle_event.wait(),
-                    timeout=settings.copilot_turn_timeout_seconds,
+                    timeout=turn_timeout_seconds,
                 )
                 if runtime.turn_state.error:
                     raise runtime.turn_state.error
@@ -818,14 +849,54 @@ class ShotwrightCopilotRuntimeManager:
                     "assistant_message": assistant_doc,
                     "session_status": "idle",
                 }
+            except TurnCancelledError as exc:
+                cancellation_message = str(exc).strip() or "Generation stopped by user."
+                partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
+
+                if runtime.turn_state:
+                    runtime.turn_state.finalized = True
+                    runtime.turn_state.version += 1
+                    updated_doc = await self._sync_streaming_message(
+                        runtime.turn_state,
+                        content=runtime.turn_state.content if partial_output else cancellation_message,
+                        version=runtime.turn_state.version,
+                        streaming=False,
+                        state="cancelled",
+                    )
+                    if updated_doc:
+                        assistant_doc = updated_doc
+
+                await self._persist_event(
+                    app_session_id,
+                    "session.cancelled",
+                    {
+                        "message": cancellation_message,
+                        "partial_output": partial_output,
+                    },
+                    turn_id=turn_id,
+                    sequence=runtime.next_event_sequence(),
+                )
+                await self._set_session_status(app_session_id, "idle", last_error=None)
+
+                if runtime.pending_tasks:
+                    await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
+                await self.disconnect_session(app_session_id)
+
+                if runtime.turn_state:
+                    assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+
+                return {
+                    "assistant_message": assistant_doc,
+                    "session_status": "idle",
+                }
             except TimeoutError:
                 timeout_message = (
-                    f"Shotwright timed out waiting for this turn after {settings.copilot_turn_timeout_seconds:g} seconds."
+                    f"Shotwright timed out waiting for this turn after {turn_timeout_seconds:g} seconds."
                 )
                 logger.warning(
                     "Copilot turn timed out for %s after %ss",
                     app_session_id,
-                    settings.copilot_turn_timeout_seconds,
+                    turn_timeout_seconds,
                 )
 
                 partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
@@ -847,7 +918,7 @@ class ShotwrightCopilotRuntimeManager:
                     "session.timeout",
                     {
                         "message": timeout_message,
-                        "timeout_seconds": settings.copilot_turn_timeout_seconds,
+                        "timeout_seconds": turn_timeout_seconds,
                         "partial_output": partial_output,
                     },
                     turn_id=turn_id,
@@ -894,6 +965,20 @@ class ShotwrightCopilotRuntimeManager:
                 raise
             finally:
                 runtime.turn_state = None
+
+    async def cancel_turn(self, app_session_id: str) -> bool:
+        runtime = self._runtimes.get(app_session_id)
+        if not runtime or not runtime.turn_state:
+            return False
+
+        turn_state = runtime.turn_state
+        if turn_state.finalized:
+            return False
+
+        turn_state.finalized = True
+        turn_state.error = TurnCancelledError("Generation stopped by user.")
+        turn_state.idle_event.set()
+        return True
 
     async def disconnect_session(self, app_session_id: str) -> None:
         runtime = self._runtimes.pop(app_session_id, None)

@@ -14,7 +14,7 @@ const api = axios.create({
   timeout: 30000,
 });
 
-const CHAT_TURN_TIMEOUT_MS = 16 * 60 * 1000;
+const CHAT_TURN_TIMEOUT_MS = 0;
 const STREAM_RECONNECT_DELAY_MS = 1000;
 const STREAM_RECONNECT_DELAY_MAX_MS = 5000;
 
@@ -72,6 +72,7 @@ export const sendChatTurn = (
   sessionId: string,
   payload: { content: string; attachments?: ChatImageAttachment[] }
 ) => api.post(`/agent/sessions/${sessionId}/messages`, payload, { timeout: CHAT_TURN_TIMEOUT_MS });
+export const cancelChatTurn = (sessionId: string) => api.post(`/agent/sessions/${sessionId}/cancel`);
 
 function parseStreamPayload<T>(event: MessageEvent<string>): T | null {
   try {

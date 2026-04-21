@@ -36,6 +36,15 @@ async def send_chat_turn(session_id: str, body: ChatTurnCreate):
     return result
 
 
+@router.post("/sessions/{session_id}/cancel")
+async def cancel_chat_turn(session_id: str):
+    session = await get_session_collection().find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found")
+    cancelled = await runtime_manager.cancel_turn(session_id)
+    return {"ok": True, "cancelled": cancelled}
+
+
 @router.get("/sessions/{session_id}/messages", response_model=list[ChatMessage])
 async def list_messages(session_id: str):
     session = await get_session_collection().find_one({"_id": session_id})
