@@ -9,12 +9,13 @@ from fastapi.responses import StreamingResponse
 from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
 from app.models.chat import ChatMessage, ChatTurnCreate, ChatTurnResult, SessionEvent
 from app.models.container import ContainerInfo
-from app.models.media import ReferenceVideoInfo
+from app.models.media import ReferenceVideoInfo, RenderOutputInfo, StoryboardInfo
 from app.models.project import ProjectInfo
 from app.models.session import SessionInDB
 from app.services.copilot_runtime import runtime_manager
 from app.services.session_streams import session_stream_broker
 from app.services import container_manager as cm
+from app.services import nexrender as nr
 from app.services import project_manager as pm
 from app.services import reference_media as rm
 
@@ -144,8 +145,15 @@ async def get_agent_context(session_id: str):
         "session": SessionInDB.model_validate(session_doc).model_dump(by_alias=True),
         "container": ContainerInfo.model_validate(container_doc).model_dump(by_alias=True) if container_doc else None,
         "projects": [ProjectInfo.model_validate(doc).model_dump(by_alias=True) for doc in project_docs],
-        "reference_videos": rm.list_reference_videos(session_id, limit=12),
-        "storyboards": rm.list_storyboards(session_id, limit=12),
+        "reference_videos": [
+            ReferenceVideoInfo.model_validate(doc).model_dump() for doc in rm.list_reference_videos(session_id, limit=12)
+        ],
+        "storyboards": [
+            StoryboardInfo.model_validate(doc).model_dump() for doc in rm.list_storyboards(session_id, limit=12)
+        ],
+        "render_outputs": [
+            RenderOutputInfo.model_validate(doc).model_dump() for doc in nr.list_render_outputs(session_id, limit=12)
+        ],
         "latest_render_path": session_doc.get("latest_render_path"),
         "latest_render_url": f"/api/streams/renders/{session_id}" if session_doc.get("latest_render_path") else None,
         "latest_stream_url": session_doc.get("latest_stream_url"),

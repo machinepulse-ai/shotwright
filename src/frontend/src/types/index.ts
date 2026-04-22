@@ -97,6 +97,36 @@ export interface StoryboardInfo {
   ffmpeg_filter: string;
 }
 
+export interface RenderOutputInfo {
+  id: string;
+  session_id: string;
+  project_id: string;
+  filename: string;
+  file_path: string;
+  shared_relative_path: string;
+  mime_type?: string | null;
+  size_bytes: number;
+  created_at: string;
+  composition: string;
+  aep_path: string;
+  aep_file?: string | null;
+  project_workspace_dir?: string | null;
+  work_dir?: string | null;
+  stdout_path?: string | null;
+  stderr_path?: string | null;
+  stream_id?: string | null;
+  playlist_url?: string | null;
+}
+
+export interface ProjectCompositionInfo {
+  name: string;
+  width?: number | null;
+  height?: number | null;
+  duration_seconds?: number | null;
+  frame_rate?: number | null;
+  layer_count?: number | null;
+}
+
 export interface SessionEvent {
   _id: string;
   session_id: string;
@@ -115,6 +145,8 @@ export interface ProjectInfo {
   workspace_dir: string;
   aep_files: string[];
   entry_aep_file?: string | null;
+  compositions: ProjectCompositionInfo[];
+  composition_catalog_updated_at?: string | null;
   origin?: "uploaded" | "generated";
   created_at: string;
   status: "uploaded" | "active" | "exported";
@@ -126,6 +158,7 @@ export interface AgentContext {
   projects: ProjectInfo[];
   reference_videos: ReferenceVideoInfo[];
   storyboards: StoryboardInfo[];
+  render_outputs: RenderOutputInfo[];
   latest_render_path: string | null;
   latest_render_url: string | null;
   latest_stream_url: string | null;

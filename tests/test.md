@@ -22,6 +22,18 @@ npm --prefix src/frontend run ui:test:session
 - 校验 session 级模型选择和推理强度切换
 - 校验右侧 sidebar 在长错误文本、长 runtime id、长时间线摘要下不会横向溢出
 
+如需检查“新建会话后事件流没有接上”的真实页面问题：
+
+```powershell
+npm --prefix src/frontend run ui:probe:session-stream
+```
+
+这个探针会：
+
+- 在真实前端页面里点击创建会话
+- 记录 session stream 的 fetch/EventSource 建连情况
+- 通过后端 API 改名新建会话，验证页面是否能在不刷新时收到 `session.updated`
+
 如需抓当前页面截图：
 
 ```powershell
@@ -41,6 +53,7 @@ npm --prefix src/frontend run ui:capture
 - `tests/ui/playwright_shared.js`: Playwright 启动、URL 探测、截图保存的公共逻辑
 - `tests/ui/capture_app.js`: 通用页面截图入口，适合快速看当前 UI
 - `tests/ui/session_page_regression.js`: session 页回归脚本，重点覆盖右侧栏和会话级 Copilot 配置
+- `tests/ui/session_creation_stream_probe.js`: 真实页面会话创建与事件流探针，重点覆盖“新建会话后 stream 未接上”的时序问题
 
 ## 清理约定
 

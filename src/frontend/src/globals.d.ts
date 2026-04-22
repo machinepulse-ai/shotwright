@@ -1,0 +1,1 @@
+declare const __SHOTWRIGHT_DIRECT_API_ORIGIN__: string;

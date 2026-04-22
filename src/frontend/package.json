@@ -7,7 +7,8 @@
     "build": "webpack --mode production",
     "lint": "eslint src/",
     "ui:capture": "node ../../tests/ui/capture_app.js",
-    "ui:test:session": "node ../../tests/ui/session_page_regression.js"
+    "ui:test:session": "node ../../tests/ui/session_page_regression.js",
+    "ui:probe:session-stream": "node ../../tests/ui/session_creation_stream_probe.js"
   },
   "dependencies": {
     "axios": "^1.7.0",

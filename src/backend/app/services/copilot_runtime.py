@@ -560,9 +560,11 @@ class ShotwrightCopilotRuntimeManager:
             "Prefer starting or reusing a container before JSX or render actions. "
             "For a blank project, prefer create_empty_after_effects_project instead of handwritten boilerplate JSX. "
             "For user-supplied inline images, prefer inspect_workspace to discover recent image attachments, then use stage_reference_images or create_reference_composition instead of copying files with shell commands. "
-            "For user-supplied reference videos, prefer inspect_workspace to discover uploaded reference_videos, then use generate_storyboard_from_reference_video before creating the AEP composition. "
+            "For user-supplied reference videos, prefer inspect_workspace to discover uploaded reference_videos, then use generate_storyboard_from_reference_video before creating the AEP composition. When only a local motion detail matters, pass the storyboard tool's crop parameter so you can inspect a focused region instead of the whole frame. When comparing against a Shotwright render, pass the session's latest_render_path or another session-local export mp4 into the same storyboard tool so the crop and cadence stay comparable. Inspect workspace state before multi-round edits so you can reuse the stored project compositions and structured render_outputs instead of guessing which comp or mp4 is the latest. "
+            "If a project bootstrap tool returns a project_id but the save step fails, keep using that same managed workspace on the next retry instead of creating another project. "
             "If you need to inspect a generated storyboard visually, use the available file or image viewing tool on the storyboard path returned by the Shotwright tool. "
             "Use run_after_effects_jsx only for creative edits that are not already covered by the higher-level Shotwright tools. "
+            "If JSX execution fails, retry at most once on the same project workspace or ask the user a concise clarification question; do not switch into repository inspection, shell-driven recovery, or brand-new project creation during a normal creative turn. "
             "For normal Shotwright creative work, do not use powershell, read_powershell, list_powershell, read_agent, list_agents, task, subagents, or glob unless the user explicitly asks for repository inspection or every relevant higher-level Shotwright tool has already failed to perform the required action. "
             "Do not override the container image unless the user explicitly asks for a different image. "
             "If the user asks to create a new AEP and no suitable project already exists, create a managed Shotwright project workspace first and save the .aep there before rendering or exporting. "
@@ -951,6 +953,8 @@ class ShotwrightCopilotRuntimeManager:
 
                 turn_state = runtime.turn_state
                 assistant_text = turn_state.content if turn_state else ""
+                if turn_state and not assistant_text.strip():
+                    assistant_text = "Shotwright completed the requested work. Inspect the updated session state for the active project, renders, or other artifacts."
 
                 if turn_state and (assistant_text != turn_state.content or not turn_state.finalized):
                     turn_state.content = assistant_text

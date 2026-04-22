@@ -1,7 +1,7 @@
 ---
 name: ffmpeg-storyboard
 description: 'Use when generating storyboard contact sheets from uploaded reference videos or exported mp4 files, sampling animation timing with ffmpeg parameters, or comparing a Shotwright render against a reference clip. Prefer the built-in storyboard tool before any shell fallback.'
-argument-hint: 'Describe the reference video path, sample interval, clip start or duration, column count, and what motion or timing you need to inspect.'
+argument-hint: 'Describe the reference video path, sample interval, clip start or duration, column count, optional crop box, and what motion or timing you need to inspect.'
 user-invocable: true
 disable-model-invocation: false
 ---
@@ -18,11 +18,12 @@ disable-model-invocation: false
 ## Procedure
 
 1. Inspect the Shotwright workspace once so you know whether the session already has uploaded `reference_videos` or existing `storyboards`.
-2. Prefer `generate_storyboard_from_reference_video` for the normal path. Pass `reference_video_path`, `start_seconds`, `clip_duration_seconds`, `interval_seconds`, `columns`, and `width` instead of composing ffmpeg commands by hand.
-3. If you need to inspect the contact sheet visually, use the available file or image viewing tool on the returned `storyboard_image_path`.
-4. If you also have a rendered Shotwright mp4 to compare, generate a storyboard for that clip with the same cadence so the grids are comparable.
-5. Review the storyboard for motion continuity, title timing, transitions, and obvious missing layers.
-6. If the storyboard is too sparse, lower `interval_seconds` or shorten the sampled clip and regenerate a denser sheet.
+2. Prefer `generate_storyboard_from_reference_video` for the normal path. Pass `reference_video_path`, `start_seconds`, `clip_duration_seconds`, `interval_seconds`, `columns`, `width`, and optionally `crop` instead of composing ffmpeg commands by hand.
+3. Use `crop` when you need to inspect a local animation region rather than the whole frame. The preferred format is `x,y,width,height` in pixels or percentages such as `25%,10%,40%,35%`.
+4. If you need to inspect the contact sheet visually, use the available file or image viewing tool on the returned `storyboard_image_path`.
+5. If you also have a rendered Shotwright mp4 to compare, generate a storyboard for that clip with the same cadence and crop so the grids are comparable.
+6. Review the storyboard for motion continuity, title timing, transitions, and obvious missing layers.
+7. If the storyboard is too sparse, lower `interval_seconds` or shorten the sampled clip and regenerate a denser sheet.
 
 ## Normal Flow Guardrails
 

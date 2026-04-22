@@ -60,8 +60,16 @@ def resolve_executable(candidates: Sequence[str | Path]) -> str | None:
     return None
 
 
-def build_afterfx_host_command(afterfx_gui: str) -> list[str]:
-    return [afterfx_gui, "-re", "-noui"]
+def build_afterfx_host_command(afterfx_gui: str, *, render_only: bool) -> list[str]:
+    command = [afterfx_gui]
+    if render_only:
+        command.append("-re")
+    command.append("-noui")
+    return command
+
+
+def build_direct_jsx_command(afterfx_dispatch: str, wrapper_script: str) -> list[str]:
+    return [afterfx_dispatch, "-r", wrapper_script]
 
 
 def build_nexrender_command(
@@ -72,9 +80,10 @@ def build_nexrender_command(
     node_binary: str | None = None,
     nexrender_entrypoint: str | None = None,
     nexrender_binary: str | None = None,
+    skip_render: bool = False,
 ) -> list[str]:
     if node_binary and nexrender_entrypoint:
-        return [
+        command = [
             node_binary,
             nexrender_entrypoint,
             "-f",
@@ -87,9 +96,12 @@ def build_nexrender_command(
             "--binary",
             binary_path,
         ]
+        if skip_render:
+            command.append("--skip-render")
+        return command
 
     if nexrender_binary:
-        return [
+        command = [
             nexrender_binary,
             "-f",
             job_path,
@@ -101,6 +113,9 @@ def build_nexrender_command(
             "-b",
             binary_path,
         ]
+        if skip_render:
+            command.append("--skip-render")
+        return command
 
     resolved_node = resolve_executable(NODE_CANDIDATES)
     resolved_entrypoint = next(
@@ -114,6 +129,7 @@ def build_nexrender_command(
             binary_path,
             node_binary=resolved_node,
             nexrender_entrypoint=resolved_entrypoint,
+            skip_render=skip_render,
         )
 
     resolved_cli = resolve_executable(NEXRENDER_BINARY_CANDIDATES)
@@ -123,6 +139,7 @@ def build_nexrender_command(
             work_dir,
             binary_path,
             nexrender_binary=resolved_cli,
+            skip_render=skip_render,
         )
 
     raise FileNotFoundError("nexrender CLI was not found inside the container")
@@ -226,18 +243,24 @@ def start_after_effects(
     afterfx_gui: str,
     timeout_seconds: int,
     *,
+    render_only: bool,
     ready_font: str,
     env: dict[str, str],
-) -> tuple[subprocess.Popen[Any], str, tuple[str, ...]]:
-    ensured_markers = ensure_ae_render_only_markers(afterfx_gui)
+) -> tuple[subprocess.Popen[Any], str, str, tuple[str, ...]]:
+    marker_action = "ensured" if render_only else "cleared"
+    render_only_markers = (
+        ensure_ae_render_only_markers(afterfx_gui)
+        if render_only
+        else clear_ae_render_only_markers(afterfx_gui)
+    )
     process = subprocess.Popen(
-        build_afterfx_host_command(afterfx_gui),
+        build_afterfx_host_command(afterfx_gui, render_only=render_only),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=env,
     )
     readiness_marker = wait_for_after_effects_ready(process, timeout_seconds, ready_font=ready_font)
-    return process, readiness_marker, ensured_markers
+    return process, readiness_marker, marker_action, render_only_markers
 
 
 def build_child_env(args: argparse.Namespace) -> dict[str, str]:
@@ -275,6 +298,70 @@ def ensure_ae_render_only_markers(afterfx_gui: str) -> tuple[str, ...]:
     for marker in markers:
         ensure_text_file(marker)
     return tuple(as_windows_path(marker) for marker in markers)
+
+
+def clear_ae_render_only_markers(afterfx_gui: str, *, ignore_errors: bool = False) -> tuple[str, ...]:
+    cleared_markers: list[str] = []
+    for marker in iter_ae_render_only_markers(afterfx_gui):
+        try:
+            if not marker.exists():
+                continue
+            marker.unlink()
+            cleared_markers.append(as_windows_path(marker))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            if ignore_errors:
+                continue
+            raise
+    return tuple(cleared_markers)
+
+
+def should_retry_jsx_dispatch(
+    *,
+    dispatch_failed_to_inject: bool,
+    script_started: bool,
+    script_success: bool,
+    timed_out: bool,
+    attempt_number: int,
+    max_attempts: int,
+) -> bool:
+    return (
+        dispatch_failed_to_inject
+        and not script_started
+        and not script_success
+        and not timed_out
+        and attempt_number < max_attempts
+    )
+
+
+def should_fallback_to_direct_jsx(
+    *,
+    dispatch_failed_to_inject: bool,
+    script_started: bool,
+    script_success: bool,
+    timed_out: bool,
+) -> bool:
+    return dispatch_failed_to_inject and not script_started and not script_success and not timed_out
+
+
+def should_fallback_to_nexrender_script_job(
+    *,
+    dispatch_failed_to_inject: bool,
+    script_started: bool,
+    script_success: bool,
+    timed_out: bool,
+    job_path: str | None,
+    work_dir: str | None,
+) -> bool:
+    return (
+        dispatch_failed_to_inject
+        and not script_started
+        and not script_success
+        and not timed_out
+        and bool(job_path)
+        and bool(work_dir)
+    )
 
 
 def open_files_for_process_tree(process: Any) -> set[str]:
@@ -327,73 +414,256 @@ def run_jsx(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
     afterfx_process: subprocess.Popen[Any] | None = None
     dispatch_process: subprocess.Popen[Any] | None = None
-    ready_timeout = min(max(args.timeout_seconds, 30), 120)
     after_effects_ready = False
     after_effects_ready_marker: str | None = None
-    ensured_markers: tuple[str, ...] = ()
+    render_only_marker_action = "cleared"
+    render_only_markers: tuple[str, ...] = ()
+    dispatch_retry_count = 0
+    max_dispatch_attempts = 2
+    overall_deadline = time.monotonic() + max(args.timeout_seconds, 1)
+    timed_out = False
+    dispatch_failed_to_inject = False
+    script_success = False
+    script_error = False
+    script_started = False
+    script_ended = False
+    direct_fallback_used = False
+    direct_fallback_failed_to_start = False
+    nexrender_fallback_used = False
+    nexrender_fallback_failed_to_start = False
+    nexrender_process: subprocess.Popen[Any] | None = None
     try:
-        stop_named_processes(("AfterFX", "AfterFX.com"))
-        afterfx_process, after_effects_ready_marker, ensured_markers = start_after_effects(
-            args.afterfx_gui,
-            ready_timeout,
-            ready_font=args.ready_font,
-            env=env,
-        )
-        after_effects_ready = True
+        for attempt_number in range(1, max_dispatch_attempts + 1):
+            for path in (stdout_log, stderr_log, jsx_log):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
-        with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open(
-            "w", encoding="utf-8"
-        ) as stderr_handle:
-            dispatch_process = subprocess.Popen(
-                [args.afterfx_dispatch, "-r", args.wrapper_script],
-                stdout=stdout_handle,
-                stderr=stderr_handle,
+            stop_named_processes(("AfterFX", "AfterFX.com"))
+            remaining_timeout = max(int(overall_deadline - time.monotonic()), 1)
+            ready_timeout = min(remaining_timeout, 120)
+            afterfx_process, after_effects_ready_marker, render_only_marker_action, render_only_markers = start_after_effects(
+                args.afterfx_gui,
+                ready_timeout,
+                render_only=False,
+                ready_font=args.ready_font,
                 env=env,
             )
+            after_effects_ready = True
 
-        deadline = time.monotonic() + max(args.timeout_seconds, 1)
-        probe_deadline = time.monotonic() + min(max(args.timeout_seconds, 1), 30)
-        success_grace_deadline: float | None = None
-        error_grace_deadline: float | None = None
-        script_started = False
-        script_success = False
-        script_error = False
-        script_ended = False
-        timed_out = False
-        dispatch_failed_to_inject = False
+            with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open(
+                "w", encoding="utf-8"
+            ) as stderr_handle:
+                dispatch_process = subprocess.Popen(
+                    [args.afterfx_dispatch, "-r", args.wrapper_script],
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    env=env,
+                )
 
-        while True:
-            jsx_log_text = read_text_tail(jsx_log, max_chars=12000)
-            if not script_started and "SHOTWRIGHT_JSX_START" in jsx_log_text:
-                script_started = True
-            if not script_success and "SHOTWRIGHT_JSX_SUCCESS" in jsx_log_text:
-                script_success = True
-                success_grace_deadline = time.monotonic() + 5
-            if not script_error and "SHOTWRIGHT_JSX_ERROR:" in jsx_log_text:
-                script_error = True
-                error_grace_deadline = time.monotonic() + 2
-            if not script_ended and "SHOTWRIGHT_JSX_END" in jsx_log_text:
-                script_ended = True
+            probe_deadline = time.monotonic() + min(max(int(overall_deadline - time.monotonic()), 1), 30)
+            success_grace_deadline: float | None = None
+            error_grace_deadline: float | None = None
+            script_started = False
+            script_success = False
+            script_error = False
+            script_ended = False
+            timed_out = False
+            dispatch_failed_to_inject = False
 
-            if script_success and (script_ended or (success_grace_deadline is not None and time.monotonic() >= success_grace_deadline)):
-                break
-            if script_error and (script_ended or (error_grace_deadline is not None and time.monotonic() >= error_grace_deadline)):
-                break
+            while True:
+                jsx_log_text = read_text_tail(jsx_log, max_chars=12000)
+                if not script_started and "SHOTWRIGHT_JSX_START" in jsx_log_text:
+                    script_started = True
+                if not script_success and "SHOTWRIGHT_JSX_SUCCESS" in jsx_log_text:
+                    script_success = True
+                    success_grace_deadline = time.monotonic() + 5
+                if not script_error and "SHOTWRIGHT_JSX_ERROR:" in jsx_log_text:
+                    script_error = True
+                    error_grace_deadline = time.monotonic() + 2
+                if not script_ended and "SHOTWRIGHT_JSX_END" in jsx_log_text:
+                    script_ended = True
 
-            if not script_started and time.monotonic() >= probe_deadline:
-                if dispatch_process.poll() is not None:
+                if script_success and (script_ended or (success_grace_deadline is not None and time.monotonic() >= success_grace_deadline)):
+                    break
+                if script_error and (script_ended or (error_grace_deadline is not None and time.monotonic() >= error_grace_deadline)):
+                    break
+
+                if not script_started and time.monotonic() >= probe_deadline:
+                    if dispatch_process.poll() is not None:
+                        dispatch_failed_to_inject = True
+                        break
+
+                if time.monotonic() >= overall_deadline:
+                    timed_out = True
+                    break
+
+                if dispatch_process.poll() is not None and not script_started and not script_success:
                     dispatch_failed_to_inject = True
                     break
 
-            if time.monotonic() >= deadline:
-                timed_out = True
-                break
+                time.sleep(1)
 
-            if dispatch_process.poll() is not None and not script_started and not script_success:
-                dispatch_failed_to_inject = True
-                break
+            retry_dispatch = should_retry_jsx_dispatch(
+                dispatch_failed_to_inject=dispatch_failed_to_inject,
+                script_started=script_started,
+                script_success=script_success,
+                timed_out=timed_out,
+                attempt_number=attempt_number,
+                max_attempts=max_dispatch_attempts,
+            )
+            if retry_dispatch:
+                dispatch_retry_count += 1
+                kill_process_tree(dispatch_process)
+                kill_process_tree(afterfx_process)
+                dispatch_process = None
+                afterfx_process = None
+                clear_ae_render_only_markers(args.afterfx_gui, ignore_errors=True)
+                stop_named_processes(("AfterFX", "AfterFX.com"))
+                continue
+            break
 
-            time.sleep(1)
+        if should_fallback_to_nexrender_script_job(
+            dispatch_failed_to_inject=dispatch_failed_to_inject,
+            script_started=script_started,
+            script_success=script_success,
+            timed_out=timed_out,
+            job_path=getattr(args, "job_path", None),
+            work_dir=getattr(args, "work_dir", None),
+        ):
+            nexrender_fallback_used = True
+            kill_process_tree(dispatch_process)
+            kill_process_tree(afterfx_process)
+            dispatch_process = None
+            afterfx_process = None
+            clear_ae_render_only_markers(args.afterfx_gui, ignore_errors=True)
+            stop_named_processes(("node", "ffmpeg", "AfterFX", "AfterFX.com"))
+
+            with stdout_log.open("a", encoding="utf-8") as stdout_handle, stderr_log.open(
+                "a",
+                encoding="utf-8",
+            ) as stderr_handle:
+                nexrender_process = subprocess.Popen(
+                    build_nexrender_command(
+                        args.job_path,
+                        args.work_dir,
+                        args.afterfx_gui,
+                        skip_render=True,
+                    ),
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    env=env,
+                )
+
+            nexrender_probe_deadline = time.monotonic() + min(max(int(overall_deadline - time.monotonic()), 1), 60)
+            success_grace_deadline = None
+            error_grace_deadline = None
+            script_started = False
+            script_success = False
+            script_error = False
+            script_ended = False
+            timed_out = False
+            dispatch_failed_to_inject = False
+
+            while True:
+                jsx_log_text = read_text_tail(jsx_log, max_chars=12000)
+                if not script_started and "SHOTWRIGHT_JSX_START" in jsx_log_text:
+                    script_started = True
+                if not script_success and "SHOTWRIGHT_JSX_SUCCESS" in jsx_log_text:
+                    script_success = True
+                    success_grace_deadline = time.monotonic() + 5
+                if not script_error and "SHOTWRIGHT_JSX_ERROR:" in jsx_log_text:
+                    script_error = True
+                    error_grace_deadline = time.monotonic() + 2
+                if not script_ended and "SHOTWRIGHT_JSX_END" in jsx_log_text:
+                    script_ended = True
+
+                if script_success and (script_ended or (success_grace_deadline is not None and time.monotonic() >= success_grace_deadline)):
+                    break
+                if script_error and (script_ended or (error_grace_deadline is not None and time.monotonic() >= error_grace_deadline)):
+                    break
+
+                if not script_started and time.monotonic() >= nexrender_probe_deadline and nexrender_process.poll() is not None:
+                    nexrender_fallback_failed_to_start = True
+                    break
+
+                if time.monotonic() >= overall_deadline:
+                    timed_out = True
+                    break
+
+                if nexrender_process.poll() is not None and not script_started and not script_success:
+                    nexrender_fallback_failed_to_start = True
+                    break
+
+                time.sleep(1)
+
+        elif should_fallback_to_direct_jsx(
+            dispatch_failed_to_inject=dispatch_failed_to_inject,
+            script_started=script_started,
+            script_success=script_success,
+            timed_out=timed_out,
+        ):
+            direct_fallback_used = True
+            kill_process_tree(dispatch_process)
+            kill_process_tree(afterfx_process)
+            dispatch_process = None
+            afterfx_process = None
+            clear_ae_render_only_markers(args.afterfx_gui, ignore_errors=True)
+            stop_named_processes(("AfterFX", "AfterFX.com"))
+
+            with stdout_log.open("a", encoding="utf-8") as stdout_handle, stderr_log.open(
+                "a",
+                encoding="utf-8",
+            ) as stderr_handle:
+                dispatch_process = subprocess.Popen(
+                    build_direct_jsx_command(args.afterfx_dispatch, args.wrapper_script),
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    env=env,
+                )
+
+            direct_probe_deadline = time.monotonic() + min(max(int(overall_deadline - time.monotonic()), 1), 45)
+            success_grace_deadline = None
+            error_grace_deadline = None
+            script_started = False
+            script_success = False
+            script_error = False
+            script_ended = False
+            timed_out = False
+            dispatch_failed_to_inject = False
+
+            while True:
+                jsx_log_text = read_text_tail(jsx_log, max_chars=12000)
+                if not script_started and "SHOTWRIGHT_JSX_START" in jsx_log_text:
+                    script_started = True
+                if not script_success and "SHOTWRIGHT_JSX_SUCCESS" in jsx_log_text:
+                    script_success = True
+                    success_grace_deadline = time.monotonic() + 5
+                if not script_error and "SHOTWRIGHT_JSX_ERROR:" in jsx_log_text:
+                    script_error = True
+                    error_grace_deadline = time.monotonic() + 2
+                if not script_ended and "SHOTWRIGHT_JSX_END" in jsx_log_text:
+                    script_ended = True
+
+                if script_success and (script_ended or (success_grace_deadline is not None and time.monotonic() >= success_grace_deadline)):
+                    break
+                if script_error and (script_ended or (error_grace_deadline is not None and time.monotonic() >= error_grace_deadline)):
+                    break
+
+                if not script_started and time.monotonic() >= direct_probe_deadline and dispatch_process.poll() is not None:
+                    direct_fallback_failed_to_start = True
+                    break
+
+                if time.monotonic() >= overall_deadline:
+                    timed_out = True
+                    break
+
+                if dispatch_process.poll() is not None and not script_started and not script_success:
+                    direct_fallback_failed_to_start = True
+                    break
+
+                time.sleep(1)
 
         output_parts = []
         stdout_tail = read_text_tail(stdout_log)
@@ -401,15 +671,37 @@ def run_jsx(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         jsx_log_tail = read_text_tail(jsx_log, max_chars=12000)
         if after_effects_ready:
             output_parts.append(
-                "Shotwright prewarmed After Effects with -re -noui and observed the font readiness marker."
+                "Shotwright prewarmed After Effects in JSX mode with -noui and observed the font readiness marker."
             )
         if after_effects_ready_marker:
             output_parts.append(f"Readiness marker: {after_effects_ready_marker}")
-        if ensured_markers:
-            output_parts.append(f"AE render-only markers: {', '.join(ensured_markers)}")
+        if render_only_markers:
+            output_parts.append(
+                f"AE render-only markers {render_only_marker_action}: {', '.join(render_only_markers)}"
+            )
+        if dispatch_retry_count:
+            output_parts.append(
+                f"Shotwright retried JSX dispatch {dispatch_retry_count} time(s) after the warmed host rejected the initial injection attempt."
+            )
         if dispatch_failed_to_inject:
             output_parts.append(
                 "Shotwright observed the AfterFX dispatcher exit without starting the JSX wrapper in the warmed host."
+            )
+        if nexrender_fallback_used:
+            output_parts.append(
+                "Shotwright fell back to a script-only nexrender job after the warmed dispatcher rejected injection."
+            )
+        if nexrender_fallback_failed_to_start:
+            output_parts.append(
+                "Shotwright script-only nexrender fallback exited before the JSX wrapper started."
+            )
+        if direct_fallback_used:
+            output_parts.append(
+                "Shotwright fell back to direct AfterFX dispatcher execution after the warmed dispatcher rejected injection."
+            )
+        if direct_fallback_failed_to_start:
+            output_parts.append(
+                "Shotwright direct AfterFX dispatcher fallback exited before the JSX wrapper started."
             )
         if timed_out:
             output_parts.append("AfterFX JSX execution timed out.")
@@ -425,9 +717,15 @@ def run_jsx(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "runner": Path(args.afterfx_dispatch).name,
             "after_effects_ready": after_effects_ready,
             "after_effects_ready_marker": after_effects_ready_marker,
-            "ensured_markers": list(ensured_markers),
+            "render_only_marker_action": render_only_marker_action,
+            "ensured_markers": list(render_only_markers),
+            "dispatch_retry_count": dispatch_retry_count,
             "timed_out": timed_out,
             "dispatch_failed_to_inject": dispatch_failed_to_inject,
+            "nexrender_fallback_used": nexrender_fallback_used,
+            "nexrender_fallback_failed_to_start": nexrender_fallback_failed_to_start,
+            "direct_fallback_used": direct_fallback_used,
+            "direct_fallback_failed_to_start": direct_fallback_failed_to_start,
             "success_marker_seen": script_success,
             "error_marker_seen": script_error,
             "success": success,
@@ -438,11 +736,17 @@ def run_jsx(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         }
         if dispatch_process is not None:
             result["dispatch_exit_code"] = dispatch_process.poll()
+        if nexrender_fallback_used and nexrender_process is not None:
+            result["nexrender_fallback_exit_code"] = nexrender_process.poll()
+        if direct_fallback_used and dispatch_process is not None:
+            result["direct_dispatch_exit_code"] = dispatch_process.poll()
         exit_code = 0 if success else 124 if timed_out else 127 if dispatch_failed_to_inject else 1
         return exit_code, result
     finally:
+        kill_process_tree(nexrender_process)
         kill_process_tree(dispatch_process)
         kill_process_tree(afterfx_process)
+        clear_ae_render_only_markers(args.afterfx_gui, ignore_errors=True)
         stop_named_processes(("AfterFX", "AfterFX.com"))
 
 
@@ -462,12 +766,14 @@ def run_render(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     ready_timeout = min(max(args.timeout_seconds, 30), 120)
     after_effects_ready = False
     after_effects_ready_marker: str | None = None
-    ensured_markers: tuple[str, ...] = ()
+    render_only_marker_action = "ensured"
+    render_only_markers: tuple[str, ...] = ()
     try:
         stop_named_processes(("node", "ffmpeg", "aerender", "AfterFX", "AfterFX.com"))
-        afterfx_process, after_effects_ready_marker, ensured_markers = start_after_effects(
+        afterfx_process, after_effects_ready_marker, render_only_marker_action, render_only_markers = start_after_effects(
             args.afterfx_gui,
             ready_timeout,
+            render_only=True,
             ready_font=args.ready_font,
             env=env,
         )
@@ -515,12 +821,14 @@ def run_render(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         output_parts = []
         if after_effects_ready:
             output_parts.append(
-                "Shotwright prewarmed After Effects with -re -noui and observed the font readiness marker."
+                "Shotwright prewarmed After Effects in render-engine mode with -re -noui and observed the font readiness marker."
             )
         if after_effects_ready_marker:
             output_parts.append(f"Readiness marker: {after_effects_ready_marker}")
-        if ensured_markers:
-            output_parts.append(f"AE render-only markers: {', '.join(ensured_markers)}")
+        if render_only_markers:
+            output_parts.append(
+                f"AE render-only markers {render_only_marker_action}: {', '.join(render_only_markers)}"
+            )
         if render_completed:
             output_parts.append("Shotwright observed aerender completion in the job log.")
         if timed_out:
@@ -531,7 +839,8 @@ def run_render(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "command": "render",
             "after_effects_ready": after_effects_ready,
             "after_effects_ready_marker": after_effects_ready_marker,
-            "ensured_markers": list(ensured_markers),
+            "render_only_marker_action": render_only_marker_action,
+            "ensured_markers": list(render_only_markers),
             "timed_out": timed_out,
             "render_completed": render_completed,
             "output_exists": output_exists,
@@ -548,6 +857,7 @@ def run_render(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     finally:
         kill_process_tree(render_process)
         kill_process_tree(afterfx_process)
+        clear_ae_render_only_markers(args.afterfx_gui, ignore_errors=True)
         stop_named_processes(("node", "ffmpeg", "aerender", "AfterFX", "AfterFX.com"))
 
 
@@ -568,6 +878,8 @@ def build_parser() -> argparse.ArgumentParser:
     jsx_parser.add_argument("--project-root")
     jsx_parser.add_argument("--project-file")
     jsx_parser.add_argument("--project-name")
+    jsx_parser.add_argument("--job-path")
+    jsx_parser.add_argument("--work-dir")
 
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("--afterfx-gui", required=True)

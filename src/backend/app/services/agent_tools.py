@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from copilot.tools import Tool, ToolInvocation, ToolResult
@@ -50,6 +51,22 @@ def _sanitize_asset_file_name(value: str | None, fallback_stem: str, suffix: str
 
 def _jsx_string(value: str) -> str:
     return json.dumps(Path(value).as_posix())
+
+
+def _should_reuse_generated_project_workspace(project: dict | None) -> bool:
+    if not isinstance(project, dict):
+        return False
+
+    if str(project.get("origin") or "").strip().lower() != "generated":
+        return False
+
+    workspace_dir = str(project.get("workspace_dir") or "").strip()
+    entry_aep_file = str(project.get("entry_aep_file") or project.get("filename") or "").strip()
+    if not workspace_dir or not entry_aep_file:
+        return False
+
+    aep_files = [str(path).strip() for path in (project.get("aep_files") or []) if str(path).strip()]
+    return not aep_files and Path(workspace_dir).exists()
 
 
 async def _list_session_image_attachments(session_id: str, *, limit: int = 8) -> list[dict]:
@@ -165,11 +182,9 @@ def _build_empty_project_jsx() -> str:
     return "\n".join(
         [
             "app.beginSuppressDialogs();",
-            "var projectFile = $.getenv(\"SHOTWRIGHT_PROJECT_FILE\");",
-            "if (!projectFile) { throw new Error(\"SHOTWRIGHT_PROJECT_FILE missing\"); }",
-            "app.newProject();",
-            "app.project.save(new File(projectFile));",
-            "app.quit();",
+            "if (typeof CloseOptions !== \"undefined\" && app.project && typeof app.project.close === \"function\") {",
+            "    app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);",
+            "}",
         ]
     )
 
@@ -307,12 +322,34 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         if not session_doc.get("container_id"):
             return _tool_failure("No running After Effects container is attached to this session.")
 
-        project = await pm.create_project_workspace(
-            app_session_id,
-            project_name=arguments.get("project_name"),
-            aep_filename=arguments.get("aep_filename"),
-            set_active=False,
-        )
+        project = None
+        reused_existing_workspace = False
+        candidate_project_ids: list[str] = []
+
+        requested_project_id = str(arguments.get("project_id") or "").strip()
+        if requested_project_id:
+            candidate_project_ids.append(requested_project_id)
+
+        active_project_id = str(session_doc.get("active_project_id") or "").strip()
+        if active_project_id and active_project_id not in candidate_project_ids:
+            candidate_project_ids.append(active_project_id)
+
+        for candidate_project_id in candidate_project_ids:
+            candidate_project = await pm.get_project(app_session_id, candidate_project_id)
+            if _should_reuse_generated_project_workspace(candidate_project):
+                project = candidate_project
+                reused_existing_workspace = True
+                break
+
+        if project is None:
+            project = await pm.create_project_workspace(
+                app_session_id,
+                project_name=arguments.get("project_name"),
+                aep_filename=arguments.get("aep_filename"),
+                set_active=False,
+            )
+
+        await pm.set_active_project(app_session_id, project["_id"])
         result = await nr.run_jsx_script(
             session_doc["container_id"],
             script_content,
@@ -327,13 +364,15 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 "workspace_dir": project["workspace_dir"],
                 "entry_aep_file": project.get("entry_aep_file"),
                 "entry_aep_path": str(Path(project["workspace_dir"]) / project["entry_aep_file"]),
+                "reused_existing_workspace": reused_existing_workspace,
             }
             return ToolResult(
                 text_result_for_llm=json.dumps(payload, ensure_ascii=False),
                 result_type="failure",
                 error=(
                     "JSX did not save an .aep file into the managed project workspace. "
-                    "Save the project to SHOTWRIGHT_PROJECT_FILE and call app.quit()."
+                    "Reuse this same project_id on the next retry instead of creating another workspace, "
+                    "and leave the intended project open or save it to SHOTWRIGHT_PROJECT_FILE so the wrapper can persist it."
                 ),
                 session_log=arguments.get("description") or default_description,
             )
@@ -350,6 +389,9 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "entry_aep_file": entry_aep_file,
             "entry_aep_path": str(Path(active_project["workspace_dir"]) / entry_aep_file) if entry_aep_file else None,
             "aep_files": active_project.get("aep_files", []),
+            "compositions": active_project.get("compositions", []),
+            "composition_catalog_updated_at": active_project.get("composition_catalog_updated_at"),
+            "reused_existing_workspace": reused_existing_workspace,
         }
         return _tool_success(
             payload,
@@ -386,6 +428,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                     "origin": project.get("origin", "uploaded"),
                     "entry_aep_file": project.get("entry_aep_file"),
                     "aep_files": project.get("aep_files", []),
+                    "compositions": project.get("compositions", []),
+                    "composition_catalog_updated_at": project.get("composition_catalog_updated_at"),
                     "workspace_dir": project["workspace_dir"],
                 }
                 for project in projects
@@ -393,6 +437,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "recent_image_attachments": recent_image_attachments,
             "latest_render_path": session_doc.get("latest_render_path"),
             "latest_stream_url": session_doc.get("latest_stream_url"),
+            "render_outputs": nr.list_render_outputs(app_session_id, limit=8),
             "reference_videos": rm.list_reference_videos(app_session_id, limit=8),
             "storyboards": rm.list_storyboards(app_session_id, limit=8),
         }
@@ -443,10 +488,89 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
 
     async def create_empty_after_effects_project(invocation: ToolInvocation) -> ToolResult:
         args = invocation.arguments or {}
-        return await _create_project_from_script(
-            arguments=args,
-            script_content=_build_empty_project_jsx(),
-            default_description="Created empty After Effects project",
+        session_col = get_session_collection()
+        session_doc = await session_col.find_one({"_id": app_session_id})
+        if not session_doc:
+            return _tool_failure("Shotwright session not found.")
+
+        project = None
+        reused_existing_workspace = False
+        candidate_project_ids: list[str] = []
+
+        requested_project_id = str(args.get("project_id") or "").strip()
+        if requested_project_id:
+            candidate_project_ids.append(requested_project_id)
+
+        active_project_id = str(session_doc.get("active_project_id") or "").strip()
+        if active_project_id and active_project_id not in candidate_project_ids:
+            candidate_project_ids.append(active_project_id)
+
+        for candidate_project_id in candidate_project_ids:
+            candidate_project = await pm.get_project(app_session_id, candidate_project_id)
+            if _should_reuse_generated_project_workspace(candidate_project):
+                project = candidate_project
+                reused_existing_workspace = True
+                break
+
+        if project is None:
+            project = await pm.create_project_workspace(
+                app_session_id,
+                project_name=args.get("project_name"),
+                aep_filename=args.get("aep_filename"),
+                set_active=False,
+            )
+
+        bootstrap_template_path = nr._resolve_nexrender_bootstrap_template()
+        if not bootstrap_template_path.exists():
+            return _tool_failure(f"Bootstrap template not found at {bootstrap_template_path}")
+
+        entry_aep_file = project.get("entry_aep_file") or project.get("filename")
+        if not entry_aep_file:
+            return _tool_failure("Managed project is missing entry_aep_file.")
+
+        target_aep_path = Path(project["workspace_dir"]) / entry_aep_file
+        if not target_aep_path.exists():
+            target_aep_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bootstrap_template_path, target_aep_path)
+
+        metadata_path = Path(project["workspace_dir"]) / pm.PROJECT_METADATA_FILENAME
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "compositions": [{"name": nr.BOOTSTRAP_TEMPLATE_COMPOSITION}],
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        await pm.set_active_project(app_session_id, project["_id"])
+        refreshed_project = await pm.refresh_project_files(app_session_id, project["_id"]) or project
+        refreshed_entry_aep_file = refreshed_project.get("entry_aep_file") or (refreshed_project.get("aep_files") or [None])[0]
+
+        payload = {
+            "success": True,
+            "bootstrap_template_path": str(bootstrap_template_path),
+            "project_id": refreshed_project["_id"],
+            "filename": refreshed_project["filename"],
+            "origin": refreshed_project.get("origin", "generated"),
+            "workspace_dir": refreshed_project["workspace_dir"],
+            "entry_aep_file": refreshed_entry_aep_file,
+            "entry_aep_path": (
+                str(Path(refreshed_project["workspace_dir"]) / refreshed_entry_aep_file)
+                if refreshed_entry_aep_file
+                else None
+            ),
+            "aep_files": refreshed_project.get("aep_files", []),
+            "compositions": refreshed_project.get("compositions", []),
+            "composition_catalog_updated_at": refreshed_project.get("composition_catalog_updated_at"),
+            "reused_existing_workspace": reused_existing_workspace,
+        }
+        return _tool_success(
+            payload,
+            args.get("description") or "Created empty After Effects project",
         )
 
     async def list_uploaded_projects(invocation: ToolInvocation) -> ToolResult:
@@ -459,6 +583,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                     "origin": project.get("origin", "uploaded"),
                     "entry_aep_file": project.get("entry_aep_file"),
                     "aep_files": project.get("aep_files", []),
+                    "compositions": project.get("compositions", []),
+                    "composition_catalog_updated_at": project.get("composition_catalog_updated_at"),
                     "workspace_dir": project["workspace_dir"],
                 }
                 for project in projects
@@ -484,6 +610,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 "origin": project.get("origin", "uploaded"),
                 "entry_aep_file": project.get("entry_aep_file"),
                 "aep_files": project.get("aep_files", []),
+                "compositions": project.get("compositions", []),
+                "composition_catalog_updated_at": project.get("composition_catalog_updated_at"),
             },
             f"Selected project {project['filename']} as active",
         )
@@ -522,6 +650,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "entry_aep_file": entry_aep_file,
             "entry_aep_path": str(Path(refreshed_project["workspace_dir"]) / entry_aep_file) if entry_aep_file else None,
             "aep_files": refreshed_project.get("aep_files", []),
+            "compositions": refreshed_project.get("compositions", []),
+            "composition_catalog_updated_at": refreshed_project.get("composition_catalog_updated_at"),
             "staged_images": staged_images,
             "default_reference_asset_path": staged_images[0]["project_asset_path"],
             "default_reference_relative_path": staged_images[0]["project_relative_path"],
@@ -606,6 +736,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "entry_aep_file": entry_aep_file,
             "entry_aep_path": str(Path(refreshed_project["workspace_dir"]) / entry_aep_file) if entry_aep_file else None,
             "aep_files": refreshed_project.get("aep_files", []),
+            "compositions": refreshed_project.get("compositions", []),
+            "composition_catalog_updated_at": refreshed_project.get("composition_catalog_updated_at"),
             "reference_asset_path": reference_asset["project_asset_path"],
             "reference_relative_path": reference_asset["project_relative_path"],
             "composition_name": composition_name,
@@ -637,6 +769,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 interval_seconds=float(args.get("interval_seconds")) if args.get("interval_seconds") is not None else None,
                 columns=int(args.get("columns")) if args.get("columns") is not None else None,
                 width=int(args.get("width")) if args.get("width") is not None else None,
+                crop=args.get("crop"),
             )
         except rm.ReferenceMediaUnavailableError as exc:
             return _tool_failure(str(exc), error=str(exc))
@@ -684,6 +817,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                     str(Path(refreshed_project["workspace_dir"]) / entry_aep_file) if entry_aep_file else None
                 )
                 payload["aep_files"] = refreshed_project.get("aep_files", [])
+                payload["compositions"] = refreshed_project.get("compositions", [])
+                payload["composition_catalog_updated_at"] = refreshed_project.get("composition_catalog_updated_at")
 
         result_type = "success" if result.get("success", result.get("exit_code") == 0) else "failure"
         return ToolResult(
@@ -706,6 +841,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         if not project_id:
             return _tool_failure("No active project is selected. Use list_uploaded_projects and select_active_project first.")
 
+        project = await pm.get_project(app_session_id, project_id)
+        if not project:
+            return _tool_failure(f"Project {project_id} not found.")
+
         render = await nr.render_project(
             session_id=app_session_id,
             project_id=project_id,
@@ -725,6 +864,19 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
 
         stream_result = await generate_hls(render["output_path"], render["stream_id"])
         latest_stream_url = stream_result.get("playlist_url") if stream_result.get("success") else None
+        render_output = nr.record_render_output(
+            session_id=app_session_id,
+            project_id=project_id,
+            output_path=render["output_path"],
+            composition=args.get("composition") or "Main",
+            aep_path=render["aep_path"],
+            work_dir=render.get("work_dir"),
+            stdout_path=render.get("stdout_path"),
+            stderr_path=render.get("stderr_path"),
+            stream_id=render.get("stream_id"),
+            playlist_url=latest_stream_url,
+            project_workspace_dir=project.get("workspace_dir"),
+        )
         await session_col.update_one(
             {"_id": app_session_id},
             {
@@ -736,12 +888,20 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             },
         )
         await publish_session_updated(app_session_id)
-        await publish_context_refresh(app_session_id, "render.completed", project_id=project_id)
+        await publish_context_refresh(
+            app_session_id,
+            "render.completed",
+            project_id=project_id,
+            composition=args.get("composition") or "Main",
+            render_path=render["output_path"],
+            render_id=render_output["id"],
+        )
 
         payload = {
             **render,
             "playlist_url": latest_stream_url,
             "stream_ready": bool(latest_stream_url),
+            "render_output": render_output,
         }
         return _tool_success(payload, f"Rendered project {project_id}")
 
@@ -813,13 +973,17 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         Tool(
             name="create_after_effects_project",
             description=(
-                "Create a new managed Shotwright project workspace, run an After Effects JSX script to save an .aep into it, "
-                "and make that project active for later render/export steps."
+                "Create a managed Shotwright project workspace, or reuse the current empty generated workspace after a failed bootstrap, "
+                "then run an After Effects JSX script to save an .aep into it and keep that project active for later render/export steps."
             ),
             handler=create_after_effects_project,
             parameters={
                 "type": "object",
                 "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional generated project identifier to reuse after an earlier bootstrap failed before saving an .aep",
+                    },
                     "project_name": {
                         "type": "string",
                         "description": "Human-readable project name used for the default .aep file name",
@@ -831,7 +995,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                     "script_content": {
                         "type": "string",
                         "description": (
-                            "Complete JSX script source. Save the project to SHOTWRIGHT_PROJECT_FILE and call app.quit() when finished."
+                            "Complete JSX script source. Use the current open project, avoid app.newProject() in the warmed host, and save to SHOTWRIGHT_PROJECT_FILE only when you need an explicit path."
                         ),
                     },
                     "description": {
@@ -849,11 +1013,15 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         ),
         Tool(
             name="create_empty_after_effects_project",
-            description="Create a blank managed Shotwright .aep and make it active without requiring handwritten JSX boilerplate.",
+            description="Create a blank managed Shotwright .aep, or reuse the current empty generated workspace after a failed bootstrap, without requiring handwritten JSX boilerplate.",
             handler=create_empty_after_effects_project,
             parameters={
                 "type": "object",
                 "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional generated project identifier to reuse after an earlier bootstrap failed before saving an .aep",
+                    },
                     "project_name": {
                         "type": "string",
                         "description": "Human-readable project name used for the default .aep file name",
@@ -926,14 +1094,14 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         ),
         Tool(
             name="generate_storyboard_from_reference_video",
-            description="Generate a storyboard contact sheet from an uploaded session reference video using ffmpeg sampling parameters, without falling back to shell commands.",
+            description="Generate a storyboard contact sheet from a session-local video clip, including uploaded reference videos and rendered mp4 exports, using ffmpeg sampling parameters without shell fallback.",
             handler=generate_storyboard_from_reference_video,
             parameters={
                 "type": "object",
                 "properties": {
                     "reference_video_path": {
                         "type": "string",
-                        "description": "Optional shared-relative or absolute path to an uploaded session reference video; defaults to the newest uploaded reference video",
+                        "description": "Optional shared-relative or absolute path to a session-local video clip, including uploaded reference videos and latest_render_path-style export paths; defaults to the newest uploaded reference video",
                     },
                     "output_name": {
                         "type": "string",
@@ -958,6 +1126,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                     "width": {
                         "type": "integer",
                         "description": "Per-frame tile width in pixels before tiling",
+                    },
+                    "crop": {
+                        "type": "string",
+                        "description": "Optional crop box to inspect local motion, formatted as x,y,width,height or x:y:width:height in pixels or percentages like 25%,10%,40%,35%.",
                     },
                     "description": {
                         "type": "string",

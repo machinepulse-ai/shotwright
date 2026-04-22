@@ -18,6 +18,14 @@ const CHAT_TURN_TIMEOUT_MS = 0;
 const STREAM_RECONNECT_DELAY_MS = 1000;
 const STREAM_RECONNECT_DELAY_MAX_MS = 5000;
 
+function resolveDirectApiOrigin() {
+  if (typeof __SHOTWRIGHT_DIRECT_API_ORIGIN__ !== "string") {
+    return "";
+  }
+
+  return __SHOTWRIGHT_DIRECT_API_ORIGIN__.trim();
+}
+
 function getStoredAdminToken() {
   if (typeof window === "undefined") {
     return null;
@@ -287,10 +295,11 @@ export function openAgentSessionStream(
   sessionId: string,
   handlers: AgentSessionStreamHandlers,
 ): AgentSessionStreamConnection {
-  const streamUrl = new URL(`/api/agent/sessions/${sessionId}/stream`, window.location.origin);
+  const streamBaseOrigin = resolveDirectApiOrigin() || window.location.origin;
+  const streamUrl = new URL(`/api/agent/sessions/${sessionId}/stream`, streamBaseOrigin);
   const token = getStoredAdminToken();
 
-  if (typeof window.fetch === "function") {
+  if (token && typeof window.fetch === "function") {
     return openFetchAgentSessionStream(streamUrl.toString(), token, handlers);
   }
 

@@ -1,4 +1,5 @@
 const path = require("path");
+const webpack = require("webpack");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 
@@ -34,6 +35,9 @@ module.exports = {
     new HtmlWebpackPlugin({
       template: "./public/index.html",
       title: "Shotwright",
+    }),
+    new webpack.DefinePlugin({
+      __SHOTWRIGHT_DIRECT_API_ORIGIN__: JSON.stringify(isProd ? "" : apiProxyTarget),
     }),
     ...(isProd ? [new MiniCssExtractPlugin({ filename: "[name].[contenthash].css" })] : []),
   ],

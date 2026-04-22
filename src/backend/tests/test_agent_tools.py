@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,12 +36,43 @@ class FakeMessageCollection:
         return FakeAsyncCursor(self._docs)
 
 
-def test_build_empty_project_jsx_saves_and_quits() -> None:
+def test_build_empty_project_jsx_resets_current_project_without_modal_prompts() -> None:
     script = module._build_empty_project_jsx()
 
-    assert 'SHOTWRIGHT_PROJECT_FILE' in script
-    assert 'app.project.save(new File(projectFile));' in script
-    assert 'app.quit();' in script
+    assert 'app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);' in script
+    assert 'app.newProject();' not in script
+    assert 'SHOTWRIGHT_PROJECT_FILE' not in script
+    assert 'app.quit();' not in script
+
+
+def test_should_reuse_generated_project_workspace_only_for_unsaved_managed_workspace(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / 'project'
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    assert module._should_reuse_generated_project_workspace(
+        {
+            'origin': 'generated',
+            'workspace_dir': str(workspace_dir),
+            'entry_aep_file': 'draft.aep',
+            'aep_files': [],
+        }
+    ) is True
+    assert module._should_reuse_generated_project_workspace(
+        {
+            'origin': 'generated',
+            'workspace_dir': str(workspace_dir),
+            'entry_aep_file': 'draft.aep',
+            'aep_files': ['draft.aep'],
+        }
+    ) is False
+    assert module._should_reuse_generated_project_workspace(
+        {
+            'origin': 'uploaded',
+            'workspace_dir': str(workspace_dir),
+            'entry_aep_file': 'draft.aep',
+            'aep_files': [],
+        }
+    ) is False
 
 
 def test_build_reference_composition_jsx_includes_reference_asset_and_comp_settings() -> None:
@@ -129,3 +161,37 @@ async def test_stage_session_image_attachments_copies_into_project_workspace(mon
     staged_asset = staged[0]
     assert staged_asset['project_relative_path'] == 'assets/references/hero-reference.png'
     assert Path(staged_asset['project_asset_path']).read_bytes() == b'reference'
+
+
+@pytest.mark.asyncio
+async def test_generate_storyboard_tool_passes_crop_to_reference_media(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_generate_storyboard(session_id: str, **kwargs) -> dict:
+        captured['session_id'] = session_id
+        captured.update(kwargs)
+        return {
+            'id': 'storyboard-1',
+            'session_id': session_id,
+            'filename': 'focus.jpg',
+            'file_path': 'C:/data/uploads/session-1/_storyboards/focus.jpg',
+            'shared_relative_path': 'session-1/_storyboards/focus.jpg',
+            'storyboard_image_path': 'C:/data/uploads/session-1/_storyboards/focus.jpg',
+        }
+
+    monkeypatch.setattr(module.rm, 'generate_storyboard', fake_generate_storyboard)
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+
+    result = await tools['generate_storyboard_from_reference_video'].handler(
+        SimpleNamespace(
+            arguments={
+                'reference_video_path': 'session-1/_reference-videos/demo.mp4',
+                'crop': '10%,20%,50%,25%',
+            }
+        )
+    )
+
+    assert result.result_type == 'success'
+    assert captured['session_id'] == 'session-1'
+    assert captured['reference_video_path'] == 'session-1/_reference-videos/demo.mp4'
+    assert captured['crop'] == '10%,20%,50%,25%'

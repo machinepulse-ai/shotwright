@@ -157,20 +157,25 @@ type PendingImageAttachment = ChatImageAttachment & {
   id: string;
 };
 
+type ReferenceMediaGalleryItem = {
+  key: string;
+  kind: "video" | "image";
+  src: string;
+  label: string;
+  title: string;
+  meta: string | null;
+  thumbnailSrc?: string | null;
+};
+
 type ReferenceMediaCard = {
   referenceVideo: ReferenceVideoInfo;
   storyboards: StoryboardInfo[];
-  latestStoryboard: StoryboardInfo | null;
-  videoUrl: string | null;
-  latestStoryboardUrl: string | null;
+  galleryItems: ReferenceMediaGalleryItem[];
 };
 
 type MediaPreviewState = {
-  kind: "video" | "image";
-  src: string;
-  eyebrow: string;
-  title: string;
-  meta: string | null;
+  items: ReferenceMediaGalleryItem[];
+  currentIndex: number;
 };
 
 function buildUiError(err: any, fallbackKey: UiErrorKey): UiError {
@@ -1757,16 +1762,62 @@ export default function AgentPanel({
         (left, right) => parseDateValue(right.created_at).getTime() - parseDateValue(left.created_at).getTime()
       );
       const latestStoryboard = relatedStoryboards[0] ?? null;
+      const videoUrl = buildUploadAssetUrl(referenceVideo.shared_relative_path);
+      const latestStoryboardUrl = latestStoryboard ? buildUploadAssetUrl(latestStoryboard.shared_relative_path) : null;
+      const referenceVideoMeta = [
+        formatDurationSeconds(referenceVideo.duration_seconds, locale, copy.common.notSpecified),
+        referenceVideo.width && referenceVideo.height ? `${referenceVideo.width} x ${referenceVideo.height}` : null,
+        formatFileSize(referenceVideo.size_bytes, locale, copy.common.notSpecified),
+      ]
+        .filter(Boolean)
+        .join(" · ");
+
+      const galleryItems: ReferenceMediaGalleryItem[] = [];
+
+      if (videoUrl) {
+        galleryItems.push({
+          key: `${referenceVideo.shared_relative_path}:video`,
+          kind: "video",
+          src: videoUrl,
+          label: copy.agent.referenceMediaPreviewVideo,
+          title: referenceVideo.filename,
+          meta: referenceVideoMeta,
+          thumbnailSrc: latestStoryboardUrl,
+        });
+      }
+
+      for (const storyboard of relatedStoryboards) {
+        const storyboardUrl = buildUploadAssetUrl(storyboard.shared_relative_path);
+        if (!storyboardUrl) {
+          continue;
+        }
+
+        galleryItems.push({
+          key: storyboard.shared_relative_path,
+          kind: "image",
+          src: storyboardUrl,
+          label: copy.agent.referenceMediaPreviewStoryboard,
+          title: storyboard.filename,
+          meta: [
+            formatDurationSeconds(storyboard.interval_seconds, locale, copy.common.notSpecified),
+            `${storyboard.estimated_frames} frames`,
+            `${storyboard.columns} x ${storyboard.rows}`,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        });
+      }
 
       return {
         referenceVideo,
         storyboards: relatedStoryboards,
-        latestStoryboard,
-        videoUrl: buildUploadAssetUrl(referenceVideo.shared_relative_path),
-        latestStoryboardUrl: latestStoryboard ? buildUploadAssetUrl(latestStoryboard.shared_relative_path) : null,
+        galleryItems,
       };
     });
-  }, [referenceVideos, storyboards]);
+  }, [copy.agent.referenceMediaPreviewStoryboard, copy.agent.referenceMediaPreviewVideo, copy.common.notSpecified, locale, referenceVideos, storyboards]);
+  const mediaPreviewItem = mediaPreview ? mediaPreview.items[mediaPreview.currentIndex] ?? null : null;
+  const mediaPreviewCount = mediaPreview?.items.length ?? 0;
+  const mediaPreviewCanNavigate = mediaPreviewCount > 1;
   const sessionSettingsDirty = Boolean(currentSession) && (
     draftModel !== (currentSession?.copilot_model ?? "") ||
     effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
@@ -2048,6 +2099,22 @@ export default function AgentPanel({
       if (event.key === "Escape") {
         setIsRenderPreviewOpen(false);
         setMediaPreview(null);
+        return;
+      }
+
+      if (!mediaPreview) {
+        return;
+      }
+
+      if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        shiftMediaPreview(-1);
+        return;
+      }
+
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        event.preventDefault();
+        shiftMediaPreview(1);
       }
     };
 
@@ -2248,7 +2315,6 @@ export default function AgentPanel({
       const name = `${copy.common.sessionPrefix} ${sessions.length + 1}`;
       const res = await createSession(name);
       setSessions((prev: Session[]) => [res.data, ...prev]);
-      setCurrentSession(res.data);
       setOptimisticTurn(null);
       navigateToSession(res.data._id);
       setSessionsError(null);
@@ -2326,6 +2392,29 @@ export default function AgentPanel({
       event.preventDefault();
       handleCancelRenameSession();
     }
+  };
+
+  const openMediaPreview = (items: ReferenceMediaGalleryItem[], currentIndex: number) => {
+    if (!items.length) {
+      return;
+    }
+
+    const nextIndex = clamp(currentIndex, 0, items.length - 1);
+    setMediaPreview({ items, currentIndex: nextIndex });
+  };
+
+  const shiftMediaPreview = (offset: number) => {
+    setMediaPreview((previous) => {
+      if (!previous || previous.items.length <= 1) {
+        return previous;
+      }
+
+      const nextIndex = (previous.currentIndex + offset + previous.items.length) % previous.items.length;
+      return {
+        ...previous,
+        currentIndex: nextIndex,
+      };
+    });
   };
 
   const handleSend = () => {
@@ -3481,7 +3570,7 @@ export default function AgentPanel({
                         <div className="project-submeta">{formatDateTime(project.created_at, locale, copy.common.notStarted)}</div>
                       </div>
                       <div className="project-actions">
-                        <span className={`status-badge status-${project.status === "active" ? "running" : "idle"}`}>
+                        <span className={`status-badge project-status-badge status-${project.status === "active" ? "running" : "idle"}`}>
                           {projectStatusLabels[project.status]}
                         </span>
                         <button className="ghost-button btn-sm" onClick={() => handleDownload(project)}>
@@ -3507,7 +3596,7 @@ export default function AgentPanel({
 
               {referenceMediaCards.length ? (
                 <div className="project-list panel-list-scroll">
-                  {referenceMediaCards.map(({ latestStoryboard, latestStoryboardUrl, referenceVideo, storyboards: relatedStoryboards, videoUrl }) => {
+                  {referenceMediaCards.map(({ galleryItems, referenceVideo, storyboards: relatedStoryboards }) => {
                     const referenceVideoMeta = [
                       formatDurationSeconds(referenceVideo.duration_seconds, locale, copy.common.notSpecified),
                       referenceVideo.width && referenceVideo.height ? `${referenceVideo.width} x ${referenceVideo.height}` : null,
@@ -3515,22 +3604,6 @@ export default function AgentPanel({
                     ]
                       .filter(Boolean)
                       .join(" · ");
-
-                    const storyboardMeta = latestStoryboard
-                      ? [
-                          `${formatDurationSeconds(latestStoryboard.interval_seconds, locale, copy.common.notSpecified)} / frame`,
-                          `${latestStoryboard.estimated_frames} frames`,
-                          `${latestStoryboard.columns} x ${latestStoryboard.rows}`,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")
-                      : null;
-                    const storyboardPreviewItems = relatedStoryboards
-                      .map((storyboard) => ({
-                        storyboard,
-                        url: buildUploadAssetUrl(storyboard.shared_relative_path),
-                      }))
-                      .filter((entry): entry is { storyboard: StoryboardInfo; url: string } => Boolean(entry.url));
 
                     return (
                       <div key={referenceVideo.shared_relative_path} className="reference-media-card">
@@ -3543,118 +3616,49 @@ export default function AgentPanel({
                           <span className="reference-media-badge">{`${relatedStoryboards.length} ${copy.agent.referenceMediaStoryboardCount}`}</span>
                         </div>
 
-                        <div className="reference-media-preview-grid">
-                          <button
-                            type="button"
-                            className="reference-media-preview"
-                            data-testid="reference-video-preview-trigger"
-                            onClick={() => {
-                              if (!videoUrl) {
-                                return;
-                              }
+                        {galleryItems.length ? (
+                          <div className="reference-media-gallery">
+                            <div className="reference-media-gallery-strip" data-testid="reference-media-gallery-strip">
+                              {galleryItems.map((item, index) => (
+                                <button
+                                  key={item.key}
+                                  type="button"
+                                  className={`reference-media-gallery-chip kind-${item.kind}`}
+                                  data-testid="reference-media-gallery-trigger"
+                                  onClick={() => openMediaPreview(galleryItems, index)}
+                                >
+                                  <span className="reference-media-gallery-chip-topline">
+                                    <span className="reference-media-gallery-chip-label">{item.label}</span>
+                                    <span className="reference-media-gallery-chip-action">{copy.video.preview}</span>
+                                  </span>
 
-                              setMediaPreview({
-                                kind: "video",
-                                src: videoUrl,
-                                eyebrow: copy.agent.referenceMediaPreviewVideo,
-                                title: referenceVideo.filename,
-                                meta: referenceVideoMeta,
-                              });
-                            }}
-                            disabled={!videoUrl}
-                          >
+                                  {item.kind === "video" ? (
+                                    <video
+                                      className="reference-media-gallery-thumb"
+                                      src={item.src}
+                                      poster={item.thumbnailSrc || undefined}
+                                      muted
+                                      playsInline
+                                      preload="metadata"
+                                    />
+                                  ) : (
+                                    <img className="reference-media-gallery-thumb" src={item.src} alt={item.title} loading="lazy" />
+                                  )}
+
+                                  <span className="reference-media-gallery-chip-title" title={item.title}>{item.title}</span>
+                                  {item.meta ? <span className="reference-media-gallery-chip-meta">{item.meta}</span> : null}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="reference-media-preview is-empty" data-testid="storyboard-preview-empty">
                             <span className="reference-media-preview-topline">
-                              <span className="reference-media-preview-label">{copy.agent.referenceMediaPreviewVideo}</span>
-                              <span className="reference-media-preview-action">{copy.video.preview}</span>
+                              <span className="reference-media-preview-label">{copy.agent.referenceMediaPreviewStoryboard}</span>
                             </span>
-                            <video
-                              className="reference-media-preview-video"
-                              src={videoUrl || undefined}
-                              poster={latestStoryboardUrl || undefined}
-                              muted
-                              playsInline
-                              preload="metadata"
-                            />
-                            <span className="reference-media-preview-caption">{referenceVideo.filename}</span>
-                          </button>
-
-                          {latestStoryboard && latestStoryboardUrl ? (
-                            <button
-                              type="button"
-                              className="reference-media-preview"
-                              data-testid="storyboard-preview-trigger"
-                              onClick={() => {
-                                setMediaPreview({
-                                  kind: "image",
-                                  src: latestStoryboardUrl,
-                                  eyebrow: copy.agent.referenceMediaPreviewStoryboard,
-                                  title: latestStoryboard.filename,
-                                  meta: storyboardMeta,
-                                });
-                              }}
-                            >
-                              <span className="reference-media-preview-topline">
-                                <span className="reference-media-preview-label">{copy.agent.referenceMediaLatestStoryboard}</span>
-                                <span className="reference-media-preview-action">{copy.video.preview}</span>
-                              </span>
-                              <img className="reference-media-preview-image" src={latestStoryboardUrl} alt={latestStoryboard.filename} loading="lazy" />
-                              <span className="reference-media-preview-caption">{latestStoryboard.filename}</span>
-                            </button>
-                          ) : (
-                            <div className="reference-media-preview is-empty" data-testid="storyboard-preview-empty">
-                              <span className="reference-media-preview-topline">
-                                <span className="reference-media-preview-label">{copy.agent.referenceMediaPreviewStoryboard}</span>
-                              </span>
-                              <div className="reference-media-preview-placeholder">{copy.agent.referenceMediaStoryboardPending}</div>
-                            </div>
-                          )}
-                        </div>
-
-                        {latestStoryboard ? (
-                          <div className="reference-media-storyboard-summary">
-                            <div className="reference-media-storyboard-title">{copy.agent.referenceMediaLatestStoryboard}</div>
-                            <div className="project-meta">{storyboardMeta}</div>
-                            <div className="project-submeta">{formatDateTime(latestStoryboard.created_at, locale, copy.common.notStarted)}</div>
+                            <div className="reference-media-preview-placeholder">{copy.agent.referenceMediaStoryboardPending}</div>
                           </div>
-                        ) : null}
-
-                        {storyboardPreviewItems.length ? (
-                          <div className="reference-media-storyboard-gallery">
-                            <div className="reference-media-storyboard-title">{copy.agent.referenceMediaAllStoryboards}</div>
-                            <div className="reference-media-storyboard-strip" data-testid="reference-media-storyboard-strip">
-                              {storyboardPreviewItems.map(({ storyboard, url }) => {
-                                const itemMeta = [
-                                  formatDurationSeconds(storyboard.interval_seconds, locale, copy.common.notSpecified),
-                                  `${storyboard.estimated_frames} frames`,
-                                ]
-                                  .filter(Boolean)
-                                  .join(" · ");
-
-                                return (
-                                  <button
-                                    key={storyboard.shared_relative_path}
-                                    type="button"
-                                    className={`reference-media-storyboard-chip${latestStoryboard?.shared_relative_path === storyboard.shared_relative_path ? " is-active" : ""}`}
-                                    data-testid="storyboard-gallery-trigger"
-                                    onClick={() => {
-                                      setMediaPreview({
-                                        kind: "image",
-                                        src: url,
-                                        eyebrow: copy.agent.referenceMediaPreviewStoryboard,
-                                        title: storyboard.filename,
-                                        meta: itemMeta,
-                                      });
-                                    }}
-                                  >
-                                    <img className="reference-media-storyboard-thumb" src={url} alt={storyboard.filename} loading="lazy" />
-                                    <span className="reference-media-storyboard-chip-title" title={storyboard.filename}>{storyboard.filename}</span>
-                                    <span className="reference-media-storyboard-chip-meta">{itemMeta}</span>
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        ) : null}
+                        )}
                       </div>
                     );
                   })}
@@ -3716,13 +3720,13 @@ export default function AgentPanel({
         </div>
       ) : null}
 
-      {mediaPreview ? (
+      {mediaPreview && mediaPreviewItem ? (
         <div
           className="render-preview-modal-backdrop"
           data-testid="media-preview-modal"
           role="dialog"
           aria-modal="true"
-          aria-label={mediaPreview.title}
+          aria-label={mediaPreviewItem.title}
           onClick={() => setMediaPreview(null)}
         >
           <div className="render-preview-modal-shell media-preview-modal-shell" onClick={(event) => event.stopPropagation()}>
@@ -3742,20 +3746,54 @@ export default function AgentPanel({
             <div className="media-preview-panel card">
               <div className="panel-heading">
                 <div>
-                  <span className="eyebrow">{mediaPreview.eyebrow}</span>
-                  <h3>{mediaPreview.title}</h3>
-                  {mediaPreview.meta ? <p className="panel-description media-preview-description">{mediaPreview.meta}</p> : null}
+                  <span className="eyebrow">{mediaPreviewItem.label}</span>
+                  <h3>{mediaPreviewItem.title}</h3>
+                  {mediaPreviewItem.meta ? <p className="panel-description media-preview-description">{mediaPreviewItem.meta}</p> : null}
                 </div>
-                <a className="ghost-button btn-sm" href={mediaPreview.src} target="_blank" rel="noreferrer">
-                  {copy.video.open}
-                </a>
+                <div className="media-preview-header-actions">
+                  {mediaPreviewCanNavigate ? (
+                    <span className="media-preview-counter">{`${mediaPreview.currentIndex + 1} / ${mediaPreviewCount}`}</span>
+                  ) : null}
+                  <a className="ghost-button btn-sm" href={mediaPreviewItem.src} target="_blank" rel="noreferrer">
+                    {copy.video.open}
+                  </a>
+                </div>
               </div>
 
-              <div className={`media-preview-frame ${mediaPreview.kind === "video" ? "is-video" : "is-image"}`}>
-                {mediaPreview.kind === "video" ? (
-                  <video className="media-preview-video-element" src={mediaPreview.src} controls autoPlay playsInline preload="metadata" />
+              <div className={`media-preview-frame ${mediaPreviewItem.kind === "video" ? "is-video" : "is-image"}`}>
+                {mediaPreviewCanNavigate ? (
+                  <>
+                    <button
+                      type="button"
+                      className="media-preview-nav is-prev"
+                      data-testid="media-preview-nav-prev"
+                      aria-label={copy.agent.referenceMediaPrevious}
+                      title={copy.agent.referenceMediaPrevious}
+                      onClick={() => shiftMediaPreview(-1)}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                        <path d="M9.53 3.22a.75.75 0 0 1 0 1.06L5.81 8l3.72 3.72a.75.75 0 1 1-1.06 1.06l-4.25-4.25a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0Z" fill="currentColor"/>
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className="media-preview-nav is-next"
+                      data-testid="media-preview-nav-next"
+                      aria-label={copy.agent.referenceMediaNext}
+                      title={copy.agent.referenceMediaNext}
+                      onClick={() => shiftMediaPreview(1)}
+                    >
+                      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                        <path d="M6.47 12.78a.75.75 0 0 1 0-1.06L10.19 8 6.47 4.28a.75.75 0 0 1 1.06-1.06l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0Z" fill="currentColor"/>
+                      </svg>
+                    </button>
+                  </>
+                ) : null}
+
+                {mediaPreviewItem.kind === "video" ? (
+                  <video className="media-preview-video-element" src={mediaPreviewItem.src} controls autoPlay playsInline preload="metadata" />
                 ) : (
-                  <img className="media-preview-image-element" src={mediaPreview.src} alt={mediaPreview.title} />
+                  <img className="media-preview-image-element" src={mediaPreviewItem.src} alt={mediaPreviewItem.title} />
                 )}
               </div>
             </div>

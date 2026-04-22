@@ -99,6 +99,45 @@ const referenceVideosBySession = {
   [secondarySessionId]: [],
 };
 
+const projectsBySession = {
+  [primarySessionId]: [
+    {
+      _id: 'project-card-1',
+      session_id: primarySessionId,
+      filename: 'chinese_lyric_animation_10s.aep',
+      workspace_dir: 'C:/data/uploads/session-ui-regression/project-card-1',
+      aep_files: [],
+      entry_aep_file: 'chinese_lyric_animation_10s.aep',
+      origin: 'generated',
+      created_at: now,
+      status: 'uploaded',
+    },
+    {
+      _id: 'project-card-2',
+      session_id: primarySessionId,
+      filename: 'lyrics_animation_template_mock.aep',
+      workspace_dir: 'C:/data/uploads/session-ui-regression/project-card-2',
+      aep_files: [],
+      entry_aep_file: 'lyrics_animation_template_mock.aep',
+      origin: 'generated',
+      created_at: now,
+      status: 'uploaded',
+    },
+    {
+      _id: 'project-card-3',
+      session_id: primarySessionId,
+      filename: 'lyrics_animation_10s.aep',
+      workspace_dir: 'C:/data/uploads/session-ui-regression/project-card-3',
+      aep_files: [],
+      entry_aep_file: 'lyrics_animation_10s.aep',
+      origin: 'generated',
+      created_at: now,
+      status: 'active',
+    },
+  ],
+  [secondarySessionId]: [],
+};
+
 const storyboardBase = {
   session_id: primarySessionId,
   mime_type: "image/jpeg",
@@ -558,7 +597,7 @@ async function installMockRoutes(page) {
     return json(route, {
       session: sessionState,
       container: null,
-      projects: [],
+      projects: projectsBySession[sessionId] || [],
       reference_videos: referenceVideosBySession[sessionId] || [],
       storyboards: storyboardsBySession[sessionId] || [],
       latest_render_path: sessionState.latest_render_path,
@@ -842,6 +881,18 @@ async function collectSessionWorkbenchPanelMetrics(page) {
     const previewTrigger = document.querySelector('[data-testid="render-preview-trigger"]');
     const runtimeValue = sidebar?.querySelector('[data-testid="session-runtime-id"]');
     const emptyState = sidebar?.querySelector('.resources-panel .empty-side');
+    const resourceProjectBadges = sidebar
+      ? Array.from(sidebar.querySelectorAll('.project-status-badge')).map((badge) => {
+          const rect = badge.getBoundingClientRect();
+          const style = getComputedStyle(badge);
+          return {
+            text: badge.textContent?.trim() || null,
+            whiteSpace: style.whiteSpace,
+            height: rect.height,
+            width: rect.width,
+          };
+        })
+      : [];
     const composerShell = document.querySelector('.composer-shell');
     const composerCard = composerShell?.querySelector('.composer-card');
     const prompt = composerCard?.querySelector('#agent-prompt');
@@ -891,6 +942,7 @@ async function collectSessionWorkbenchPanelMetrics(page) {
       runtimeValueRect: rect(runtimeValue),
       runtimeValueText: runtimeValue?.textContent?.trim() || null,
       resourcesEmptyText: emptyState?.textContent?.trim() || null,
+      resourceProjectBadges,
       selectWidthDelta:
         modelSelect && reasoningSelect
           ? Math.abs(modelSelect.getBoundingClientRect().width - reasoningSelect.getBoundingClientRect().width)
@@ -1487,8 +1539,13 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     );
     assert.equal(initialPanelMetrics.runtimeValueText, sessionStates[primarySessionId].copilot_session_id, `Runtime id should stay fully visible in the sidebar: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.ok(initialPanelMetrics.runtimeValueRect && initialPanelMetrics.runtimeValueRect.height >= 30, `Runtime id row should have enough height to wrap long ids instead of truncating them: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
-    assert.equal(initialPanelMetrics.resourcesEmptyText, "No AEP files are bound yet.", "Resources empty state should stay visible");
-    assert.equal(await page.locator('[data-testid="storyboard-gallery-trigger"]').count(), 5, "Reference media card should expose every storyboard image, not just the latest one");
+    assert.equal(initialPanelMetrics.resourcesEmptyText, null, `Resources panel should show uploaded project cards for the regression session: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(initialPanelMetrics.resourceProjectBadges.length >= 3, `Resources panel should expose project status badges: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
+    assert.ok(
+      initialPanelMetrics.resourceProjectBadges.every((badge) => badge.whiteSpace === 'nowrap' && badge.height <= 36),
+      `Project status badges should stay on a single line instead of folding: ${JSON.stringify(initialPanelMetrics, null, 2)}`
+    );
+    assert.equal(await page.locator('[data-testid="reference-media-gallery-trigger"]').count(), 6, "Reference media card should expose one unified gallery with the video plus every storyboard image");
     assert.equal(initialPanelMetrics.promptPaddingLeft, 16, `Prompt should keep the corrected left gutter inside the composer card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.promptPaddingRight, 16, `Prompt should keep the corrected right gutter inside the composer card: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     assert.equal(initialPanelMetrics.footerPaddingLeft, initialPanelMetrics.promptPaddingLeft, `Composer footer controls should align with the prompt gutter: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
@@ -1506,7 +1563,7 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.ok(initialPanelMetrics.overviewRect && initialPanelMetrics.overviewRect.height <= 460, `Overview panel should stay concise instead of expanding into a long fact sheet: ${JSON.stringify(initialPanelMetrics, null, 2)}`);
     const referenceMediaOverflowMetrics = await page.evaluate(() => {
       const card = document.querySelector('.reference-media-card');
-      const strip = document.querySelector('.reference-media-storyboard-strip');
+      const strip = document.querySelector('.reference-media-gallery-strip');
 
       if (!card || !strip) {
         return null;
@@ -1529,15 +1586,44 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       `Storyboard gallery should switch to horizontal scrolling when there are many images: ${JSON.stringify(referenceMediaOverflowMetrics, null, 2)}`
     );
 
-    const lastStoryboardTrigger = page.locator('[data-testid="storyboard-gallery-trigger"]').last();
+    const lastStoryboardTrigger = page.locator('[data-testid="reference-media-gallery-trigger"]').last();
     await lastStoryboardTrigger.scrollIntoViewIfNeeded();
     await lastStoryboardTrigger.click();
     await page.locator('[data-testid="media-preview-modal"]').waitFor();
     assert.equal(
       (await page.locator('.media-preview-panel h3').textContent())?.trim(),
       storyboardsBySession[primarySessionId][4].filename,
-      'The preview modal should open the selected storyboard image, not only the latest one'
+      'The preview modal should open the selected gallery item'
     );
+
+    await page.locator('[data-testid="media-preview-nav-next"]').click();
+    assert.equal(
+      (await page.locator('.media-preview-panel h3').textContent())?.trim(),
+      referenceVideosBySession[primarySessionId][0].filename,
+      'The next button should wrap from the last storyboard to the reference video in the same gallery'
+    );
+
+    await page.keyboard.press('ArrowRight');
+    assert.equal(
+      (await page.locator('.media-preview-panel h3').textContent())?.trim(),
+      storyboardsBySession[primarySessionId][0].filename,
+      'ArrowRight should advance the popup preview to the next gallery item'
+    );
+
+    await page.keyboard.press('ArrowLeft');
+    assert.equal(
+      (await page.locator('.media-preview-panel h3').textContent())?.trim(),
+      referenceVideosBySession[primarySessionId][0].filename,
+      'ArrowLeft should move the popup preview back to the previous gallery item'
+    );
+
+    await page.locator('[data-testid="media-preview-nav-prev"]').click();
+    assert.equal(
+      (await page.locator('.media-preview-panel h3').textContent())?.trim(),
+      storyboardsBySession[primarySessionId][4].filename,
+      'The previous button should wrap from the reference video back to the last storyboard'
+    );
+
     await page.locator('[data-testid="media-preview-modal-close"]').click();
 
     await modelSelect.selectOption("gpt-4.1");

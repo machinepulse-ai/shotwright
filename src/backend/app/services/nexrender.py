@@ -1,5 +1,7 @@
 """nexrender integration — build jobs and invoke nexrender-cli inside containers."""
 
+from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import shutil
@@ -11,23 +13,26 @@ from uuid import uuid4
 
 from app.config import settings
 from app.services import project_manager as pm
-from app.services.container_manager import exec_in_container, get_container
+from app.services.container_manager import exec_in_container, get_container, put_text_files_in_container
 
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SETUP_VERSIONS_SCRIPT = REPO_ROOT / "scripts" / "install" / "setup_versions.py"
 SETUP_VERSIONS_CONFIG = REPO_ROOT / "setup-versions.yml"
+LOCAL_AFTER_EFFECTS_HOST_SCRIPT = REPO_ROOT / "scripts" / "after_effects_host.py"
 CONTAINER_AFTER_EFFECTS_HOST_SCRIPT = Path("C:/workspace/scripts/after_effects_host.py")
 ADOBE_INSTALL_BASE_ROOT = Path("C:/Program Files/Adobe")
 EXPORT_DIR = Path(settings.export_dir)
 CONTAINER_BOOTSTRAP_TEMPLATE = Path("C:/workspace/validation-data/templates/validation_motion.aep")
 BOOTSTRAP_TEMPLATE_COMPOSITION = "Main"
+RENDER_METADATA_SUFFIX = ".meta.json"
 NEXRENDER_BINARY_CANDIDATES = (
     Path("C:/Users/ContainerAdministrator/AppData/Roaming/npm/nexrender-cli.cmd"),
     Path("C:/Users/Administrator/AppData/Roaming/npm/nexrender-cli.cmd"),
     Path("nexrender-cli.cmd"),
 )
+_RUNTIME_HELPER_SYNC_DIGESTS: dict[str, str] = {}
 
 
 def _read_text_tail(path: str | Path, max_chars: int = 12000) -> str:
@@ -35,6 +40,24 @@ def _read_text_tail(path: str | Path, max_chars: int = 12000) -> str:
         return Path(path).read_text(encoding="utf-8", errors="replace")[-max_chars:]
     except OSError:
         return ""
+
+
+def _runtime_helper_files() -> dict[str, str]:
+    return {
+        str(CONTAINER_AFTER_EFFECTS_HOST_SCRIPT): LOCAL_AFTER_EFFECTS_HOST_SCRIPT.read_text(encoding="utf-8"),
+    }
+
+
+async def _sync_runtime_helper_scripts(docker_id: str) -> None:
+    helper_files = _runtime_helper_files()
+    digest = hashlib.sha256(
+        "\n".join(f"{path}\n{content}" for path, content in sorted(helper_files.items())).encode("utf-8")
+    ).hexdigest()
+    if _RUNTIME_HELPER_SYNC_DIGESTS.get(docker_id) == digest:
+        return
+
+    await put_text_files_in_container(docker_id, helper_files)
+    _RUNTIME_HELPER_SYNC_DIGESTS[docker_id] = digest
 
 
 def _resolve_executable(candidates: tuple[Path, ...]) -> str:
@@ -54,6 +77,7 @@ def _build_jsx_wrapper(
     managed_project_path: str | Path | None = None,
     bootstrap_comp_name: str | None = None,
     template_project_path: str | Path | None = None,
+    project_metadata_path: str | Path | None = None,
 ) -> str:
     normalized_script_path = Path(user_script_path).as_posix()
     normalized_log_path = Path(log_path).as_posix()
@@ -64,6 +88,7 @@ def _build_jsx_wrapper(
     normalized_template_project_path = (
         Path(template_project_path).as_posix().lower() if template_project_path else ""
     )
+    normalized_project_metadata_path = Path(project_metadata_path).as_posix() if project_metadata_path else ""
     return "\n".join(
         [
             "(function () {",
@@ -98,6 +123,7 @@ def _build_jsx_wrapper(
             f'    var __shotwrightManagedProjectPath = "{normalized_managed_project_path}";',
             f'    var __shotwrightBootstrapCompName = "{normalized_bootstrap_comp_name}";',
             f'    var __shotwrightTemplateProjectPath = "{normalized_template_project_path}";',
+            f'    var __shotwrightProjectMetadataPath = "{normalized_project_metadata_path}";',
             "    try {",
             "        if (__shotwrightManagedProjectPath && typeof $.setenv === \"function\") {",
             "            $.setenv(\"SHOTWRIGHT_PROJECT_FILE\", __shotwrightManagedProjectPath);",
@@ -140,6 +166,125 @@ def _build_jsx_wrapper(
             "            __shotwrightLog(\"SHOTWRIGHT_BOOTSTRAP_COMP_RENAME_FAILED:\" + __shotwrightNormalizeBootstrapCompError.toString());",
             "        }",
             "    }",
+            "    function __shotwrightRoundNumber(value) {",
+            "        try {",
+            "            if (typeof value !== \"number\" || !isFinite(value)) { return null; }",
+            "            return Math.round(value * 1000) / 1000;",
+            "        } catch (__shotwrightRoundNumberError) {",
+            "            return null;",
+            "        }",
+            "    }",
+            "    function __shotwrightPadNumber(value, length) {",
+            "        var __shotwrightText = String(Math.floor(Math.abs(value)));",
+            "        while (__shotwrightText.length < length) {",
+            "            __shotwrightText = \"0\" + __shotwrightText;",
+            "        }",
+            "        return __shotwrightText;",
+            "    }",
+            "    function __shotwrightIsoNow() {",
+            "        try {",
+            "            var __shotwrightNow = new Date();",
+            "            if (typeof __shotwrightNow.toISOString === \"function\") {",
+            "                return __shotwrightNow.toISOString();",
+            "            }",
+            "            return __shotwrightNow.getUTCFullYear() + \"-\" +",
+            "                __shotwrightPadNumber(__shotwrightNow.getUTCMonth() + 1, 2) + \"-\" +",
+            "                __shotwrightPadNumber(__shotwrightNow.getUTCDate(), 2) + \"T\" +",
+            "                __shotwrightPadNumber(__shotwrightNow.getUTCHours(), 2) + \":\" +",
+            "                __shotwrightPadNumber(__shotwrightNow.getUTCMinutes(), 2) + \":\" +",
+            "                __shotwrightPadNumber(__shotwrightNow.getUTCSeconds(), 2) + \".\" +",
+            "                __shotwrightPadNumber(__shotwrightNow.getUTCMilliseconds(), 3) + \"Z\";",
+            "        } catch (__shotwrightIsoNowError) {",
+            "            return \"\";",
+            "        }",
+            "    }",
+            "    function __shotwrightEscapeString(value) {",
+            "        var __shotwrightText = value === null || typeof value === \"undefined\" ? \"\" : value.toString();",
+            "        return __shotwrightText",
+            "            .replace(/\\/g, \"\\\\\")",
+            "            .replace(/\"/g, \"\\\"\")",
+            "            .replace(/\r/g, \"\\r\")",
+            "            .replace(/\n/g, \"\\n\")",
+            "            .replace(/\t/g, \"\\t\")",
+            "            .replace(/\f/g, \"\\f\")",
+            "            .replace(/\u0008/g, \"\\b\");",
+            "    }",
+            "    function __shotwrightIndent(level) {",
+            "        var __shotwrightIndentText = \"\";",
+            "        for (var __shotwrightIndentIndex = 0; __shotwrightIndentIndex < level; __shotwrightIndentIndex += 1) {",
+            "            __shotwrightIndentText += \"  \";",
+            "        }",
+            "        return __shotwrightIndentText;",
+            "    }",
+            "    function __shotwrightIsArray(value) {",
+            "        return Object.prototype.toString.call(value) === \"[object Array]\";",
+            "    }",
+            "    function __shotwrightSerializeJson(value, depth) {",
+            "        if (value === null || typeof value === \"undefined\") { return \"null\"; }",
+            "        var __shotwrightValueType = typeof value;",
+            "        if (__shotwrightValueType === \"string\") {",
+            "            return \"\\\"\" + __shotwrightEscapeString(value) + \"\\\"\";",
+            "        }",
+            "        if (__shotwrightValueType === \"number\") {",
+            "            return isFinite(value) ? String(value) : \"null\";",
+            "        }",
+            "        if (__shotwrightValueType === \"boolean\") {",
+            "            return value ? \"true\" : \"false\";",
+            "        }",
+            "        if (__shotwrightIsArray(value)) {",
+            "            if (!value.length) { return \"[]\"; }",
+            "            var __shotwrightArrayEntries = [];",
+            "            for (var __shotwrightArrayIndex = 0; __shotwrightArrayIndex < value.length; __shotwrightArrayIndex += 1) {",
+            "                __shotwrightArrayEntries.push(__shotwrightIndent(depth + 1) + __shotwrightSerializeJson(value[__shotwrightArrayIndex], depth + 1));",
+            "            }",
+            "            return \"[\\n\" + __shotwrightArrayEntries.join(\",\\n\") + \"\\n\" + __shotwrightIndent(depth) + \"]\";",
+            "        }",
+            "        if (__shotwrightValueType === \"object\") {",
+            "            var __shotwrightObjectEntries = [];",
+            "            for (var __shotwrightKey in value) {",
+            "                if (!value.hasOwnProperty || !value.hasOwnProperty(__shotwrightKey)) { continue; }",
+            "                __shotwrightObjectEntries.push(",
+            "                    __shotwrightIndent(depth + 1) + \"\\\"\" + __shotwrightEscapeString(__shotwrightKey) + \"\\\": \" + __shotwrightSerializeJson(value[__shotwrightKey], depth + 1)",
+            "                );",
+            "            }",
+            "            if (!__shotwrightObjectEntries.length) { return \"{}\"; }",
+            "            return \"{\\n\" + __shotwrightObjectEntries.join(\",\\n\") + \"\\n\" + __shotwrightIndent(depth) + \"}\";",
+            "        }",
+            "        return \"null\";",
+            "    }",
+            "    function __shotwrightWriteProjectMetadata() {",
+            "        if (!__shotwrightProjectMetadataPath || !app.project) { return; }",
+            "        var __shotwrightMetadataFile = new File(__shotwrightProjectMetadataPath);",
+            "        var __shotwrightCompositions = [];",
+            "        for (var itemIndex = 1; itemIndex <= app.project.items.length; itemIndex += 1) {",
+            "            var item = app.project.items[itemIndex];",
+            "            if (!(item instanceof CompItem)) { continue; }",
+            "            __shotwrightCompositions.push({",
+            "                name: item.name,",
+            "                width: item.width || null,",
+            "                height: item.height || null,",
+            "                duration_seconds: __shotwrightRoundNumber(item.duration),",
+            "                frame_rate: __shotwrightRoundNumber(item.frameRate),",
+            "                layer_count: item.numLayers || 0",
+            "            });",
+            "        }",
+            "        try {",
+            "            var __shotwrightMetadataPayload = { updated_at: __shotwrightIsoNow(), compositions: __shotwrightCompositions };",
+            "            var __shotwrightMetadataText = (typeof JSON !== \"undefined\" && typeof JSON.stringify === \"function\")",
+            "                ? JSON.stringify(__shotwrightMetadataPayload, null, 2)",
+            "                : __shotwrightSerializeJson(__shotwrightMetadataPayload, 0);",
+            "            __shotwrightMetadataFile.encoding = \"UTF-8\";",
+            "            if (!__shotwrightMetadataFile.open(\"w\")) {",
+            "                __shotwrightLog(\"SHOTWRIGHT_PROJECT_METADATA_OPEN_FAILED:\" + __shotwrightDescribeFile(__shotwrightMetadataFile));",
+            "                return;",
+            "            }",
+            "            __shotwrightMetadataFile.write(__shotwrightMetadataText);",
+            "            __shotwrightMetadataFile.close();",
+            "            __shotwrightLog(\"SHOTWRIGHT_PROJECT_METADATA_WRITTEN:\" + __shotwrightDescribeFile(__shotwrightMetadataFile));",
+            "        } catch (__shotwrightWriteProjectMetadataError) {",
+            "            __shotwrightLog(\"SHOTWRIGHT_PROJECT_METADATA_WRITE_FAILED:\" + __shotwrightWriteProjectMetadataError.toString());",
+            "        }",
+            "    }",
             "    function __shotwrightSaveManagedProject() {",
             "        if (!__shotwrightManagedProjectPath || !app.project || typeof app.project.save !== \"function\") { return; }",
             "        __shotwrightNormalizeBootstrapComp();",
@@ -151,6 +296,7 @@ def _build_jsx_wrapper(
             "        } else {",
             "            app.project.save(__shotwrightTargetFile);",
             "        }",
+            "        __shotwrightWriteProjectMetadata();",
             "        __shotwrightLog(\"SHOTWRIGHT_PROJECT_SAVE_DONE:\" + __shotwrightDescribeFile(__shotwrightTargetFile));",
             "    }",
             "    __shotwrightLog(\"SHOTWRIGHT_JSX_START\");",
@@ -349,6 +495,7 @@ def _resolve_project_payload(project: dict | None) -> dict[str, str] | None:
             "workspace_dir": project["workspace_dir"],
             "entry_aep_file": project.get("entry_aep_file") or project.get("filename") or "project.aep",
             "entry_aep_path": str(Path(project["workspace_dir"]) / (project.get("entry_aep_file") or project.get("filename") or "project.aep")),
+            "project_metadata_path": str(Path(project["workspace_dir"]) / pm.PROJECT_METADATA_FILENAME),
         }
 
     return {
@@ -356,7 +503,95 @@ def _resolve_project_payload(project: dict | None) -> dict[str, str] | None:
         "workspace_dir": project["workspace_dir"],
         "entry_aep_file": entry_aep_file,
         "entry_aep_path": str(Path(project["workspace_dir"]) / entry_aep_file),
+        "project_metadata_path": str(Path(project["workspace_dir"]) / pm.PROJECT_METADATA_FILENAME),
     }
+
+
+def _render_metadata_path(output_path: Path) -> Path:
+    return output_path.parent / f"{output_path.name}{RENDER_METADATA_SUFFIX}"
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _relative_to_exports(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(EXPORT_DIR.resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def record_render_output(
+    *,
+    session_id: str,
+    project_id: str,
+    output_path: str | Path,
+    composition: str,
+    aep_path: str,
+    work_dir: str | None = None,
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    stream_id: str | None = None,
+    playlist_url: str | None = None,
+    project_workspace_dir: str | None = None,
+) -> dict:
+    resolved_output_path = Path(output_path)
+    if not resolved_output_path.exists():
+        raise FileNotFoundError(f"Render output not found at {resolved_output_path}")
+
+    metadata = {
+        "id": uuid4().hex[:12],
+        "session_id": session_id,
+        "project_id": project_id,
+        "filename": resolved_output_path.name,
+        "file_path": str(resolved_output_path),
+        "shared_relative_path": _relative_to_exports(resolved_output_path),
+        "mime_type": "video/mp4",
+        "size_bytes": resolved_output_path.stat().st_size,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "composition": composition,
+        "aep_path": aep_path,
+        "aep_file": Path(aep_path).name if aep_path else None,
+        "project_workspace_dir": project_workspace_dir,
+        "work_dir": work_dir,
+        "stdout_path": stdout_path,
+        "stderr_path": stderr_path,
+        "stream_id": stream_id,
+        "playlist_url": playlist_url,
+    }
+    _render_metadata_path(resolved_output_path).write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return metadata
+
+
+def list_render_outputs(session_id: str, *, limit: int | None = None) -> list[dict]:
+    session_dir = EXPORT_DIR / session_id
+    if not session_dir.exists():
+        return []
+
+    render_outputs: list[dict] = []
+    for metadata_path in sorted(
+        session_dir.glob(f"*{RENDER_METADATA_SUFFIX}"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ):
+        metadata = _read_json(metadata_path)
+        if not metadata:
+            continue
+        file_path = Path(str(metadata.get("file_path") or ""))
+        if not file_path.exists():
+            continue
+        render_outputs.append(metadata)
+        if limit is not None and len(render_outputs) >= limit:
+            break
+    return render_outputs
 
 
 def build_nexrender_job(
@@ -406,6 +641,8 @@ async def run_render(
     container = await get_container(container_db_id)
     if not container:
         raise ValueError("Container not found")
+
+    await _sync_runtime_helper_scripts(container["docker_id"])
 
     stdout_path = work_dir / "nexrender.stdout.log"
     stderr_path = work_dir / "nexrender.stderr.log"
@@ -527,6 +764,8 @@ async def run_jsx_script(
     if not container:
         raise ValueError("Container not found")
 
+    await _sync_runtime_helper_scripts(container["docker_id"])
+
     script_token = uuid4().hex[:8]
     session_scope = project["session_id"] if project and project.get("session_id") else "scratch"
     work_dir = EXPORT_DIR / session_scope / "_nexrender_jsx" / script_token
@@ -556,6 +795,7 @@ async def run_jsx_script(
             project_payload["entry_aep_path"] if project_payload else None,
             BOOTSTRAP_TEMPLATE_COMPOSITION if template_path == bootstrap_project_path else None,
             template_path,
+            project_payload["project_metadata_path"] if project_payload else None,
         ),
         encoding="utf-8",
     )
@@ -581,6 +821,8 @@ async def run_jsx_script(
         jsx_log=jsx_log_path,
         stdout_log=stdout_path,
         stderr_log=stderr_path,
+        job_path=job_path,
+        work_dir=work_dir,
         timeout_seconds=max(30, timeout_seconds),
         project_id=project_payload["project_id"] if project_payload else None,
         project_root=project_payload["workspace_dir"] if project_payload else None,
@@ -629,7 +871,12 @@ async def run_jsx_script(
         "forced_cleanup": False,
         "after_effects_ready": bool(helper_result.get("after_effects_ready")),
         "after_effects_ready_marker": helper_result.get("after_effects_ready_marker"),
+        "dispatch_retry_count": helper_result.get("dispatch_retry_count") or 0,
         "dispatch_failed_to_inject": bool(helper_result.get("dispatch_failed_to_inject")),
+        "nexrender_fallback_used": bool(helper_result.get("nexrender_fallback_used")),
+        "nexrender_fallback_failed_to_start": bool(helper_result.get("nexrender_fallback_failed_to_start")),
+        "direct_fallback_used": bool(helper_result.get("direct_fallback_used")),
+        "direct_fallback_failed_to_start": bool(helper_result.get("direct_fallback_failed_to_start")),
         "success_marker_seen": success_marker_seen,
         "error_marker_seen": error_marker_seen,
         "output": combined_output[-2000:] if len(combined_output) > 2000 else combined_output,

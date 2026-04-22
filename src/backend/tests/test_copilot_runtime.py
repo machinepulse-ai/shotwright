@@ -55,6 +55,83 @@ class DummyRuntimeCompleted(DummyRuntime):
         return "copilot-message-id"
 
 
+class DummyRuntimeSilentCompleted(DummyRuntime):
+    async def _send(self, content: str, attachments=None) -> str:
+        self.sent_messages.append({"content": content, "attachments": attachments})
+
+        async def _complete_turn() -> None:
+            await asyncio.sleep(0)
+            assert self.turn_state is not None
+            self.turn_state.finalized = True
+            self.turn_state.idle_event.set()
+
+        asyncio.create_task(_complete_turn())
+        return "copilot-message-id"
+
+
+def test_system_prompt_warns_against_duplicate_project_recovery() -> None:
+    prompt = runtime_manager._system_prompt()
+
+    assert "keep using that same managed workspace" in prompt
+    assert "do not switch into repository inspection" in prompt
+
+
+@pytest.mark.asyncio
+async def test_send_message_synthesizes_success_text_when_model_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = DummyRuntimeSilentCompleted()
+    assistant_doc_holder: dict[str, dict] = {}
+
+    async def fake_ensure_runtime(app_session_id: str):
+        return runtime
+
+    async def fake_persist_message(app_session_id: str, role: str, content: str, metadata: dict | None = None) -> dict:
+        doc = {
+            "_id": f"{role}-doc",
+            "session_id": app_session_id,
+            "role": role,
+            "content": content,
+            "metadata": metadata or {},
+        }
+        if role == "assistant":
+            assistant_doc_holder["doc"] = doc
+        return doc
+
+    async def fake_persist_event(app_session_id: str, event_type: str, payload: dict, turn_id: str | None = None, sequence: int | None = None) -> None:
+        return None
+
+    async def fake_set_session_status(app_session_id: str, status: str, **extra) -> dict:
+        return {"_id": app_session_id, "status": status, **extra}
+
+    async def fake_sync_streaming_message(turn_state, *, content: str, version: int, streaming: bool, state: str) -> dict:
+        assistant_doc_holder["doc"] = {
+            **assistant_doc_holder["doc"],
+            "content": content,
+            "metadata": {
+                **assistant_doc_holder["doc"].get("metadata", {}),
+                "streaming": streaming,
+                "state": state,
+                "version": version,
+            },
+        }
+        return assistant_doc_holder["doc"]
+
+    monkeypatch.setattr(runtime_manager, "ensure_runtime", fake_ensure_runtime)
+    monkeypatch.setattr(runtime_manager, "resolve_turn_timeout_seconds", lambda: asyncio.sleep(0, result=900.0))
+    monkeypatch.setattr(runtime_manager, "_persist_message", fake_persist_message)
+    monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+    monkeypatch.setattr(runtime_manager, "_set_session_status", fake_set_session_status)
+    monkeypatch.setattr(runtime_manager, "_sync_streaming_message", fake_sync_streaming_message)
+    monkeypatch.setattr(module, "get_message_collection", lambda: FakeMessageCollection(assistant_doc_holder))
+
+    result = await runtime_manager.send_message("session-silent-success", "hello")
+
+    assert result["session_status"] == "idle"
+    assert result["assistant_message"]["content"] == (
+        "Shotwright completed the requested work. Inspect the updated session state for the active project, renders, or other artifacts."
+    )
+    assert result["assistant_message"]["metadata"]["state"] == "completed"
+
+
 @pytest.mark.asyncio
 async def test_reconcile_session_status_marks_stale_running_sessions_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = DummyRuntime()

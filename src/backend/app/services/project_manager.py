@@ -1,5 +1,6 @@
 """AEP project management — upload, extract, export, and render."""
 
+import json
 from datetime import datetime, timezone
 import os
 import re
@@ -13,6 +14,7 @@ from app.services.session_streams import publish_context_refresh, publish_sessio
 
 UPLOAD_DIR = Path(settings.upload_dir)
 EXPORT_DIR = Path(settings.export_dir)
+PROJECT_METADATA_FILENAME = ".shotwright-project.json"
 
 
 def _ensure_dirs() -> None:
@@ -34,6 +36,87 @@ def _normalize_aep_filename(filename: str | None, fallback_stem: str) -> str:
     if candidate.lower().endswith('.aep'):
         return candidate
     return f"{candidate}.aep"
+
+
+def _project_metadata_path(workspace_dir: Path) -> Path:
+    return workspace_dir / PROJECT_METADATA_FILENAME
+
+
+def _coerce_positive_int(value: object) -> int | None:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved > 0 else None
+
+
+def _coerce_non_negative_int(value: object) -> int | None:
+    try:
+        resolved = int(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved >= 0 else None
+
+
+def _coerce_non_negative_float(value: object) -> float | None:
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved >= 0 else None
+
+
+def _coerce_positive_float(value: object) -> float | None:
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError):
+        return None
+    return resolved if resolved > 0 else None
+
+
+def _read_project_metadata(workspace_dir: Path) -> dict | None:
+    metadata_path = _project_metadata_path(workspace_dir)
+    if not metadata_path.exists():
+        return None
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _normalize_composition_catalog(raw_items: object) -> list[dict]:
+    if not isinstance(raw_items, list):
+        return []
+
+    compositions: list[dict] = []
+    seen_names: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+
+        name = str(raw_item.get("name") or "").strip()
+        if not name:
+            continue
+
+        dedupe_key = name.lower()
+        if dedupe_key in seen_names:
+            continue
+        seen_names.add(dedupe_key)
+
+        compositions.append(
+            {
+                "name": name,
+                "width": _coerce_positive_int(raw_item.get("width")),
+                "height": _coerce_positive_int(raw_item.get("height")),
+                "duration_seconds": _coerce_non_negative_float(raw_item.get("duration_seconds")),
+                "frame_rate": _coerce_positive_float(raw_item.get("frame_rate")),
+                "layer_count": _coerce_non_negative_int(raw_item.get("layer_count")),
+            }
+        )
+
+    return sorted(compositions, key=lambda item: item["name"].lower())
 
 
 async def upload_project(session_id: str, file_bytes: bytes, filename: str) -> dict:
@@ -63,6 +146,8 @@ async def upload_project(session_id: str, file_bytes: bytes, filename: str) -> d
         "workspace_dir": str(extract_dir),
         "aep_files": aep_files,
         "entry_aep_file": aep_files[0] if aep_files else None,
+        "compositions": [],
+        "composition_catalog_updated_at": None,
         "origin": "uploaded",
         "created_at": datetime.now(timezone.utc),
         "status": "uploaded",
@@ -112,6 +197,8 @@ async def create_project_workspace(
         "workspace_dir": str(workspace_dir),
         "aep_files": [],
         "entry_aep_file": entry_aep_file,
+        "compositions": [],
+        "composition_catalog_updated_at": None,
         "origin": "generated",
         "created_at": datetime.now(timezone.utc),
         "status": "uploaded",
@@ -146,9 +233,23 @@ async def refresh_project_files(session_id: str, project_id: str) -> dict | None
     elif entry_aep_file and aep_files and entry_aep_file not in aep_files:
         entry_aep_file = aep_files[0]
 
+    project_metadata = _read_project_metadata(source_dir)
+    compositions = project.get("compositions", [])
+    composition_catalog_updated_at = project.get("composition_catalog_updated_at")
+    if project_metadata is not None:
+        compositions = _normalize_composition_catalog(project_metadata.get("compositions"))
+        composition_catalog_updated_at = project_metadata.get("updated_at")
+
     await get_project_collection().update_one(
         {"_id": project_id, "session_id": session_id},
-        {"$set": {"aep_files": aep_files, "entry_aep_file": entry_aep_file}},
+        {
+            "$set": {
+                "aep_files": aep_files,
+                "entry_aep_file": entry_aep_file,
+                "compositions": compositions,
+                "composition_catalog_updated_at": composition_catalog_updated_at,
+            }
+        },
     )
 
     refreshed = await get_project(session_id, project_id)

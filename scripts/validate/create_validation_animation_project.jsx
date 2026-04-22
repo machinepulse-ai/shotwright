@@ -52,7 +52,9 @@ function addFadeAndSlide(layer, startTime, endTime, startPosition, endPosition) 
 }
 
 app.beginSuppressDialogs();
-app.newProject();
+if (typeof CloseOptions !== "undefined" && app.project && typeof app.project.close === "function") {
+    app.project.close(CloseOptions.DO_NOT_SAVE_CHANGES);
+}
 
 var templatesRoot = $.getenv("SHOTWRIGHT_TEMPLATES_ROOT") || "C:/data/templates";
 var defaultYear = $.getenv("SHOTWRIGHT_VALIDATION_YEAR") || "2026";
