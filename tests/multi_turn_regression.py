@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import urllib.request
+import zipfile
 from pathlib import PureWindowsPath
 from uuid import uuid4
 
@@ -17,6 +19,13 @@ def request(method: str, path: str, payload: dict | None = None) -> dict | list:
     req = urllib.request.Request(f"{BASE_URL}{path}", data=data, method=method, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=1800) as response:
         return json.load(response)
+
+
+def download_binary(path: str, destination: str) -> None:
+    req = urllib.request.Request(f"{BASE_URL}{path}", method="GET")
+    with urllib.request.urlopen(req, timeout=1800) as response:
+        with open(destination, "wb") as file_handle:
+            file_handle.write(response.read())
 
 
 def require(condition: bool, message: str) -> None:
@@ -87,7 +96,6 @@ def main() -> int:
             "label": "turn2",
             "expected_output": "round2.mp4",
             "prompt": (
-                "Continue editing the same project and the same Main composition. Do not create a new project. "
                 "Change the background to black and the circle to red, then render round2.mp4."
             ),
         },
@@ -95,7 +103,6 @@ def main() -> int:
             "label": "turn3",
             "expected_output": "round3.mp4",
             "prompt": (
-                "Continue editing the same project and the same Main composition. Do not create a new project. "
                 "Add a small white title TEST in the top-right corner, then render round3.mp4."
             ),
         },
@@ -153,16 +160,24 @@ def main() -> int:
     sidecar = docker_read_json(sidecar_path)
     metadata_files = docker_list_render_metadata(session_id)
     render_outputs = final_context.get("render_outputs") or []
+    archive_path = str(PureWindowsPath(tempfile.gettempdir()) / f"shotwright-export-{session_id}.zip")
+    download_binary(f"/projects/{session_id}/{stable_project_id}/archive", archive_path)
+    with zipfile.ZipFile(archive_path) as archive_file:
+        archive_entries = archive_file.namelist()
 
     require(len(render_outputs) >= 3, "final render_outputs count < 3")
     require(len(metadata_files) >= 3, "final render metadata count < 3")
     require(any(item.get("name") == "Main" for item in sidecar.get("compositions") or []), "sidecar missing Main")
+    require(".shotwright-project.json" in archive_entries, "archive missing .shotwright-project.json")
+    require(any(item.lower().endswith(".aep") for item in archive_entries), "archive missing .aep project file")
 
     summary = {
         "session_id": session_id,
         "project_id": stable_project_id,
         "project_workspace_dir": workspace_dir,
         "sidecar_path": sidecar_path,
+        "archive_path": archive_path,
+        "archive_entries": archive_entries,
         "context_compositions": project.get("compositions") or [],
         "sidecar_compositions": sidecar.get("compositions") or [],
         "render_outputs": [

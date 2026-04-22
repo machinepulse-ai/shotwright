@@ -83,11 +83,16 @@ if (-not $env:PYTHONPATH) {
 elseif (-not ($env:PYTHONPATH -split ';' | Where-Object { $_ -eq $backendRoot })) {
     $env:PYTHONPATH = "$backendRoot;$env:PYTHONPATH"
 }
+if (-not $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS) {
+    $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS = '120'
+}
+
+$gracefulShutdownSeconds = $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS
 
 Write-Host '[dev-container] Starting backend and frontend inside the dev container ...' -ForegroundColor Green
 
 $backendProcess = Start-Process -FilePath 'python' `
-    -ArgumentList @('-m', 'uvicorn', '--app-dir', $backendRoot, 'app.main:app', '--host', '0.0.0.0', '--port', '8000', '--reload', '--timeout-graceful-shutdown', '5') `
+    -ArgumentList @('-m', 'uvicorn', '--app-dir', $backendRoot, 'app.main:app', '--host', '0.0.0.0', '--port', '8000', '--reload', '--timeout-graceful-shutdown', $gracefulShutdownSeconds) `
     -WorkingDirectory $backendRoot `
     -PassThru `
     -RedirectStandardOutput $backendStdout `

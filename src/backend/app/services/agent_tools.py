@@ -845,6 +845,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         if not project:
             return _tool_failure(f"Project {project_id} not found.")
 
+        await pm.set_active_project(app_session_id, project_id)
+
         render = await nr.render_project(
             session_id=app_session_id,
             project_id=project_id,
@@ -877,10 +879,12 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             playlist_url=latest_stream_url,
             project_workspace_dir=project.get("workspace_dir"),
         )
+        refreshed_project = await pm.refresh_project_files(app_session_id, project_id) or project
         await session_col.update_one(
             {"_id": app_session_id},
             {
                 "$set": {
+                    "active_project_id": project_id,
                     "latest_render_path": render["output_path"],
                     "latest_stream_id": render["stream_id"],
                     "latest_stream_url": latest_stream_url,
@@ -902,6 +906,17 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "playlist_url": latest_stream_url,
             "stream_ready": bool(latest_stream_url),
             "render_output": render_output,
+            "project_id": project_id,
+            "active_project_id": project_id,
+            "project": {
+                "_id": refreshed_project["_id"],
+                "filename": refreshed_project["filename"],
+                "workspace_dir": refreshed_project["workspace_dir"],
+                "entry_aep_file": refreshed_project.get("entry_aep_file"),
+                "aep_files": refreshed_project.get("aep_files", []),
+                "compositions": refreshed_project.get("compositions", []),
+                "composition_catalog_updated_at": refreshed_project.get("composition_catalog_updated_at"),
+            },
         }
         return _tool_success(payload, f"Rendered project {project_id}")
 
@@ -1231,7 +1246,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         ),
         Tool(
             name="render_after_effects_project",
-            description="Render a managed or uploaded After Effects project through nexrender-cli and prepare an HLS preview.",
+            description=(
+                "Render a managed or uploaded After Effects project through nexrender-cli and prepare an HLS preview. "
+                "When patch_script is provided, Shotwright first persists that JSX into the managed project so later exports match the preview."
+            ),
             handler=render_after_effects_project,
             parameters={
                 "type": "object",
@@ -1254,7 +1272,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                     },
                     "patch_script": {
                         "type": "string",
-                        "description": "Optional absolute container path to a JSX patch asset used by nexrender",
+                        "description": "Optional absolute path to a JSX patch asset; Shotwright will persist it into the managed project before rendering",
                     },
                 },
             },
@@ -1262,7 +1280,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         ),
         Tool(
             name="export_project_archive",
-            description="Create a downloadable zip archive for the active uploaded project.",
+            description="Create a downloadable zip archive for the active uploaded project using the current managed workspace state.",
             handler=export_project_archive,
             parameters={
                 "type": "object",

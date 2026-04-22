@@ -25,10 +25,12 @@ disable-model-invocation: false
 5. If the user supplied inline images, prefer `stage_reference_images` or `create_reference_composition` so the assets land inside the shared project workspace. Do not copy them with shell commands.
 6. Use `create_reference_composition` for the common setup path: import a staged image or generated storyboard, create or update a comp, and keep the project save path stable.
 7. Use `create_after_effects_project` only when the user truly needs custom bootstrap JSX that the higher-level tools cannot cover.
-8. Keep `run_after_effects_jsx` for later creative edits against an existing managed project. Do not use JSX to perform renders.
-9. Run nexrender through the same code path Shotwright uses in `src/backend/app/services/nexrender.py`, with an explicit `aerender.exe` path and a stable work directory.
-10. Treat the copied mp4 output file as the success artifact even if nexrender exits non-zero. Shotwright already uses that recovery rule and you should keep the same behavior.
-11. If the user asks for the editable project artifact too, finish by exporting the managed project archive after the render succeeds.
+8. When a session already has an active managed project, treat it as the default target for follow-up turns. If the user says “change it”, “add a title”, “render again”, or similar without explicitly asking for a new project, keep editing that active project and its current compositions.
+9. Keep `run_after_effects_jsx` for later creative edits against an existing managed project. Do not use JSX to perform renders.
+10. If a render needs a JSX patch and the result must survive into the downloadable archive, make sure the patch is applied to the managed project state before export. Shotwright's render path now persists `patch_script` into the managed project before rendering, so the exported archive matches the preview.
+11. Run nexrender through the same code path Shotwright uses in `src/backend/app/services/nexrender.py`, with an explicit `aerender.exe` path and a stable work directory.
+12. Treat the copied mp4 output file as the success artifact even if nexrender exits non-zero. Shotwright already uses that recovery rule and you should keep the same behavior.
+13. If the user asks for the editable project artifact too, finish by exporting the managed project archive after the render succeeds.
 
 ## Normal Flow Guardrails
 

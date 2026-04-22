@@ -37,6 +37,7 @@ import {
   ChatMessage,
   CopilotModelOption,
   ProjectInfo,
+  RenderOutputInfo,
   ReasoningEffort,
   ReferenceVideoInfo,
   Session,
@@ -317,6 +318,14 @@ function buildUploadAssetUrl(sharedRelativePath: string | null | undefined) {
     .join("/");
 
   return encodedPath ? `/api/uploads/${encodedPath}` : null;
+}
+
+function buildRenderOutputUrl(sessionId: string | null | undefined, renderOutputId: string | null | undefined) {
+  if (!sessionId || !renderOutputId) {
+    return null;
+  }
+
+  return `/api/streams/renders/${encodeURIComponent(sessionId)}/${encodeURIComponent(renderOutputId)}`;
 }
 
 function readFileAsDataUrl(file: File) {
@@ -1737,10 +1746,49 @@ export default function AgentPanel({
   const selectedReasoningOptions = selectedModelOption?.supported_reasoning_efforts ?? [];
   const reasoningSupported = Boolean(selectedModelOption?.supports_reasoning_effort && selectedReasoningOptions.length);
   const effectiveDraftReasoning = reasoningSupported ? draftReasoning : null;
-  const previewVideoSrc = context?.latest_render_url || context?.latest_stream_url || null;
-  const previewVideoFormat = context?.latest_render_url ? "mp4" : context?.latest_stream_url ? "hls" : null;
-  const hasRenderPreview = Boolean(context?.latest_render_path && previewVideoSrc && previewVideoFormat);
-  const latestRenderName = basename(context?.latest_render_path, copy.common.notGenerated);
+  const renderOutputs = context?.render_outputs ?? [];
+  const sortedRenderOutputs = useMemo<RenderOutputInfo[]>(() => {
+    return [...renderOutputs].sort(
+      (left, right) => parseDateValue(right.created_at).getTime() - parseDateValue(left.created_at).getTime()
+    );
+  }, [renderOutputs]);
+  const latestRenderOutput = sortedRenderOutputs[0] ?? null;
+  const latestRenderDirectUrl = buildRenderOutputUrl(currentSession?._id, latestRenderOutput?.id);
+  const renderPreviewItems = useMemo<ReferenceMediaGalleryItem[]>(() => {
+    if (!currentSession) {
+      return [];
+    }
+
+    const items: ReferenceMediaGalleryItem[] = [];
+
+    for (const renderOutput of sortedRenderOutputs) {
+      const directUrl = buildRenderOutputUrl(currentSession._id, renderOutput.id);
+      if (!directUrl) {
+        continue;
+      }
+
+      items.push({
+        key: `${renderOutput.id}:video`,
+        kind: "video",
+        src: directUrl,
+        label: copy.video.sourceMp4,
+        title: renderOutput.filename,
+        meta: [
+          renderOutput.composition || null,
+          formatFileSize(renderOutput.size_bytes, locale, copy.common.notSpecified),
+          formatDateTime(renderOutput.created_at, locale, copy.common.notSpecified),
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      });
+    }
+
+    return items;
+  }, [copy.common.notSpecified, copy.video.sourceMp4, currentSession, locale, sortedRenderOutputs]);
+  const previewVideoSrc = context?.latest_render_url || context?.latest_stream_url || latestRenderDirectUrl || null;
+  const previewVideoFormat = context?.latest_render_url ? "mp4" : context?.latest_stream_url ? "hls" : latestRenderDirectUrl ? "mp4" : null;
+  const hasRenderPreview = Boolean((context?.latest_render_path || latestRenderDirectUrl) && previewVideoSrc && previewVideoFormat);
+  const latestRenderName = latestRenderOutput?.filename || basename(context?.latest_render_path, copy.common.notGenerated);
   const referenceVideos = context?.reference_videos ?? [];
   const storyboards = context?.storyboards ?? [];
   const referenceMediaCards = useMemo<ReferenceMediaCard[]>(() => {
@@ -3523,18 +3571,19 @@ export default function AgentPanel({
                     <span className="eyebrow">{copy.video.eyebrow}</span>
                     <h3>{copy.video.title}</h3>
                   </div>
-                  <span className={`video-source-badge format-${previewVideoFormat}`}>{previewVideoFormat === "mp4" ? copy.video.sourceMp4 : copy.video.sourceHls}</span>
+                  <span className="panel-count">{renderPreviewItems.length || 1}</span>
                 </div>
 
                 <div className="render-preview-summary" data-testid="render-preview-summary">
                   <div className="render-preview-copy">
                     <div className="render-preview-title" title={latestRenderName}>{latestRenderName}</div>
-                    <div className="render-preview-meta" title={activeProject?.filename || copy.common.notSpecified}>
-                      {activeProject?.filename || copy.common.notSpecified}
+                    <div className="render-preview-meta" title={latestRenderOutput?.aep_file || activeProject?.filename || copy.common.notSpecified}>
+                      {latestRenderOutput?.aep_file || activeProject?.filename || copy.common.notSpecified}
                     </div>
                   </div>
 
                   <div className="render-preview-actions">
+                    <span className={`video-source-badge format-${previewVideoFormat}`}>{previewVideoFormat === "mp4" ? copy.video.sourceMp4 : copy.video.sourceHls}</span>
                     <button
                       type="button"
                       className="btn-primary btn-sm"
@@ -3548,6 +3597,40 @@ export default function AgentPanel({
                     </a>
                   </div>
                 </div>
+
+                {renderPreviewItems.length ? (
+                  <div className="render-output-history">
+                    <div className="reference-media-gallery">
+                      <div className="reference-media-gallery-strip" data-testid="render-output-gallery-strip">
+                        {renderPreviewItems.map((item, index) => (
+                          <button
+                            key={item.key}
+                            type="button"
+                            className="reference-media-gallery-chip kind-video"
+                            data-testid="render-output-gallery-trigger"
+                            onClick={() => openMediaPreview(renderPreviewItems, index)}
+                          >
+                            <span className="reference-media-gallery-chip-topline">
+                              <span className="reference-media-gallery-chip-label">{item.label}</span>
+                              <span className="reference-media-gallery-chip-action">{copy.video.preview}</span>
+                            </span>
+
+                            <video
+                              className="reference-media-gallery-thumb"
+                              src={item.src}
+                              muted
+                              playsInline
+                              preload="metadata"
+                            />
+
+                            <span className="reference-media-gallery-chip-title" title={item.title}>{item.title}</span>
+                            {item.meta ? <span className="reference-media-gallery-chip-meta">{item.meta}</span> : null}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
 

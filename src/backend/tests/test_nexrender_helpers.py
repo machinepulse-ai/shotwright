@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -128,6 +128,7 @@ def test_record_render_output_writes_metadata_and_lists_outputs(monkeypatch: pyt
     listed = module.list_render_outputs("session-1")
     assert [entry["filename"] for entry in listed] == ["preview.mp4"]
     assert listed[0]["playlist_url"] == "/api/streams/session-1-project-1-abc123/index.m3u8"
+    assert module.get_render_output("session-1", metadata["id"])["filename"] == "preview.mp4"
 
 
 def test_resolve_after_effects_dispatch_binary_prefers_afterfx_com(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,3 +203,52 @@ async def test_sync_runtime_helper_scripts_pushes_updated_helper_once(monkeypatc
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_persist_patch_script_to_project_runs_jsx_and_refreshes_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_script = tmp_path / "round2_patch.jsx"
+    patch_script.write_text("app.project.save(app.project.file);\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    async def fake_run_jsx_script(container_db_id: str, script_content: str, *, project: dict | None = None, timeout_seconds: int = 300) -> dict:
+        captured["container_db_id"] = container_db_id
+        captured["script_content"] = script_content
+        captured["project"] = project
+        captured["timeout_seconds"] = timeout_seconds
+        return {"success": True, "output": "ok", "success_marker_seen": True}
+
+    async def fake_refresh_project_files(session_id: str, project_id: str) -> dict:
+        return {
+            "_id": project_id,
+            "session_id": session_id,
+            "workspace_dir": "C:/data/uploads/session-1/project-1",
+            "filename": "scene.aep",
+            "entry_aep_file": "scene.aep",
+            "aep_files": ["scene.aep"],
+        }
+
+    monkeypatch.setattr(module, "run_jsx_script", fake_run_jsx_script)
+    monkeypatch.setattr(module.pm, "refresh_project_files", fake_refresh_project_files)
+
+    result = await module.persist_patch_script_to_project(
+        container_db_id="container-1",
+        project={
+            "_id": "project-1",
+            "session_id": "session-1",
+            "workspace_dir": "C:/data/uploads/session-1/project-1",
+            "filename": "scene.aep",
+            "entry_aep_file": "scene.aep",
+            "aep_files": ["scene.aep"],
+        },
+        patch_script=str(patch_script),
+    )
+
+    assert captured["container_db_id"] == "container-1"
+    assert captured["script_content"] == "app.project.save(app.project.file);\n"
+    assert result["persistence_confirmed"] is True
+    assert PureWindowsPath(result["project"]["entry_aep_path"]).as_posix() == "C:/data/uploads/session-1/project-1/scene.aep"

@@ -7,11 +7,27 @@ from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.database import get_session_collection
+from app.services import nexrender as nr
 
 router = APIRouter(prefix="/streams", tags=["streaming"])
 
 HLS_DIR = Path(settings.hls_dir)
 EXPORT_DIR = Path(settings.export_dir)
+
+
+def _resolve_export_mp4(raw_path: str | Path) -> Path:
+    file_path = Path(raw_path).resolve()
+    export_root = EXPORT_DIR.resolve()
+
+    try:
+        file_path.relative_to(export_root)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid render path") from exc
+
+    if not file_path.exists() or file_path.suffix.lower() != ".mp4":
+        raise HTTPException(404, "Render file not found")
+
+    return file_path
 
 
 @router.get("/renders/{session_id}")
@@ -25,17 +41,18 @@ async def get_render_mp4(session_id: str):
     if not render_path:
         raise HTTPException(404, "No rendered mp4 is available for this session")
 
-    file_path = Path(render_path).resolve()
-    export_root = EXPORT_DIR.resolve()
+    file_path = _resolve_export_mp4(render_path)
 
-    try:
-        file_path.relative_to(export_root)
-    except ValueError as exc:
-        raise HTTPException(400, "Invalid render path") from exc
+    return FileResponse(file_path, media_type="video/mp4", filename=file_path.name)
 
-    if not file_path.exists() or file_path.suffix.lower() != ".mp4":
-        raise HTTPException(404, "Render file not found")
 
+@router.get("/renders/{session_id}/{render_output_id}")
+async def get_render_output_mp4(session_id: str, render_output_id: str):
+    render_output = nr.get_render_output(session_id, render_output_id)
+    if not render_output:
+        raise HTTPException(404, "Render output not found")
+
+    file_path = _resolve_export_mp4(str(render_output.get("file_path") or ""))
     return FileResponse(file_path, media_type="video/mp4", filename=file_path.name)
 
 

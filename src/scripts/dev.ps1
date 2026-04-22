@@ -30,7 +30,10 @@ $backendJob = Start-Job -ScriptBlock {
     elseif (-not ($env:PYTHONPATH -split ';' | Where-Object { $_ -eq $dir })) {
         $env:PYTHONPATH = "$dir;$env:PYTHONPATH"
     }
-    & python -m uvicorn --app-dir $dir app.main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown 5
+    if (-not $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS) {
+        $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS = '120'
+    }
+    & python -m uvicorn --app-dir $dir app.main:app --host 0.0.0.0 --port 8000 --reload --timeout-graceful-shutdown $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS
 } -ArgumentList "$root\backend"
 
 # Frontend

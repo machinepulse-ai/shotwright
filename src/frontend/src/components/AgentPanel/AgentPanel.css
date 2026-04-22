@@ -2014,6 +2014,16 @@
   flex-wrap: wrap;
 }
 
+.render-output-history {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(31, 35, 40, 0.08);
+}
+
+.render-output-history .reference-media-gallery-chip {
+  flex-basis: 178px;
+}
+
 .render-preview-modal-backdrop {
   position: fixed;
   inset: 0;

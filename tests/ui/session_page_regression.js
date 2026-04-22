@@ -99,6 +99,54 @@ const referenceVideosBySession = {
   [secondarySessionId]: [],
 };
 
+const renderOutputsBySession = {
+  [primarySessionId]: [
+    {
+      id: "render-output-3",
+      session_id: primarySessionId,
+      project_id: "project-card-3",
+      filename: "round3.mp4",
+      file_path: "C:/data/exports/session-ui-regression/round3.mp4",
+      shared_relative_path: "session-ui-regression/round3.mp4",
+      mime_type: "video/mp4",
+      size_bytes: 5231101,
+      created_at: new Date(Date.now() - 5_000).toISOString(),
+      composition: "Main",
+      aep_path: "C:/data/uploads/session-ui-regression/project-card-3/lyrics_animation_10s.aep",
+      aep_file: "lyrics_animation_10s.aep",
+    },
+    {
+      id: "render-output-2",
+      session_id: primarySessionId,
+      project_id: "project-card-3",
+      filename: "round2.mp4",
+      file_path: "C:/data/exports/session-ui-regression/round2.mp4",
+      shared_relative_path: "session-ui-regression/round2.mp4",
+      mime_type: "video/mp4",
+      size_bytes: 5122300,
+      created_at: new Date(Date.now() - 15_000).toISOString(),
+      composition: "Main",
+      aep_path: "C:/data/uploads/session-ui-regression/project-card-3/lyrics_animation_10s.aep",
+      aep_file: "lyrics_animation_10s.aep",
+    },
+    {
+      id: "render-output-1",
+      session_id: primarySessionId,
+      project_id: "project-card-3",
+      filename: "round1.mp4",
+      file_path: "C:/data/exports/session-ui-regression/round1.mp4",
+      shared_relative_path: "session-ui-regression/round1.mp4",
+      mime_type: "video/mp4",
+      size_bytes: 5014400,
+      created_at: new Date(Date.now() - 25_000).toISOString(),
+      composition: "Main",
+      aep_path: "C:/data/uploads/session-ui-regression/project-card-3/lyrics_animation_10s.aep",
+      aep_file: "lyrics_animation_10s.aep",
+    },
+  ],
+  [secondarySessionId]: [],
+};
+
 const projectsBySession = {
   [primarySessionId]: [
     {
@@ -600,6 +648,7 @@ async function installMockRoutes(page) {
       projects: projectsBySession[sessionId] || [],
       reference_videos: referenceVideosBySession[sessionId] || [],
       storyboards: storyboardsBySession[sessionId] || [],
+      render_outputs: renderOutputsBySession[sessionId] || [],
       latest_render_path: sessionState.latest_render_path,
       latest_render_url: sessionState.latest_render_path ? `/api/streams/renders/${sessionId}` : null,
       latest_stream_url: sessionState.latest_stream_url,
@@ -1488,12 +1537,27 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.equal(await previewPanel.count(), 1, 'A compact render preview entry should appear when a render exists');
     assert.equal((await previewBadge.textContent())?.trim(), "MP4");
     assert.equal(await page.locator('[data-testid="session-context-sidebar"] .video-element').count(), 0, 'Right sidebar should not embed the video player directly anymore');
+    assert.equal(await page.locator('[data-testid="render-output-gallery-trigger"]').count(), 3, 'Render preview panel should expose every historical render output');
     await previewTrigger.click();
     await page.waitForSelector('[data-testid="render-preview-modal"]');
     const previewVideo = previewModal.locator('.video-element');
     assert.ok((await previewVideo.getAttribute('src'))?.includes(`/api/streams/renders/${primarySessionId}`), 'Preview modal should point at the direct mp4 route');
     await page.locator('[data-testid="render-preview-modal-close"]').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="render-preview-modal"]'));
+
+    await page.locator('[data-testid="render-output-gallery-trigger"]').nth(1).click();
+    await page.waitForSelector('[data-testid="media-preview-modal"]');
+    assert.equal(
+      (await page.locator('.media-preview-panel h3').textContent())?.trim(),
+      renderOutputsBySession[primarySessionId][1].filename,
+      'Historical render gallery should open the selected render output'
+    );
+    assert.ok(
+      (await page.locator('.media-preview-video-element').getAttribute('src'))?.includes(`/api/streams/renders/${primarySessionId}/${renderOutputsBySession[primarySessionId][1].id}`),
+      'Historical render preview should point at the render-output specific mp4 route'
+    );
+    await page.locator('[data-testid="media-preview-modal-close"]').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="media-preview-modal"]'));
 
     let overflowMetrics = await collectOverflowMetrics(page);
     assert.equal(

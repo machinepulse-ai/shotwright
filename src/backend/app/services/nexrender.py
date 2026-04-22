@@ -594,6 +594,60 @@ def list_render_outputs(session_id: str, *, limit: int | None = None) -> list[di
     return render_outputs
 
 
+def get_render_output(session_id: str, render_output_id: str) -> dict | None:
+    for metadata in list_render_outputs(session_id):
+        if str(metadata.get("id") or "").strip() == render_output_id:
+            return metadata
+    return None
+
+
+async def persist_patch_script_to_project(
+    *,
+    container_db_id: str,
+    project: dict,
+    patch_script: str,
+    timeout_seconds: int = 300,
+) -> dict:
+    patch_script_path = Path(patch_script)
+    if not patch_script_path.exists() or not patch_script_path.is_file():
+        raise FileNotFoundError(f"Patch script not found at {patch_script_path}")
+
+    managed_project_path = Path(project["workspace_dir"]) / (
+        project.get("entry_aep_file") or project.get("filename") or "project.aep"
+    )
+    metadata_path = Path(project["workspace_dir"]) / pm.PROJECT_METADATA_FILENAME
+    before_project_mtime = managed_project_path.stat().st_mtime_ns if managed_project_path.exists() else None
+    before_metadata_mtime = metadata_path.stat().st_mtime_ns if metadata_path.exists() else None
+
+    patch_script_content = patch_script_path.read_text(encoding="utf-8")
+    result = await run_jsx_script(
+        container_db_id,
+        patch_script_content,
+        project=project,
+        timeout_seconds=timeout_seconds,
+    )
+
+    project_file_updated = (
+        managed_project_path.exists()
+        and before_project_mtime is not None
+        and managed_project_path.stat().st_mtime_ns != before_project_mtime
+    )
+    metadata_updated = (
+        metadata_path.exists()
+        and (before_metadata_mtime is None or metadata_path.stat().st_mtime_ns != before_metadata_mtime)
+    )
+    persistence_confirmed = bool(result.get("success_marker_seen")) or project_file_updated or metadata_updated
+    result["persistence_confirmed"] = persistence_confirmed
+
+    if not result.get("success") or not persistence_confirmed:
+        raise RuntimeError(result.get("output") or f"Patch script failed: {patch_script_path}")
+
+    refreshed_project = await pm.refresh_project_files(project["session_id"], project["_id"])
+    if refreshed_project:
+        result["project"] = _resolve_project_payload(refreshed_project)
+    return result
+
+
 def build_nexrender_job(
     aep_path: str,
     composition: str = "Main",
@@ -722,6 +776,37 @@ async def render_project(
     if not aep_path.exists():
         raise ValueError(f"AEP file not found at {aep_path}")
 
+    persisted_patch_result: dict | None = None
+    patch_script_for_render = patch_script
+    if patch_script:
+        try:
+            persisted_patch_result = await persist_patch_script_to_project(
+                container_db_id=container_db_id,
+                project={
+                    **project,
+                    "entry_aep_file": aep_file,
+                    "filename": aep_file,
+                },
+                patch_script=patch_script,
+                timeout_seconds=min(max(timeout_seconds, 30), 300),
+            )
+            patch_script_for_render = None
+            refreshed_project = await pm.get_project(session_id, project_id)
+            if refreshed_project:
+                project = refreshed_project
+                aep_file = aep_relative_path or refreshed_project.get("entry_aep_file") or aep_file
+                aep_path = Path(refreshed_project["workspace_dir"]) / aep_file
+                if not aep_path.exists():
+                    raise ValueError(f"AEP file not found at {aep_path}")
+        except Exception as exc:
+            persisted_patch_result = {
+                "success": False,
+                "persistence_confirmed": False,
+                "output": str(exc).strip() or exc.__class__.__name__,
+                "fallback_to_render_patch": True,
+                "patch_script": patch_script,
+            }
+
     work_dir = output_dir / "_nexrender_work" / f"{project_id}-{uuid4().hex[:8]}"
     work_dir.mkdir(parents=True, exist_ok=True)
     job_path = work_dir / "job.json"
@@ -731,7 +816,7 @@ async def render_project(
         aep_path=str(aep_path),
         composition=composition,
         output_path=str(output_path),
-        patch_script=patch_script,
+        patch_script=patch_script_for_render,
     )
     job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
 
@@ -749,6 +834,9 @@ async def render_project(
         "aep_path": str(aep_path),
         "output_path": str(output_path),
         "stream_id": f"{session_id}-{project_id}-{uuid4().hex[:6]}",
+        "patch_script_persisted": bool(persisted_patch_result and persisted_patch_result.get("persistence_confirmed")),
+        "patch_persist_result": persisted_patch_result,
+        "patch_script_used_during_render": bool(patch_script_for_render),
     }
 
 

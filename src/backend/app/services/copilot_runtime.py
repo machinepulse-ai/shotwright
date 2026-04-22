@@ -26,10 +26,12 @@ from app.database import (
     get_cache_collection,
     get_event_collection,
     get_message_collection,
+    get_project_collection,
     get_session_collection,
 )
 from app.models.session import ReasoningEffort
 from app.services.agent_tools import build_shotwright_tools
+from app.services import nexrender as nr
 from app.services.session_streams import (
     publish_message_deleted,
     publish_message_upsert,
@@ -117,6 +119,20 @@ def _first_non_empty(*values: str | None) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _clear_current_task_cancellation() -> None:
+    current_task = asyncio.current_task()
+    if current_task is None:
+        return
+
+    cancelling = getattr(current_task, "cancelling", None)
+    uncancel = getattr(current_task, "uncancel", None)
+    if not callable(cancelling) or not callable(uncancel):
+        return
+
+    while current_task.cancelling():
+        current_task.uncancel()
 
 
 class TurnCancelledError(Exception):
@@ -561,6 +577,7 @@ class ShotwrightCopilotRuntimeManager:
             "For a blank project, prefer create_empty_after_effects_project instead of handwritten boilerplate JSX. "
             "For user-supplied inline images, prefer inspect_workspace to discover recent image attachments, then use stage_reference_images or create_reference_composition instead of copying files with shell commands. "
             "For user-supplied reference videos, prefer inspect_workspace to discover uploaded reference_videos, then use generate_storyboard_from_reference_video before creating the AEP composition. When only a local motion detail matters, pass the storyboard tool's crop parameter so you can inspect a focused region instead of the whole frame. When comparing against a Shotwright render, pass the session's latest_render_path or another session-local export mp4 into the same storyboard tool so the crop and cadence stay comparable. Inspect workspace state before multi-round edits so you can reuse the stored project compositions and structured render_outputs instead of guessing which comp or mp4 is the latest. "
+            "Once a session already has an active project, treat it as the default target for later creative turns. If the user asks to change, add, remove, tweak, or render something without explicitly asking for a new project or a different uploaded archive, keep editing that active project and its current compositions instead of creating another project. "
             "If a project bootstrap tool returns a project_id but the save step fails, keep using that same managed workspace on the next retry instead of creating another project. "
             "If you need to inspect a generated storyboard visually, use the available file or image viewing tool on the storyboard path returned by the Shotwright tool. "
             "Use run_after_effects_jsx only for creative edits that are not already covered by the higher-level Shotwright tools. "
@@ -571,6 +588,63 @@ class ShotwrightCopilotRuntimeManager:
             "If multiple uploaded projects or AEP files exist and the intended target is ambiguous, ask the user a concise clarification question. "
             "When rendering succeeds, mention the preview stream and export archive when relevant."
         )
+
+    async def _build_runtime_turn_content(self, app_session_id: str, content: str) -> str:
+        try:
+            session_collection = get_session_collection()
+            project_collection = get_project_collection()
+        except AssertionError:
+            return content
+
+        session_doc = await session_collection.find_one({"_id": app_session_id})
+        if not session_doc:
+            return content
+
+        active_project_id = str(session_doc.get("active_project_id") or "").strip()
+        if not active_project_id:
+            return content
+
+        project_doc = await project_collection.find_one({"_id": active_project_id, "session_id": app_session_id})
+        if not project_doc:
+            return content
+
+        project_name = _first_non_empty(
+            str(project_doc.get("entry_aep_file") or ""),
+            str(project_doc.get("filename") or ""),
+            active_project_id,
+        )
+        compositions = [
+            str(item.get("name") or "").strip()
+            for item in (project_doc.get("compositions") or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        recent_render_outputs = [
+            str(item.get("filename") or "").strip()
+            for item in nr.list_render_outputs(app_session_id, limit=3)
+            if str(item.get("filename") or "").strip()
+        ]
+
+        preamble_lines = [
+            "Shotwright session context:",
+            f"- Active project id: {active_project_id}",
+            f"- Active project file: {project_name}",
+        ]
+        if compositions:
+            preamble_lines.append(f"- Known compositions: {', '.join(compositions)}")
+        if recent_render_outputs:
+            preamble_lines.append(f"- Recent render outputs: {', '.join(recent_render_outputs)}")
+        preamble_lines.extend(
+            [
+                "Default behavior for this turn:",
+                "- Reuse the active project and its current compositions unless the user explicitly asks to create or switch projects.",
+                "- Treat follow-up requests like change, add, remove, tweak, update, or render again as edits to this active project.",
+                "- Do not create another project for a normal follow-up render or visual adjustment.",
+                "",
+                "User request:",
+                content,
+            ]
+        )
+        return "\n".join(preamble_lines)
 
     def _custom_agents(self, skill_names: list[str]) -> list[dict]:
         tool_names = [
@@ -895,6 +969,7 @@ class ShotwrightCopilotRuntimeManager:
         async with runtime.lock:
             turn_id = str(uuid4())
             turn_timeout_seconds = await self.resolve_turn_timeout_seconds()
+            runtime_content = await self._build_runtime_turn_content(app_session_id, content)
             copilot_attachments, persisted_attachments = _prepare_turn_attachments(
                 attachments,
                 app_session_id=app_session_id,
@@ -929,7 +1004,7 @@ class ShotwrightCopilotRuntimeManager:
             await self._set_session_status(app_session_id, "running", last_error=None)
             try:
                 copilot_message_id = await runtime.session.send(
-                    content,
+                    runtime_content,
                     attachments=copilot_attachments or None,
                 )
                 await self._persist_event(
@@ -1018,6 +1093,56 @@ class ShotwrightCopilotRuntimeManager:
                 return {
                     "assistant_message": assistant_doc,
                     "session_status": "idle",
+                }
+            except asyncio.CancelledError:
+                interruption_message = (
+                    "Shotwright interrupted this turn because the API worker restarted or the request disconnected."
+                )
+                logger.warning(
+                    "Copilot turn interrupted for %s while waiting for completion",
+                    app_session_id,
+                )
+                _clear_current_task_cancellation()
+
+                partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
+                if runtime.turn_state:
+                    runtime.turn_state.error = Exception(interruption_message)
+                    runtime.turn_state.error_event_seen = True
+                    runtime.turn_state.finalized = True
+                    runtime.turn_state.version += 1
+                    updated_doc = await self._sync_streaming_message(
+                        runtime.turn_state,
+                        content=runtime.turn_state.content if partial_output else interruption_message,
+                        version=runtime.turn_state.version,
+                        streaming=False,
+                        state="error",
+                    )
+                    if updated_doc:
+                        assistant_doc = updated_doc
+
+                await self._persist_event(
+                    app_session_id,
+                    "session.error",
+                    {
+                        "message": interruption_message,
+                        "partial_output": partial_output,
+                        "interrupted": True,
+                    },
+                    turn_id=turn_id,
+                    sequence=runtime.next_event_sequence(),
+                )
+                await self._set_session_status(app_session_id, "error", last_error=interruption_message)
+
+                if runtime.pending_tasks:
+                    await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
+                await self.disconnect_session(app_session_id)
+
+                if runtime.turn_state:
+                    assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+
+                return {
+                    "assistant_message": assistant_doc,
+                    "session_status": "error",
                 }
             except TimeoutError:
                 timeout_message = (

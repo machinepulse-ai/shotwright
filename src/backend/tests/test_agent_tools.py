@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,23 @@ class FakeMessageCollection:
 
     def find(self, *_args, **_kwargs):
         return FakeAsyncCursor(self._docs)
+
+
+class FakeSessionCollection:
+    def __init__(self, doc: dict) -> None:
+        self.doc = dict(doc)
+        self.updates: list[dict] = []
+
+    async def find_one(self, query: dict) -> dict | None:
+        if query.get('_id') == self.doc.get('_id'):
+            return dict(self.doc)
+        return None
+
+    async def update_one(self, _query: dict, update: dict) -> SimpleNamespace:
+        self.updates.append(update)
+        for key, value in (update.get('$set') or {}).items():
+            self.doc[key] = value
+        return SimpleNamespace(modified_count=1)
 
 
 def test_build_empty_project_jsx_resets_current_project_without_modal_prompts() -> None:
@@ -195,3 +213,95 @@ async def test_generate_storyboard_tool_passes_crop_to_reference_media(monkeypat
     assert captured['session_id'] == 'session-1'
     assert captured['reference_video_path'] == 'session-1/_reference-videos/demo.mp4'
     assert captured['crop'] == '10%,20%,50%,25%'
+
+
+@pytest.mark.asyncio
+async def test_render_tool_sets_rendered_project_back_to_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'container_id': 'container-1',
+            'active_project_id': 'older-project',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'scene.aep',
+        'workspace_dir': 'C:/data/uploads/session-1/project-1',
+        'entry_aep_file': 'scene.aep',
+        'aep_files': ['scene.aep'],
+        'compositions': [{'name': 'Main'}],
+        'composition_catalog_updated_at': '2026-04-22T12:00:00Z',
+    }
+    call_order: list[str] = []
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_set_active_project(session_id: str, project_id: str) -> dict:
+        call_order.append(f'set_active:{project_id}')
+        assert session_id == 'session-1'
+        return {'_id': project_id}
+
+    async def fake_render_project(**kwargs) -> dict:
+        call_order.append(f"render:{kwargs['project_id']}")
+        return {
+            'success': True,
+            'output_path': 'C:/data/exports/session-1/round1.mp4',
+            'stream_id': 'stream-1',
+            'aep_path': 'C:/data/uploads/session-1/project-1/scene.aep',
+            'work_dir': 'C:/data/exports/session-1/_nexrender_work/job-1',
+            'stdout_path': 'C:/data/exports/session-1/_nexrender_work/job-1/stdout.log',
+            'stderr_path': 'C:/data/exports/session-1/_nexrender_work/job-1/stderr.log',
+        }
+
+    async def fake_refresh_project_files(session_id: str, project_id: str) -> dict:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_generate_hls(_output_path: str, _stream_id: str) -> dict:
+        return {'success': True, 'playlist_url': '/api/streams/stream-1/index.m3u8'}
+
+    def fake_record_render_output(**kwargs) -> dict:
+        assert kwargs['project_id'] == 'project-1'
+        return {
+            'id': 'render-1',
+            'filename': 'round1.mp4',
+            'project_id': kwargs['project_id'],
+        }
+
+    async def fake_publish_session_updated(_session_id: str) -> None:
+        return None
+
+    async def fake_publish_context_refresh(_session_id: str, _reason: str, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+    monkeypatch.setattr(module.pm, 'set_active_project', fake_set_active_project)
+    monkeypatch.setattr(module.pm, 'refresh_project_files', fake_refresh_project_files)
+    monkeypatch.setattr(module.nr, 'render_project', fake_render_project)
+    monkeypatch.setattr(module.nr, 'record_render_output', fake_record_render_output)
+    monkeypatch.setattr(module, 'generate_hls', fake_generate_hls)
+    monkeypatch.setattr(module, 'publish_session_updated', fake_publish_session_updated)
+    monkeypatch.setattr(module, 'publish_context_refresh', fake_publish_context_refresh)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['render_after_effects_project'].handler(
+        SimpleNamespace(arguments={'project_id': 'project-1', 'output_name': 'round1.mp4'})
+    )
+
+    assert result.result_type == 'success'
+    assert call_order[:2] == ['set_active:project-1', 'render:project-1']
+    assert session_collection.doc['active_project_id'] == 'project-1'
+    assert session_collection.doc['latest_render_path'] == 'C:/data/exports/session-1/round1.mp4'
+
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['project_id'] == 'project-1'
+    assert payload['active_project_id'] == 'project-1'
+    assert payload['project']['_id'] == 'project-1'
+    assert payload['render_output']['id'] == 'render-1'
