@@ -1026,6 +1026,8 @@ class ShotwrightCopilotRuntimeManager:
                     final_content = getattr(event_data, "content", None)
                     if isinstance(final_content, str) and final_content:
                         turn_state.content = final_content
+                    elif not turn_state.content.strip():
+                        return
                     turn_state.finalized = True
                     turn_state.idle_event.set()
                     turn_state.version += 1

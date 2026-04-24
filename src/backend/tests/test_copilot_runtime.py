@@ -114,12 +114,44 @@ class FakeSdkSession:
         return lambda: None
 
 
+class ScriptedFakeSdkSession(FakeSdkSession):
+    def __init__(self, session_id: str = "copilot-session-1", script: list[dict] | None = None) -> None:
+        super().__init__(session_id)
+        self.script = script or []
+        self.sent_messages: list[dict] = []
+
+    async def send(self, content: str, attachments=None) -> str:
+        self.sent_messages.append({"content": content, "attachments": attachments})
+
+        async def _emit_events() -> None:
+            for entry in self.script:
+                delay = float(entry.get("delay", 0) or 0)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                assert self.on_callback is not None
+                data = entry.get("data")
+                if isinstance(data, dict):
+                    data = SimpleNamespace(**data)
+                elif data is None:
+                    data = SimpleNamespace()
+                self.on_callback(
+                    SimpleNamespace(
+                        type=entry["type"],
+                        data=data,
+                    )
+                )
+
+        asyncio.create_task(_emit_events())
+        return "copilot-message-id"
+
+
 class FakeCopilotClient:
-    def __init__(self) -> None:
+    def __init__(self, session_factory=None) -> None:
         self.started = False
         self.created_session_id = None
         self.created_session = None
         self.create_kwargs = None
+        self._session_factory = session_factory or FakeSdkSession
 
     async def start(self) -> None:
         self.started = True
@@ -127,7 +159,7 @@ class FakeCopilotClient:
     async def create_session(self, session_id: str, **kwargs):
         self.created_session_id = session_id
         self.create_kwargs = kwargs
-        self.created_session = FakeSdkSession(session_id)
+        self.created_session = self._session_factory(session_id)
         return self.created_session
 
 
@@ -227,6 +259,7 @@ async def test_build_runtime_passes_skill_directories_to_copilot_sdk(monkeypatch
     monkeypatch.setattr(module, "_REPO_ROOT", repo_root)
     monkeypatch.setattr(runtime_manager, "_repo_skills_hydration_task", None, raising=False)
     monkeypatch.setattr(runtime_manager, "_repo_skills_hydration_last_attempt_at", 0.0, raising=False)
+    monkeypatch.setattr(runtime_manager, "_prime_repo_skill_bundle", lambda runtime_settings, github_token: None)
     monkeypatch.setattr(
         runtime_manager,
         "_workspace_root_candidates",
@@ -581,6 +614,115 @@ async def test_send_message_synthesizes_success_text_when_model_returns_empty(mo
     assert result["assistant_message"]["content"] == (
         "Shotwright completed the requested work. Inspect the updated session state for the active project, renders, or other artifacts."
     )
+    assert result["assistant_message"]["metadata"]["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_send_message_ignores_empty_assistant_message_until_real_reply_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir(parents=True)
+
+    fake_client = FakeCopilotClient(
+        session_factory=lambda session_id: ScriptedFakeSdkSession(
+            session_id,
+            script=[
+                {"type": "assistant.message", "data": {"content": ""}, "delay": 0},
+                {"type": "assistant.message_delta", "data": {"delta_content": "先看运动路径，再把跟踪数据应用到空对象。"}, "delay": 0},
+                {"type": "assistant.message", "data": {"content": "先看运动路径，再把跟踪数据应用到空对象。"}, "delay": 0},
+            ],
+        )
+    )
+    assistant_doc_holder: dict[str, dict] = {}
+
+    monkeypatch.setattr(module, "_REPO_ROOT", repo_root)
+    monkeypatch.setattr(runtime_manager, "_repo_skills_hydration_task", None, raising=False)
+    monkeypatch.setattr(runtime_manager, "_repo_skills_hydration_last_attempt_at", 0.0, raising=False)
+    monkeypatch.setattr(
+        runtime_manager,
+        "_workspace_root_candidates",
+        lambda configured_workspace_root: [str(workspace_root), str(repo_root)],
+    )
+    monkeypatch.setattr(
+        runtime_manager,
+        "_resolve_runtime_settings",
+        lambda: asyncio.sleep(
+            0,
+            result={
+                "copilot_cli_path": "",
+                "copilot_workspace_root": str(workspace_root),
+                "copilot_use_logged_in_user": False,
+                "copilot_http_proxy": "",
+                "copilot_https_proxy": "",
+                "copilot_no_proxy": "",
+            },
+        ),
+    )
+    monkeypatch.setattr(runtime_manager, "_resolve_github_token", lambda: asyncio.sleep(0, result="token"))
+    monkeypatch.setattr(runtime_manager, "_build_client", lambda github_token, runtime_settings: fake_client)
+    monkeypatch.setattr(runtime_manager, "resolve_default_session_settings", lambda: asyncio.sleep(0, result=("gpt-5.4", "high")))
+    monkeypatch.setattr(module, "build_shotwright_tools", lambda app_session_id: ["tool"])
+    monkeypatch.setattr(
+        module,
+        "get_session_collection",
+        lambda: FakeFindOneCollection([
+            {
+                "_id": "session-empty-assistant-message",
+                "status": "idle",
+            }
+        ]),
+    )
+
+    async def fake_set_session_status(app_session_id: str, status: str, **extra) -> dict:
+        return {"_id": app_session_id, "status": status, **extra}
+
+    async def fake_persist_message(app_session_id: str, role: str, content: str, metadata: dict | None = None) -> dict:
+        doc = {
+            "_id": f"{role}-doc",
+            "session_id": app_session_id,
+            "role": role,
+            "content": content,
+            "metadata": metadata or {},
+        }
+        if role == "assistant":
+            assistant_doc_holder["doc"] = doc
+        return doc
+
+    async def fake_persist_event(app_session_id: str, event_type: str, payload: dict, turn_id: str | None = None, sequence: int | None = None) -> None:
+        return None
+
+    async def fake_sync_streaming_message(turn_state, *, content: str, version: int, streaming: bool, state: str) -> dict:
+        assistant_doc_holder["doc"] = {
+            **assistant_doc_holder["doc"],
+            "content": content,
+            "metadata": {
+                **assistant_doc_holder["doc"].get("metadata", {}),
+                "streaming": streaming,
+                "state": state,
+                "version": version,
+            },
+        }
+        return assistant_doc_holder["doc"]
+
+    monkeypatch.setattr(runtime_manager, "_set_session_status", fake_set_session_status)
+    monkeypatch.setattr(runtime_manager, "_persist_message", fake_persist_message)
+    monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+    monkeypatch.setattr(runtime_manager, "_sync_streaming_message", fake_sync_streaming_message)
+    monkeypatch.setattr(runtime_manager, "resolve_turn_timeout_seconds", lambda: asyncio.sleep(0, result=1.0))
+    monkeypatch.setattr(module, "get_message_collection", lambda: FakeMessageCollection(assistant_doc_holder))
+
+    runtime = await runtime_manager._build_runtime("session-empty-assistant-message")
+    monkeypatch.setattr(runtime_manager, "_runtimes", {"session-empty-assistant-message": runtime})
+    monkeypatch.setattr(runtime_manager, "ensure_runtime", lambda app_session_id: asyncio.sleep(0, result=runtime))
+
+    result = await runtime_manager.send_message("session-empty-assistant-message", "如果用jsx脚本做呢")
+
+    assert result["session_status"] == "idle"
+    assert result["assistant_message"]["content"] == "先看运动路径，再把跟踪数据应用到空对象。"
     assert result["assistant_message"]["metadata"]["state"] == "completed"
 
 

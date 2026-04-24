@@ -1,4 +1,5 @@
 import {
+  ReactNode,
   ChangeEvent,
   ClipboardEvent,
   CSSProperties,
@@ -10,8 +11,10 @@ import {
   useRef,
   useState,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   AgentSessionStreamConnection,
@@ -46,7 +49,7 @@ import {
   SessionImageAttachmentInfo,
   StoryboardInfo,
 } from "../../types";
-import { TranslationCopy, useI18n } from "../../i18n";
+import { Locale, TranslationCopy, useI18n } from "../../i18n";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
 import "./AgentPanel.css";
@@ -1882,6 +1885,205 @@ function formatSessionModelLabel(model: string) {
     .join(" ");
 }
 
+const MARKDOWN_LANGUAGE_LABELS: Record<string, { "zh-CN": string; "en-US": string }> = {
+  bash: { "zh-CN": "Bash", "en-US": "Bash" },
+  css: { "zh-CN": "CSS", "en-US": "CSS" },
+  diff: { "zh-CN": "Diff", "en-US": "Diff" },
+  html: { "zh-CN": "HTML", "en-US": "HTML" },
+  javascript: { "zh-CN": "JavaScript", "en-US": "JavaScript" },
+  js: { "zh-CN": "JavaScript", "en-US": "JavaScript" },
+  json: { "zh-CN": "JSON", "en-US": "JSON" },
+  jsx: { "zh-CN": "JSX", "en-US": "JSX" },
+  markdown: { "zh-CN": "Markdown", "en-US": "Markdown" },
+  md: { "zh-CN": "Markdown", "en-US": "Markdown" },
+  powershell: { "zh-CN": "PowerShell", "en-US": "PowerShell" },
+  ps1: { "zh-CN": "PowerShell", "en-US": "PowerShell" },
+  python: { "zh-CN": "Python", "en-US": "Python" },
+  py: { "zh-CN": "Python", "en-US": "Python" },
+  shell: { "zh-CN": "Shell", "en-US": "Shell" },
+  sh: { "zh-CN": "Shell", "en-US": "Shell" },
+  sql: { "zh-CN": "SQL", "en-US": "SQL" },
+  text: { "zh-CN": "纯文本", "en-US": "Plain text" },
+  ts: { "zh-CN": "TypeScript", "en-US": "TypeScript" },
+  tsx: { "zh-CN": "TSX", "en-US": "TSX" },
+  typescript: { "zh-CN": "TypeScript", "en-US": "TypeScript" },
+  xml: { "zh-CN": "XML", "en-US": "XML" },
+  yaml: { "zh-CN": "YAML", "en-US": "YAML" },
+  yml: { "zh-CN": "YAML", "en-US": "YAML" },
+};
+
+type MarkdownCodeRendererProps = {
+  inline?: boolean;
+  className?: string;
+  children?: ReactNode;
+};
+
+type MarkdownCodeBlockProps = MarkdownCodeRendererProps & {
+  locale: Locale;
+  copyLabel: string;
+  copiedLabel: string;
+};
+
+function flattenMarkdownText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+
+  if (Array.isArray(node)) {
+    return node.map((child) => flattenMarkdownText(child)).join("");
+  }
+
+  return "";
+}
+
+function parseMarkdownLanguage(className?: string) {
+  const match = /language-([\w-]+)/i.exec(className ?? "");
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+function formatMarkdownLanguageLabel(language: string | null, locale: Locale) {
+  if (!language) {
+    return MARKDOWN_LANGUAGE_LABELS.text[locale];
+  }
+
+  const knownLabel = MARKDOWN_LANGUAGE_LABELS[language];
+  if (knownLabel) {
+    return knownLabel[locale];
+  }
+
+  if (language.length <= 4) {
+    return language.toUpperCase();
+  }
+
+  return language.charAt(0).toUpperCase() + language.slice(1);
+}
+
+function MarkdownCodeBlock({
+  inline,
+  className,
+  children,
+  locale,
+  copyLabel,
+  copiedLabel,
+}: MarkdownCodeBlockProps) {
+  const [copied, setCopied] = useState(false);
+  const language = parseMarkdownLanguage(className);
+  const codeText = flattenMarkdownText(children).replace(/\n$/, "");
+  const lineCount = codeText ? codeText.split(/\r?\n/).length : 0;
+
+  useEffect(() => {
+    if (!copied) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => setCopied(false), 1400);
+    return () => window.clearTimeout(timeoutId);
+  }, [copied]);
+
+  if (inline) {
+    return <code className={`markdown-inline-code${className ? ` ${className}` : ""}`}>{children}</code>;
+  }
+
+  const handleCopy = async () => {
+    if (!codeText.trim() || !navigator.clipboard) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(codeText);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div className="markdown-code-block">
+      <div className="markdown-code-header">
+        <span className="markdown-code-language">{formatMarkdownLanguageLabel(language, locale)}</span>
+        <button
+          type="button"
+          className={`markdown-code-copy${copied ? " is-copied" : ""}`}
+          onClick={() => void handleCopy()}
+          disabled={!codeText.trim() || !navigator.clipboard}
+          aria-label={copied ? copiedLabel : copyLabel}
+          title={copied ? copiedLabel : copyLabel}
+        >
+          {copied ? copiedLabel : copyLabel}
+        </button>
+      </div>
+
+      <div className="markdown-code-surface">
+        <SyntaxHighlighter
+          language={language ?? "text"}
+          style={oneLight}
+          PreTag="div"
+          wrapLongLines
+          showLineNumbers={lineCount >= 6}
+          lineNumberStyle={{
+            minWidth: "2.2em",
+            paddingRight: "0.85rem",
+            color: "rgba(87, 96, 106, 0.72)",
+            userSelect: "none",
+          }}
+          customStyle={{
+            margin: 0,
+            padding: "0.9rem 1rem 1rem",
+            background: "transparent",
+            fontSize: "0.78rem",
+            lineHeight: 1.68,
+          }}
+          codeTagProps={{ className }}
+        >
+          {codeText}
+        </SyntaxHighlighter>
+      </div>
+    </div>
+  );
+}
+
+function buildMarkdownComponents(locale: Locale, copy: TranslationCopy): Components {
+  return {
+    a: ({ href, children, ...props }) => {
+      const external = typeof href === "string" && /^(https?:)?\/\//i.test(href);
+      return (
+        <a
+          href={href}
+          target={external ? "_blank" : undefined}
+          rel={external ? "noreferrer" : undefined}
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    },
+    code: (props) => (
+      <MarkdownCodeBlock
+        {...(props as MarkdownCodeRendererProps)}
+        locale={locale}
+        copyLabel={copy.common.copy}
+        copiedLabel={copy.common.copied}
+      />
+    ),
+    hr: () => <hr className="markdown-divider" />,
+    input: ({ checked, ...props }) => (
+      <input
+        {...props}
+        className="markdown-task-checkbox"
+        type="checkbox"
+        checked={Boolean(checked)}
+        disabled
+        readOnly
+      />
+    ),
+    table: ({ children, ...props }) => (
+      <div className="markdown-table-wrap">
+        <table {...props}>{children}</table>
+      </div>
+    ),
+  };
+}
+
 type AgentPanelProps = {
   isSessionSidebarCollapsed?: boolean;
   isContextSidebarCollapsed?: boolean;
@@ -1895,6 +2097,7 @@ export default function AgentPanel({
   const location = useLocation();
   const { sessionId: routedSessionId } = useParams<{ sessionId?: string }>();
   const { copy, locale } = useI18n();
+  const markdownComponents = useMemo(() => buildMarkdownComponents(locale, copy), [copy, locale]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [hasLoadedSessions, setHasLoadedSessions] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
@@ -3369,7 +3572,7 @@ export default function AgentPanel({
                           <pre className="timeline-event-data">{block.value}</pre>
                         ) : (
                           <div className={`timeline-detail-block-markdown markdown-content kind-${block.kind}`}>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.value}</ReactMarkdown>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{block.value}</ReactMarkdown>
                           </div>
                         )}
                       </div>
@@ -3422,7 +3625,7 @@ export default function AgentPanel({
                                   <pre className="timeline-event-data">{block.value}</pre>
                                 ) : (
                                   <div className={`timeline-detail-block-markdown markdown-content kind-${block.kind}`}>
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.value}</ReactMarkdown>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{block.value}</ReactMarkdown>
                                   </div>
                                 )}
                               </div>
@@ -3785,7 +3988,7 @@ export default function AgentPanel({
                             {inlineExecutionEvents.length ? renderExecutionBlock(`execution-${messageTurnId}`, inlineExecutionEvents, { inlineAssistant: true }) : null}
 
                             <div className={`chat-message-body markdown-content${streaming ? " streaming" : ""}`} aria-live={streaming ? "polite" : undefined}>
-                              {hasContent ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown> : null}
+                              {hasContent ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{displayContent}</ReactMarkdown> : null}
 
                               {messageImageAttachments.length ? (
                                 <div className={`chat-attachment-grid${hasContent ? " has-copy" : ""}`}>
