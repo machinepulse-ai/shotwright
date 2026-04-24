@@ -67,9 +67,16 @@ class CIDefaults:
 
 
 @dataclass(frozen=True)
+class SkillsBundleDefaults:
+    artifact_version: str
+    release_repo: str
+
+
+@dataclass(frozen=True)
 class ToolingConfig:
     docker: DockerDefaults
     ci: CIDefaults
+    skills: SkillsBundleDefaults
 
 
 @dataclass(frozen=True)
@@ -116,17 +123,34 @@ class DerivedWorkspacePaths:
 
 
 @dataclass(frozen=True)
+class DerivedSkillsBundle:
+    artifact_version: str
+    artifact_file_name: str
+    checksum_file_name: str
+    release_tag: str
+    release_repo: str
+    artifact_download_url: str
+    checksum_download_url: str
+
+
+@dataclass(frozen=True)
 class ResolvedConfig:
     raw: ShotwrightConfig
     host: DerivedHostPaths
     runner: DerivedRunnerPaths
     container: DerivedContainerPaths
     workspace: DerivedWorkspacePaths
+    skills: DerivedSkillsBundle
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+SKILLS_ARTIFACT_BASENAME = "shotwright-skills"
+SKILLS_RELEASE_TAG_PREFIX = "skills-v"
+GITHUB_RELEASE_DOWNLOAD_BASE_URL = "https://github.com"
 
 
 def get_default_config_path() -> Path:
@@ -152,6 +176,18 @@ def _resolve_field(data: dict[str, Any], field: str) -> Any:
     return current
 
 
+def build_skills_artifact_file_name(version: str) -> str:
+    return f"{SKILLS_ARTIFACT_BASENAME}-{version}.zip"
+
+
+def build_skills_release_tag(version: str) -> str:
+    return f"{SKILLS_RELEASE_TAG_PREFIX}{version}"
+
+
+def build_github_release_asset_url(repo: str, tag: str, file_name: str) -> str:
+    return f"{GITHUB_RELEASE_DOWNLOAD_BASE_URL}/{repo}/releases/download/{tag}/{file_name}"
+
+
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
@@ -160,6 +196,7 @@ def _resolve_field(data: dict[str, Any], field: str) -> Any:
 def load_config(config_path: Path) -> ShotwrightConfig:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     p = raw["paths"]
+    skills = raw.get("tooling", {}).get("skills", {})
     return ShotwrightConfig(
         paths=PathsConfig(
             host_windows=HostWindowsPaths(
@@ -199,6 +236,10 @@ def load_config(config_path: Path) -> ShotwrightConfig:
             ci=CIDefaults(
                 python_version=raw["tooling"]["ci"]["pythonVersion"],
             ),
+            skills=SkillsBundleDefaults(
+                artifact_version=skills.get("artifactVersion", "0.0.1"),
+                release_repo=skills.get("releaseRepo", "LiuChangFreeman/shotwright"),
+            ),
         ),
     )
 
@@ -213,6 +254,10 @@ def build_resolved_config(
     runner = config.paths.github_runner
     ctr = config.paths.container
     ws = config.workspace
+    skills = config.tooling.skills
+    artifact_file_name = build_skills_artifact_file_name(skills.artifact_version)
+    checksum_file_name = f"{artifact_file_name}.sha256"
+    release_tag = build_skills_release_tag(skills.artifact_version)
 
     project_root = str(Path(workspace_root).resolve()) if workspace_root else ""
     vdata_root = str(Path(workspace_root).resolve() / ws.validation_data_dir_name) if workspace_root else ""
@@ -244,6 +289,15 @@ def build_resolved_config(
             work_root=work_root,
             validation_project_path=str(Path(templates_root) / ws.validation_project_file_name) if templates_root else "",
             validation_output_path=str(Path(output_root) / ws.validation_output_file_name) if output_root else "",
+        ),
+        skills=DerivedSkillsBundle(
+            artifact_version=skills.artifact_version,
+            artifact_file_name=artifact_file_name,
+            checksum_file_name=checksum_file_name,
+            release_tag=release_tag,
+            release_repo=skills.release_repo,
+            artifact_download_url=build_github_release_asset_url(skills.release_repo, release_tag, artifact_file_name),
+            checksum_download_url=build_github_release_asset_url(skills.release_repo, release_tag, checksum_file_name),
         ),
     )
 

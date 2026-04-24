@@ -36,3 +36,5 @@ validation-data/templates/*
 validation-data/work/*
 !validation-data/work/.gitkeep
 .shotwright/inline-images/
+.github/skills/
+.github/skills/after-effects-user-guide/.cache/

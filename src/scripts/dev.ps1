@@ -10,6 +10,38 @@
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
+$repoRoot = Split-Path $root -Parent
+
+$verifySkillsSsl = $true
+if ($env:SHOTWRIGHT_SKILLS_VERIFY_SSL) {
+    $normalizedSkillsVerifySsl = $env:SHOTWRIGHT_SKILLS_VERIFY_SSL.Trim().ToLowerInvariant()
+    if (@('0', 'false', 'no', 'off') -contains $normalizedSkillsVerifySsl) {
+        $verifySkillsSsl = $false
+    }
+}
+
+$skillsDownloadArgs = @(
+    "$repoRoot\scripts\skills\download_skills_bundle.py",
+    '--install-root', $repoRoot,
+    '--no-progress'
+)
+if ($env:SHOTWRIGHT_GITHUB_TOKEN) {
+    $skillsDownloadArgs += '--token-env'
+    $skillsDownloadArgs += 'SHOTWRIGHT_GITHUB_TOKEN'
+}
+elseif ($env:GITHUB_TOKEN) {
+    $skillsDownloadArgs += '--token-env'
+    $skillsDownloadArgs += 'GITHUB_TOKEN'
+}
+if (-not $verifySkillsSsl) {
+    $skillsDownloadArgs += '--no-verify-ssl'
+}
+
+Write-Host '[dev] Hydrating repo skills into .github/skills ...' -ForegroundColor Green
+& python @skillsDownloadArgs
+if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to hydrate .github/skills before starting development services.'
+}
 
 # Backend
 Write-Host '[dev] Starting backend (uvicorn) ...' -ForegroundColor Green

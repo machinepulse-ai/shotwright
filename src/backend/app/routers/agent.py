@@ -12,6 +12,7 @@ from app.models.container import ContainerInfo
 from app.models.media import ReferenceVideoInfo, RenderOutputInfo, StoryboardInfo
 from app.models.project import ProjectInfo
 from app.models.session import SessionInDB
+from app.services.agent_tools import list_session_image_attachments
 from app.services.copilot_runtime import runtime_manager
 from app.services.session_streams import session_stream_broker
 from app.services import container_manager as cm
@@ -141,6 +142,7 @@ async def get_agent_context(session_id: str):
         container_doc = await cm.get_container(session_doc["container_id"])
 
     project_docs = await get_project_collection().find({"session_id": session_id}).sort("created_at", -1).to_list(length=100)
+    recent_image_attachments = await list_session_image_attachments(session_id, limit=12)
     return {
         "session": SessionInDB.model_validate(session_doc).model_dump(by_alias=True),
         "container": ContainerInfo.model_validate(container_doc).model_dump(by_alias=True) if container_doc else None,
@@ -151,6 +153,7 @@ async def get_agent_context(session_id: str):
         "storyboards": [
             StoryboardInfo.model_validate(doc).model_dump() for doc in rm.list_storyboards(session_id, limit=12)
         ],
+        "recent_image_attachments": recent_image_attachments,
         "render_outputs": [
             RenderOutputInfo.model_validate(doc).model_dump() for doc in nr.list_render_outputs(session_id, limit=12)
         ],

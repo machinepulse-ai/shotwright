@@ -23,7 +23,7 @@ _REFERENCE_ASSET_DIRECTORY = Path("assets") / "references"
 
 def _tool_success(payload: dict, session_log: str) -> ToolResult:
     return ToolResult(
-        text_result_for_llm=json.dumps(payload, ensure_ascii=False),
+        text_result_for_llm=_serialize_tool_payload(payload),
         result_type="success",
         session_log=session_log,
     )
@@ -35,6 +35,24 @@ def _tool_failure(message: str, *, error: str | None = None) -> ToolResult:
         result_type="failure",
         error=error or message,
     )
+
+
+def _normalize_tool_payload_value(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _normalize_tool_payload_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_tool_payload_value(item) for item in value]
+    return str(value)
+
+
+def _serialize_tool_payload(payload: dict) -> str:
+    return json.dumps(_normalize_tool_payload_value(payload), ensure_ascii=False)
 
 
 def _sanitize_asset_file_name(value: str | None, fallback_stem: str, suffix: str) -> str:
@@ -114,6 +132,10 @@ async def _list_session_image_attachments(session_id: str, *, limit: int = 8) ->
                 return attachments
 
     return attachments
+
+
+async def list_session_image_attachments(session_id: str, *, limit: int = 8) -> list[dict]:
+    return await _list_session_image_attachments(session_id, limit=limit)
 
 
 def _copy_asset_into_project(
@@ -847,20 +869,33 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
 
         await pm.set_active_project(app_session_id, project_id)
 
-        render = await nr.render_project(
-            session_id=app_session_id,
-            project_id=project_id,
-            container_db_id=session_doc["container_id"],
-            aep_relative_path=args.get("aep_file"),
-            composition=args.get("composition") or "Main",
-            output_name=args.get("output_name"),
-            patch_script=args.get("patch_script"),
-        )
+        try:
+            render = await nr.render_project(
+                session_id=app_session_id,
+                project_id=project_id,
+                container_db_id=session_doc["container_id"],
+                aep_relative_path=args.get("aep_file"),
+                composition=args.get("composition") or "Main",
+                output_name=args.get("output_name"),
+                patch_script=args.get("patch_script"),
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            return _tool_failure(str(exc).strip() or exc.__class__.__name__)
+
         if not render["success"]:
+            failure_payload = {
+                **render,
+                "project_id": project_id,
+                "requested_composition": args.get("composition") or "Main",
+                "failure_details": nr.format_render_failure_details(
+                    render,
+                    composition=args.get("composition") or "Main",
+                ),
+            }
             return ToolResult(
-                text_result_for_llm=json.dumps(render, ensure_ascii=False),
+                text_result_for_llm=_serialize_tool_payload(failure_payload),
                 result_type="failure",
-                error=render.get("output") or "Render failed",
+                error=failure_payload["failure_details"],
                 session_log="After Effects render failed",
             )
 

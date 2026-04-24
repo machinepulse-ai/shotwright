@@ -60,6 +60,18 @@ export interface ChatImageAttachment {
   size_bytes?: number | null;
 }
 
+export interface SessionImageAttachmentInfo {
+  file_path: string;
+  display_name: string;
+  mime_type?: string | null;
+  shared_relative_path?: string | null;
+  workspace_relative_path?: string | null;
+  width?: number | null;
+  height?: number | null;
+  size_bytes?: number | null;
+  created_at?: string | null;
+}
+
 export interface ReferenceVideoInfo {
   id: string;
   session_id: string;
@@ -158,6 +170,7 @@ export interface AgentContext {
   projects: ProjectInfo[];
   reference_videos: ReferenceVideoInfo[];
   storyboards: StoryboardInfo[];
+  recent_image_attachments: SessionImageAttachmentInfo[];
   render_outputs: RenderOutputInfo[];
   latest_render_path: string | null;
   latest_render_url: string | null;

@@ -6,8 +6,6 @@ node_modules/
 !keepalive.ps1
 !shotwright-config.json
 !setup-versions.yml
-!.github/skills/
-!.github/skills/**
 !scripts/
 !scripts/**
 !validation-data/templates/

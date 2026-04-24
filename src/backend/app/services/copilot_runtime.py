@@ -6,9 +6,11 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import importlib.util
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from time import monotonic
 from dataclasses import asdict, is_dataclass
@@ -33,6 +35,7 @@ from app.models.session import ReasoningEffort
 from app.services.agent_tools import build_shotwright_tools
 from app.services import nexrender as nr
 from app.services.session_streams import (
+    publish_context_refresh,
     publish_message_deleted,
     publish_message_upsert,
     publish_session_updated,
@@ -43,7 +46,9 @@ logger = logging.getLogger(__name__)
 
 _IN_MEMORY_MODEL_CACHE_TTL_SECONDS = 60
 _MONGO_MODEL_CACHE_TTL_SECONDS = 600
+_REPO_SKILLS_HYDRATION_RETRY_INTERVAL_SECONDS = 300
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+_SCRIPTS_ROOT = _REPO_ROOT / "scripts"
 _SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 _INLINE_ATTACHMENT_DIRECTORY = Path("_inline-images")
 _INLINE_ATTACHMENT_SUFFIXES = {
@@ -133,6 +138,22 @@ def _clear_current_task_cancellation() -> None:
 
     while current_task.cancelling():
         current_task.uncancel()
+
+
+def _load_skills_bundle_helpers():
+    module_name = "shotwright_skills_bundle"
+    existing_module = sys.modules.get(module_name)
+    if existing_module is not None:
+        return existing_module.SkillsBundleError, existing_module.ensure_skills_bundle
+
+    spec = importlib.util.spec_from_file_location(module_name, _SCRIPTS_ROOT / "skills_bundle.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load skills bundle helpers from {_SCRIPTS_ROOT / 'skills_bundle.py'}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module.SkillsBundleError, module.ensure_skills_bundle
 
 
 class TurnCancelledError(Exception):
@@ -283,11 +304,31 @@ class _StreamingTurnState:
         self.idle_event = asyncio.Event()
         self.error: Exception | None = None
         self.error_event_seen = False
+        self.cancel_requested = False
+        self.request_task: asyncio.Task | None = None
+
+
+class _PendingTurnBootstrap:
+    def __init__(
+        self,
+        *,
+        turn_id: str,
+        request_task: asyncio.Task | None,
+        persisted_attachments: list[dict],
+    ) -> None:
+        self.turn_id = turn_id
+        self.request_task = request_task
+        self.persisted_attachments = persisted_attachments
+        self.cancel_requested = False
+        self.cancellation_message = "Generation stopped by user."
 
 
 class ShotwrightCopilotRuntimeManager:
     def __init__(self) -> None:
         self._runtimes: dict[str, _RuntimeHandle] = {}
+        self._pending_turn_bootstraps: dict[str, _PendingTurnBootstrap] = {}
+        self._repo_skills_hydration_task: asyncio.Task | None = None
+        self._repo_skills_hydration_last_attempt_at = 0.0
         self._setup_lock = asyncio.Lock()
         self._models_cache: tuple[str, float, list[dict]] | None = None
         self._models_lock = asyncio.Lock()
@@ -333,6 +374,88 @@ class ShotwrightCopilotRuntimeManager:
                 os.environ.get("no_proxy"),
             ),
         }
+
+    async def _ensure_repo_skill_bundle(
+        self,
+        runtime_settings: dict[str, str | bool],
+        github_token: str | None,
+    ) -> None:
+        proxy = _first_non_empty(
+            str(runtime_settings.get("copilot_https_proxy") or ""),
+            str(runtime_settings.get("copilot_http_proxy") or ""),
+        ) or None
+        skills_bundle_error, ensure_bundle = _load_skills_bundle_helpers()
+        try:
+            result = await asyncio.to_thread(
+                ensure_bundle,
+                source_repo_root=_REPO_ROOT,
+                install_root=_REPO_ROOT,
+                proxy=proxy,
+                github_token=github_token,
+                log=logger.info,
+            )
+        except skills_bundle_error as exc:
+            raise ValueError(f"Shotwright skills bundle is unavailable: {exc}") from exc
+
+        if result.get("status") == "downloaded":
+            logger.info(
+                "Hydrated Shotwright skills bundle %s into %s",
+                result.get("artifactVersion"),
+                result.get("skillsRoot"),
+            )
+
+    async def _hydrate_repo_skill_bundle_in_background(
+        self,
+        runtime_settings: dict[str, str | bool],
+        github_token: str | None,
+    ) -> None:
+        try:
+            await self._ensure_repo_skill_bundle(runtime_settings, github_token)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Continuing without Shotwright repo skills because background hydration failed",
+                exc_info=True,
+            )
+        finally:
+            current_task = asyncio.current_task()
+            if self._repo_skills_hydration_task is current_task:
+                self._repo_skills_hydration_task = None
+
+    def _prime_repo_skill_bundle(
+        self,
+        runtime_settings: dict[str, str | bool],
+        github_token: str | None,
+    ) -> None:
+        if self._resolve_skill_names(self._resolve_skill_directories(runtime_settings)):
+            return
+
+        existing_task = self._repo_skills_hydration_task
+        if existing_task is not None and existing_task.done():
+            self._repo_skills_hydration_task = None
+            existing_task = None
+        if existing_task is not None:
+            return
+
+        if (
+            monotonic() - self._repo_skills_hydration_last_attempt_at
+            < _REPO_SKILLS_HYDRATION_RETRY_INTERVAL_SECONDS
+        ):
+            return
+
+        self._repo_skills_hydration_last_attempt_at = monotonic()
+        logger.info(
+            "Shotwright repo skills are not available locally yet; starting background hydration"
+        )
+        self._repo_skills_hydration_task = asyncio.create_task(
+            self._hydrate_repo_skill_bundle_in_background(runtime_settings, github_token)
+        )
+
+    async def ensure_repo_skills_available(self) -> None:
+        runtime_settings = await self._resolve_runtime_settings()
+        github_token = await self._resolve_github_token()
+        await self._ensure_repo_skill_bundle(runtime_settings, github_token)
 
     def _build_subprocess_env(self, runtime_settings: dict[str, str | bool]) -> dict[str, str]:
         env = dict(os.environ)
@@ -569,6 +692,7 @@ class ShotwrightCopilotRuntimeManager:
         return (
             "You are Shotwright's After Effects operator. "
             "Your job is to help the user accomplish creative work by using Shotwright's provided tools for concrete runtime actions. "
+            "When you generate brief intent labels, short progress headings, or other assistant-authored summaries, use the same language as the user's latest request unless they explicitly ask for a different language. "
             "Relevant repository skills loaded from the workspace are part of your operating instructions, not separate tools, and should be applied whenever they match the task. "
             "When the user explicitly mentions a skill or asks about a skill-defined workflow, answer directly from that skill before considering workspace inspection. "
             "Inspect the workspace at most once at the start of a normal render workflow unless the session state changes or is genuinely unclear. "
@@ -839,6 +963,7 @@ class ShotwrightCopilotRuntimeManager:
         github_token = await self._resolve_github_token()
         if not github_token and not runtime_settings["copilot_use_logged_in_user"]:
             raise ValueError("GitHub token is not configured for Copilot SDK")
+        self._prime_repo_skill_bundle(runtime_settings, github_token)
 
         client = self._build_client(github_token, runtime_settings)
         await client.start()
@@ -902,6 +1027,7 @@ class ShotwrightCopilotRuntimeManager:
                     if isinstance(final_content, str) and final_content:
                         turn_state.content = final_content
                     turn_state.finalized = True
+                    turn_state.idle_event.set()
                     turn_state.version += 1
                     runtime.track_task(
                         self._sync_streaming_message(
@@ -965,265 +1091,420 @@ class ShotwrightCopilotRuntimeManager:
             return runtime
 
     async def send_message(self, app_session_id: str, content: str, attachments: list[dict] | None = None) -> dict:
-        runtime = await self.ensure_runtime(app_session_id)
-        async with runtime.lock:
-            turn_id = str(uuid4())
-            turn_timeout_seconds = await self.resolve_turn_timeout_seconds()
-            runtime_content = await self._build_runtime_turn_content(app_session_id, content)
-            copilot_attachments, persisted_attachments = _prepare_turn_attachments(
-                attachments,
-                app_session_id=app_session_id,
-                storage_root=settings.upload_dir,
-            )
+        turn_id = str(uuid4())
+        turn_timeout_seconds = await self.resolve_turn_timeout_seconds()
+        copilot_attachments, persisted_attachments = _prepare_turn_attachments(
+            attachments,
+            app_session_id=app_session_id,
+            storage_root=settings.upload_dir,
+        )
+        pending_bootstrap = _PendingTurnBootstrap(
+            turn_id=turn_id,
+            request_task=asyncio.current_task(),
+            persisted_attachments=persisted_attachments,
+        )
+        self._pending_turn_bootstraps[app_session_id] = pending_bootstrap
+        await self._set_session_status(app_session_id, "running", last_error=None)
+
+        async def _finish_bootstrap_terminal_state(
+            *,
+            assistant_content: str,
+            assistant_state: str,
+            session_status: str,
+            event_type: str,
+            event_payload: dict,
+            last_error: str | None,
+        ) -> dict:
             user_metadata = {"turn_id": turn_id, "kind": "user_prompt"}
             if persisted_attachments:
                 user_metadata["attachments"] = persisted_attachments
-            user_doc = await self._persist_message(
+            await self._persist_message(
                 app_session_id,
                 "user",
                 content,
                 user_metadata,
             )
+
+            image_attachment_count = sum(
+                1
+                for attachment in persisted_attachments
+                if isinstance(attachment, dict)
+                and attachment.get("type") == "image"
+                and attachment.get("shared_relative_path")
+            )
+            if image_attachment_count:
+                await publish_context_refresh(
+                    app_session_id,
+                    "attachments.updated",
+                    image_attachment_count=image_attachment_count,
+                )
+
             assistant_doc = await self._persist_message(
                 app_session_id,
                 "assistant",
-                "",
+                assistant_content,
                 {
                     "turn_id": turn_id,
                     "kind": "assistant_reply",
-                    "streaming": True,
-                    "state": "pending",
-                    "version": 0,
+                    "streaming": False,
+                    "state": assistant_state,
+                    "version": 1,
                 },
             )
-            runtime.turn_state = _StreamingTurnState(
-                assistant_doc["_id"],
+            await self._persist_event(
+                app_session_id,
+                event_type,
+                event_payload,
                 turn_id=turn_id,
-                user_message_id=user_doc["_id"],
             )
-            await self._set_session_status(app_session_id, "running", last_error=None)
-            try:
-                copilot_message_id = await runtime.session.send(
-                    runtime_content,
-                    attachments=copilot_attachments or None,
-                )
-                await self._persist_event(
-                    app_session_id,
-                    "session.turn.started",
-                    {
-                        "attachment_count": len(persisted_attachments),
-                        "attachment_mime_types": [attachment.get("mime_type") for attachment in persisted_attachments],
-                        "copilot_message_id": copilot_message_id,
-                        "timeout_seconds": turn_timeout_seconds,
-                    },
-                    turn_id=turn_id,
-                    sequence=runtime.next_event_sequence(),
-                )
-                await asyncio.wait_for(
-                    runtime.turn_state.idle_event.wait(),
-                    timeout=turn_timeout_seconds,
-                )
-                if runtime.turn_state.error:
-                    raise runtime.turn_state.error
+            await self._set_session_status(app_session_id, session_status, last_error=last_error)
+            return {
+                "assistant_message": assistant_doc,
+                "session_status": session_status,
+            }
 
-                turn_state = runtime.turn_state
-                assistant_text = turn_state.content if turn_state else ""
-                if turn_state and not assistant_text.strip():
-                    assistant_text = "Shotwright completed the requested work. Inspect the updated session state for the active project, renders, or other artifacts."
-
-                if turn_state and (assistant_text != turn_state.content or not turn_state.finalized):
-                    turn_state.content = assistant_text
-                    turn_state.finalized = True
-                    turn_state.version += 1
-                    await self._sync_streaming_message(
-                        turn_state,
-                        content=turn_state.content,
-                        version=turn_state.version,
-                        streaming=False,
-                        state="completed",
-                    )
-
-                await self._set_session_status(app_session_id, "idle")
-                if runtime.pending_tasks:
-                    await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
-
-                if runtime.turn_state:
-                    assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
-
-                return {
-                    "assistant_message": assistant_doc,
-                    "session_status": "idle",
-                }
-            except TurnCancelledError as exc:
-                cancellation_message = str(exc).strip() or "Generation stopped by user."
-                partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
-
-                if runtime.turn_state:
-                    runtime.turn_state.finalized = True
-                    runtime.turn_state.version += 1
-                    updated_doc = await self._sync_streaming_message(
-                        runtime.turn_state,
-                        content=runtime.turn_state.content if partial_output else cancellation_message,
-                        version=runtime.turn_state.version,
-                        streaming=False,
-                        state="cancelled",
-                    )
-                    if updated_doc:
-                        assistant_doc = updated_doc
-
-                await self._persist_event(
-                    app_session_id,
-                    "session.cancelled",
-                    {
-                        "message": cancellation_message,
-                        "partial_output": partial_output,
-                    },
-                    turn_id=turn_id,
-                    sequence=runtime.next_event_sequence(),
-                )
-                await self._set_session_status(app_session_id, "idle", last_error=None)
-
-                if runtime.pending_tasks:
-                    await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
-                await self.disconnect_session(app_session_id)
-
-                if runtime.turn_state:
-                    assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
-
-                return {
-                    "assistant_message": assistant_doc,
-                    "session_status": "idle",
-                }
-            except asyncio.CancelledError:
-                interruption_message = (
-                    "Shotwright interrupted this turn because the API worker restarted or the request disconnected."
-                )
-                logger.warning(
-                    "Copilot turn interrupted for %s while waiting for completion",
-                    app_session_id,
-                )
+        try:
+            runtime = await self.ensure_runtime(app_session_id)
+        except asyncio.CancelledError:
+            if pending_bootstrap.cancel_requested:
                 _clear_current_task_cancellation()
 
-                partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
-                if runtime.turn_state:
-                    runtime.turn_state.error = Exception(interruption_message)
-                    runtime.turn_state.error_event_seen = True
-                    runtime.turn_state.finalized = True
-                    runtime.turn_state.version += 1
-                    updated_doc = await self._sync_streaming_message(
-                        runtime.turn_state,
-                        content=runtime.turn_state.content if partial_output else interruption_message,
-                        version=runtime.turn_state.version,
-                        streaming=False,
-                        state="error",
-                    )
-                    if updated_doc:
-                        assistant_doc = updated_doc
-
-                await self._persist_event(
-                    app_session_id,
-                    "session.error",
-                    {
-                        "message": interruption_message,
-                        "partial_output": partial_output,
-                        "interrupted": True,
+                return await _finish_bootstrap_terminal_state(
+                    assistant_content=pending_bootstrap.cancellation_message,
+                    assistant_state="cancelled",
+                    session_status="idle",
+                    event_type="session.cancelled",
+                    event_payload={
+                        "message": pending_bootstrap.cancellation_message,
+                        "partial_output": False,
                     },
-                    turn_id=turn_id,
-                    sequence=runtime.next_event_sequence(),
+                    last_error=None,
                 )
-                await self._set_session_status(app_session_id, "error", last_error=interruption_message)
 
-                if runtime.pending_tasks:
-                    await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
-                await self.disconnect_session(app_session_id)
+            interruption_message = (
+                "Shotwright interrupted this turn because the API worker restarted or the request disconnected."
+            )
+            logger.warning(
+                "Copilot turn interrupted for %s during runtime setup",
+                app_session_id,
+            )
+            _clear_current_task_cancellation()
+            return await _finish_bootstrap_terminal_state(
+                assistant_content=interruption_message,
+                assistant_state="error",
+                session_status="error",
+                event_type="session.error",
+                event_payload={
+                    "message": interruption_message,
+                    "partial_output": False,
+                    "interrupted": True,
+                },
+                last_error=interruption_message,
+            )
+        except Exception as exc:
+            error_message = str(exc).strip() or exc.__class__.__name__
+            logger.exception("Copilot turn failed for %s during runtime setup", app_session_id)
+            return await _finish_bootstrap_terminal_state(
+                assistant_content=error_message,
+                assistant_state="error",
+                session_status="error",
+                event_type="session.error",
+                event_payload={"message": error_message},
+                last_error=error_message,
+            )
 
-                if runtime.turn_state:
-                    assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
-
-                return {
-                    "assistant_message": assistant_doc,
-                    "session_status": "error",
-                }
-            except TimeoutError:
-                timeout_message = (
-                    f"Shotwright timed out waiting for this turn after {turn_timeout_seconds:g} seconds."
-                )
-                logger.warning(
-                    "Copilot turn timed out for %s after %ss",
+        try:
+            async with runtime.lock:
+                user_metadata = {"turn_id": turn_id, "kind": "user_prompt"}
+                if persisted_attachments:
+                    user_metadata["attachments"] = persisted_attachments
+                user_doc = await self._persist_message(
                     app_session_id,
-                    turn_timeout_seconds,
+                    "user",
+                    content,
+                    user_metadata,
                 )
-
-                partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
-                if runtime.turn_state:
-                    runtime.turn_state.finalized = True
-                    runtime.turn_state.version += 1
-                    updated_doc = await self._sync_streaming_message(
-                        runtime.turn_state,
-                        content=runtime.turn_state.content if partial_output else timeout_message,
-                        version=runtime.turn_state.version,
-                        streaming=False,
-                        state="error",
+                image_attachment_count = sum(
+                    1
+                    for attachment in persisted_attachments
+                    if isinstance(attachment, dict)
+                    and attachment.get("type") == "image"
+                    and attachment.get("shared_relative_path")
+                )
+                if image_attachment_count:
+                    await publish_context_refresh(
+                        app_session_id,
+                        "attachments.updated",
+                        image_attachment_count=image_attachment_count,
                     )
-                    if updated_doc:
-                        assistant_doc = updated_doc
-
-                await self._persist_event(
+                assistant_doc = await self._persist_message(
                     app_session_id,
-                    "session.timeout",
+                    "assistant",
+                    "",
                     {
-                        "message": timeout_message,
-                        "timeout_seconds": turn_timeout_seconds,
-                        "partial_output": partial_output,
+                        "turn_id": turn_id,
+                        "kind": "assistant_reply",
+                        "streaming": True,
+                        "state": "pending",
+                        "version": 0,
                     },
-                    turn_id=turn_id,
-                    sequence=runtime.next_event_sequence(),
                 )
-                await self._set_session_status(app_session_id, "error", last_error=timeout_message)
+                runtime.turn_state = _StreamingTurnState(
+                    assistant_doc["_id"],
+                    turn_id=turn_id,
+                    user_message_id=user_doc["_id"],
+                )
+                runtime.turn_state.request_task = asyncio.current_task()
+                if self._pending_turn_bootstraps.get(app_session_id) is pending_bootstrap:
+                    self._pending_turn_bootstraps.pop(app_session_id, None)
 
-                if runtime.pending_tasks:
-                    await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
-                await self.disconnect_session(app_session_id)
+                async def _finish_cancelled_turn(cancellation_message: str) -> dict:
+                    nonlocal assistant_doc
 
-                if runtime.turn_state:
-                    assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+                    partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
 
-                return {
-                    "assistant_message": assistant_doc,
-                    "session_status": "error",
-                }
-            except Exception as exc:
-                logger.exception("Copilot turn failed for %s", app_session_id)
-                error_message = str(exc).strip() or exc.__class__.__name__
-                if runtime.turn_state and runtime.turn_state.content.strip():
-                    runtime.turn_state.finalized = True
-                    runtime.turn_state.version += 1
-                    await self._sync_streaming_message(
-                        runtime.turn_state,
-                        content=runtime.turn_state.content,
-                        version=runtime.turn_state.version,
-                        streaming=False,
-                        state="error",
-                    )
-                else:
-                    await get_message_collection().delete_one({"_id": assistant_doc["_id"]})
-                    await publish_message_deleted(app_session_id, assistant_doc["_id"])
-                if not (runtime.turn_state and runtime.turn_state.error_event_seen):
+                    if runtime.turn_state:
+                        runtime.turn_state.finalized = True
+                        runtime.turn_state.version += 1
+                        updated_doc = await self._sync_streaming_message(
+                            runtime.turn_state,
+                            content=runtime.turn_state.content if partial_output else cancellation_message,
+                            version=runtime.turn_state.version,
+                            streaming=False,
+                            state="cancelled",
+                        )
+                        if updated_doc:
+                            assistant_doc = updated_doc
+
                     await self._persist_event(
                         app_session_id,
-                        "session.error",
-                        {"message": error_message},
+                        "session.cancelled",
+                        {
+                            "message": cancellation_message,
+                            "partial_output": partial_output,
+                        },
                         turn_id=turn_id,
                         sequence=runtime.next_event_sequence(),
                     )
-                await self._set_session_status(app_session_id, "error", last_error=error_message)
-                raise
-            finally:
-                runtime.turn_state = None
+                    await self._set_session_status(app_session_id, "idle", last_error=None)
+
+                    if runtime.pending_tasks:
+                        await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
+                    await self.disconnect_session(app_session_id)
+
+                    if runtime.turn_state:
+                        assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+
+                    return {
+                        "assistant_message": assistant_doc,
+                        "session_status": "idle",
+                    }
+
+                try:
+                    runtime_content = await self._build_runtime_turn_content(app_session_id, content)
+                    copilot_message_id = await runtime.session.send(
+                        runtime_content,
+                        attachments=copilot_attachments or None,
+                    )
+                    await self._persist_event(
+                        app_session_id,
+                        "session.turn.started",
+                        {
+                            "attachment_count": len(persisted_attachments),
+                            "attachment_mime_types": [attachment.get("mime_type") for attachment in persisted_attachments],
+                            "copilot_message_id": copilot_message_id,
+                            "timeout_seconds": turn_timeout_seconds,
+                        },
+                        turn_id=turn_id,
+                        sequence=runtime.next_event_sequence(),
+                    )
+                    await asyncio.wait_for(
+                        runtime.turn_state.idle_event.wait(),
+                        timeout=turn_timeout_seconds,
+                    )
+                    if runtime.turn_state.error:
+                        raise runtime.turn_state.error
+
+                    turn_state = runtime.turn_state
+                    assistant_text = turn_state.content if turn_state else ""
+                    if turn_state and not assistant_text.strip():
+                        assistant_text = "Shotwright completed the requested work. Inspect the updated session state for the active project, renders, or other artifacts."
+
+                    if turn_state and (assistant_text != turn_state.content or not turn_state.finalized):
+                        turn_state.content = assistant_text
+                        turn_state.finalized = True
+                        turn_state.version += 1
+                        await self._sync_streaming_message(
+                            turn_state,
+                            content=turn_state.content,
+                            version=turn_state.version,
+                            streaming=False,
+                            state="completed",
+                        )
+
+                    await self._set_session_status(app_session_id, "idle")
+                    if runtime.pending_tasks:
+                        await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
+
+                    if runtime.turn_state:
+                        assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+
+                    return {
+                        "assistant_message": assistant_doc,
+                        "session_status": "idle",
+                    }
+                except TurnCancelledError as exc:
+                    cancellation_message = str(exc).strip() or "Generation stopped by user."
+                    return await _finish_cancelled_turn(cancellation_message)
+                except asyncio.CancelledError:
+                    if runtime.turn_state and runtime.turn_state.cancel_requested:
+                        _clear_current_task_cancellation()
+                        cancellation_message = (
+                            str(runtime.turn_state.error).strip()
+                            if runtime.turn_state.error
+                            else "Generation stopped by user."
+                        )
+                        return await _finish_cancelled_turn(cancellation_message)
+
+                    interruption_message = (
+                        "Shotwright interrupted this turn because the API worker restarted or the request disconnected."
+                    )
+                    logger.warning(
+                        "Copilot turn interrupted for %s while waiting for completion",
+                        app_session_id,
+                    )
+                    _clear_current_task_cancellation()
+
+                    partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
+                    if runtime.turn_state:
+                        runtime.turn_state.error = Exception(interruption_message)
+                        runtime.turn_state.error_event_seen = True
+                        runtime.turn_state.finalized = True
+                        runtime.turn_state.version += 1
+                        updated_doc = await self._sync_streaming_message(
+                            runtime.turn_state,
+                            content=runtime.turn_state.content if partial_output else interruption_message,
+                            version=runtime.turn_state.version,
+                            streaming=False,
+                            state="error",
+                        )
+                        if updated_doc:
+                            assistant_doc = updated_doc
+
+                    await self._persist_event(
+                        app_session_id,
+                        "session.error",
+                        {
+                            "message": interruption_message,
+                            "partial_output": partial_output,
+                            "interrupted": True,
+                        },
+                        turn_id=turn_id,
+                        sequence=runtime.next_event_sequence(),
+                    )
+                    await self._set_session_status(app_session_id, "error", last_error=interruption_message)
+
+                    if runtime.pending_tasks:
+                        await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
+                    await self.disconnect_session(app_session_id)
+
+                    if runtime.turn_state:
+                        assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+
+                    return {
+                        "assistant_message": assistant_doc,
+                        "session_status": "error",
+                    }
+                except TimeoutError:
+                    timeout_message = (
+                        f"Shotwright timed out waiting for this turn after {turn_timeout_seconds:g} seconds."
+                    )
+                    logger.warning(
+                        "Copilot turn timed out for %s after %ss",
+                        app_session_id,
+                        turn_timeout_seconds,
+                    )
+
+                    partial_output = bool(runtime.turn_state and runtime.turn_state.content.strip())
+                    if runtime.turn_state:
+                        runtime.turn_state.finalized = True
+                        runtime.turn_state.version += 1
+                        updated_doc = await self._sync_streaming_message(
+                            runtime.turn_state,
+                            content=runtime.turn_state.content if partial_output else timeout_message,
+                            version=runtime.turn_state.version,
+                            streaming=False,
+                            state="error",
+                        )
+                        if updated_doc:
+                            assistant_doc = updated_doc
+
+                    await self._persist_event(
+                        app_session_id,
+                        "session.timeout",
+                        {
+                            "message": timeout_message,
+                            "timeout_seconds": turn_timeout_seconds,
+                            "partial_output": partial_output,
+                        },
+                        turn_id=turn_id,
+                        sequence=runtime.next_event_sequence(),
+                    )
+                    await self._set_session_status(app_session_id, "error", last_error=timeout_message)
+
+                    if runtime.pending_tasks:
+                        await asyncio.gather(*list(runtime.pending_tasks), return_exceptions=True)
+                    await self.disconnect_session(app_session_id)
+
+                    if runtime.turn_state:
+                        assistant_doc = await get_message_collection().find_one({"_id": runtime.turn_state.message_id}) or assistant_doc
+
+                    return {
+                        "assistant_message": assistant_doc,
+                        "session_status": "error",
+                    }
+                except Exception as exc:
+                    logger.exception("Copilot turn failed for %s", app_session_id)
+                    error_message = str(exc).strip() or exc.__class__.__name__
+                    if runtime.turn_state and runtime.turn_state.content.strip():
+                        runtime.turn_state.finalized = True
+                        runtime.turn_state.version += 1
+                        await self._sync_streaming_message(
+                            runtime.turn_state,
+                            content=runtime.turn_state.content,
+                            version=runtime.turn_state.version,
+                            streaming=False,
+                            state="error",
+                        )
+                    else:
+                        await get_message_collection().delete_one({"_id": assistant_doc["_id"]})
+                        await publish_message_deleted(app_session_id, assistant_doc["_id"])
+                    if not (runtime.turn_state and runtime.turn_state.error_event_seen):
+                        await self._persist_event(
+                            app_session_id,
+                            "session.error",
+                            {"message": error_message},
+                            turn_id=turn_id,
+                            sequence=runtime.next_event_sequence(),
+                        )
+                    await self._set_session_status(app_session_id, "error", last_error=error_message)
+                    raise
+                finally:
+                    runtime.turn_state = None
+        finally:
+            if self._pending_turn_bootstraps.get(app_session_id) is pending_bootstrap:
+                self._pending_turn_bootstraps.pop(app_session_id, None)
 
     async def cancel_turn(self, app_session_id: str) -> bool:
         runtime = self._runtimes.get(app_session_id)
         if not runtime or not runtime.turn_state:
+            pending_bootstrap = self._pending_turn_bootstraps.get(app_session_id)
+            if pending_bootstrap:
+                request_task = pending_bootstrap.request_task
+                if request_task and request_task is not asyncio.current_task() and not request_task.done():
+                    pending_bootstrap.cancel_requested = True
+                    request_task.cancel()
+                    return True
             await self.reconcile_session_status(app_session_id)
             return False
 
@@ -1233,8 +1514,12 @@ class ShotwrightCopilotRuntimeManager:
             return False
 
         turn_state.finalized = True
+        turn_state.cancel_requested = True
         turn_state.error = TurnCancelledError("Generation stopped by user.")
         turn_state.idle_event.set()
+        request_task = turn_state.request_task
+        if request_task and request_task is not asyncio.current_task() and not request_task.done():
+            request_task.cancel()
         return True
 
     async def disconnect_session(self, app_session_id: str) -> None:

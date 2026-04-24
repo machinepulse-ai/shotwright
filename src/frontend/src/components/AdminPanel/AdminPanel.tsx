@@ -4,6 +4,7 @@ import {
   getAdminDashboard,
   getAdminSettings,
   getCopilotModelOptions,
+  isRequestAbortError,
   updateGithubToken,
   updateAdminSettings,
   getContainers,
@@ -137,12 +138,15 @@ export default function AdminPanel() {
     }
   };
 
-  const loadModelOptions = async () => {
+  const loadModelOptions = async (signal?: AbortSignal) => {
     setModelOptionsLoading(true);
     try {
-      const response = await getCopilotModelOptions();
+      const response = await getCopilotModelOptions(signal);
       setModelOptions(response.data);
-    } catch {
+    } catch (error) {
+      if (isRequestAbortError(error)) {
+        return;
+      }
       setModelOptions([]);
     } finally {
       setModelOptionsLoading(false);
@@ -152,7 +156,9 @@ export default function AdminPanel() {
   useEffect(() => {
     if (authenticated) {
       fetchData();
-      loadModelOptions();
+      const controller = new AbortController();
+      void loadModelOptions(controller.signal);
+      return () => controller.abort();
     }
   }, [authenticated]);
 

@@ -50,6 +50,7 @@ New scripts should go under `install/` or `validate/` unless they are true top-l
 - Proxy-aware builds are already wired through the Dockerfile via `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY`.
 - `shotwright-config.json` is the shared source for host/runner/container paths, Docker base images, and tool version defaults. Prefer it over duplicating environment conventions in scripts or docs.
 - `scripts/install/setup_versions.py` is the shared reader for `setup-versions.yml`. Prefer it over duplicating version parsing in docs or workflows.
+- Local skills live only under `.github/skills`. Repository startup and development entrypoints should hydrate that directory from the versioned release bundle when it is missing.
 - `nvm.install` is optional because GitHub release downloads can fail behind restrictive enterprise proxies.
 - The validation flow deliberately uses `outputExt: mp4` and `@nexrender/action-copy` to copy `result.mp4` into the final output path.
 - A previous validation design mixed render control into the patch script and caused duplicate outputs plus confusing failures. Keep the patch script render-free.
@@ -106,6 +107,7 @@ Last validated on **2026-04-17**:
 - `ae-setup-publish` runs on push to `setup-versions.yml` and manual `workflow_dispatch`; downloads AE from Adobe, patches, and publishes to GHCR
 - `dockerfile-build` runs on push and pull request events
 - `validation-render` runs only on manual `workflow_dispatch`; pulls installer payload from GHCR
+- Skills bundle publication is handled by the local scripts under `scripts/skills/`; repository initialization should hydrate `.github/skills` from the versioned release asset when the directory is missing.
 - Runner target: `windows-2025`
 - Setup image versions are tracked in `setup-versions.yml`
 

@@ -240,6 +240,23 @@ validation-data/
 	work/                                     nexrender working directories and logs
 ```
 
+## 🧠 Skills Bundle Maintenance
+
+Shotwright keeps Copilot skills only in `.github/skills`. That directory stays out of Git and is hydrated from the versioned release bundle whenever the repository startup path or development entrypoints detect that it is missing.
+
+Manually bootstrap or refresh the repo-local skills directory when needed:
+
+```powershell
+python .\scripts\skills\download_skills_bundle.py
+```
+
+Then edit files under `.github/skills`, bump `tooling.skills.artifactVersion` in [shotwright-config.json](shotwright-config.json), package the updated bundle, and publish it:
+
+```powershell
+python .\scripts\skills\package_skills_bundle.py
+python .\scripts\skills\publish_skills_release.py
+```
+
 ## 📝 Design Notes
 
 - The default worker image is `shotwright:runtime`, which copies the published GHCR setup payload into the image and installs the `setup-versions.yml` selection during image build.

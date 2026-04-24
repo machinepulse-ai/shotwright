@@ -24,6 +24,7 @@ import {
   getAgentMessages,
   getCopilotModelOptions,
   getSessions,
+  isRequestAbortError,
   openAgentSessionStream,
   sendChatTurn,
   stopContainer,
@@ -42,6 +43,7 @@ import {
   ReferenceVideoInfo,
   Session,
   SessionEvent,
+  SessionImageAttachmentInfo,
   StoryboardInfo,
 } from "../../types";
 import { TranslationCopy, useI18n } from "../../i18n";
@@ -97,6 +99,8 @@ const SIDEBAR_RESIZER_WIDTH = 14;
 const MIN_CHAT_STAGE_WIDTH = 480;
 const SESSION_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_session_sidebar_width";
 const CONTEXT_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_context_sidebar_width";
+const RUNNING_SESSION_POLL_INTERVAL_MS = 1200;
+const STREAM_STALL_POLL_THRESHOLD_MS = 6000;
 
 type TimelineTone = MetaChip["tone"];
 
@@ -154,6 +158,8 @@ type ExecutionGroupDraft = {
   steps: ExecutionStepDraft[];
 };
 
+type ToolExecutionOutcome = "started" | "success" | "failure" | "completed";
+
 type PendingImageAttachment = ChatImageAttachment & {
   id: string;
 };
@@ -168,11 +174,22 @@ type ReferenceMediaGalleryItem = {
   thumbnailSrc?: string | null;
 };
 
-type ReferenceMediaCard = {
+type ReferenceVideoCard = {
+  kind: "reference-video";
+  key: string;
   referenceVideo: ReferenceVideoInfo;
   storyboards: StoryboardInfo[];
   galleryItems: ReferenceMediaGalleryItem[];
 };
+
+type ReferenceImageCard = {
+  kind: "reference-image";
+  key: string;
+  imageAttachment: SessionImageAttachmentInfo;
+  galleryItems: ReferenceMediaGalleryItem[];
+};
+
+type ReferenceMediaCard = ReferenceVideoCard | ReferenceImageCard;
 
 type MediaPreviewState = {
   items: ReferenceMediaGalleryItem[];
@@ -698,7 +715,13 @@ function formatCommandValue(command: unknown, args: unknown): string {
   return parts.filter(Boolean).join(" ").trim();
 }
 
-function formatTimelineEventLabel(value: string) {
+function formatTimelineEventLabel(value: string, copy: TranslationCopy) {
+  const eventLabels = copy.agent.timelineDetails.eventLabels as Record<string, string | undefined>;
+  const localizedLabel = eventLabels[value];
+  if (localizedLabel) {
+    return localizedLabel;
+  }
+
   return value
     .split(/[._]+/)
     .filter(Boolean)
@@ -713,12 +736,283 @@ function getCompactEventPayloadRecord(event: SessionEvent): Record<string, unkno
     : {};
 }
 
-function getTimelinePreviewText(event: SessionEvent) {
-  if (event.summary !== event.type) {
-    return event.summary;
+function localizeToolName(toolName: string, copy: TranslationCopy) {
+  const toolNames = copy.agent.timelineDetails.toolNames as Record<string, string | undefined>;
+  const localizedToolName = toolNames[toolName] || toolNames[toolName.toLowerCase()];
+  if (localizedToolName) {
+    return localizedToolName;
+  }
+
+  return toolName
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function parseToolExecutionSummary(summary: string | null | undefined): {
+  toolName: string | null;
+  outcome: ToolExecutionOutcome | null;
+} {
+  if (!summary) {
+    return { toolName: null, outcome: null };
+  }
+
+  const startedMatch = summary.match(/^Tool start:\s*(.+)$/i);
+  if (startedMatch) {
+    const toolName = startedMatch[1]?.trim();
+    return {
+      toolName: toolName && toolName.toLowerCase() !== "unknown" ? toolName : null,
+      outcome: "started",
+    };
+  }
+
+  const completedMatch = summary.match(/^Tool complete:\s*(.+?)\s*\((ok|failed|completed)\)$/i);
+  if (completedMatch) {
+    const toolName = completedMatch[1]?.trim();
+    const outcomeToken = completedMatch[2]?.toLowerCase();
+    return {
+      toolName: toolName && toolName.toLowerCase() !== "unknown" ? toolName : null,
+      outcome:
+        outcomeToken === "ok"
+          ? "success"
+          : outcomeToken === "failed"
+            ? "failure"
+            : outcomeToken === "completed"
+              ? "completed"
+              : null,
+    };
+  }
+
+  return { toolName: null, outcome: null };
+}
+
+function formatToolExecutionSummary(
+  toolName: string | null | undefined,
+  outcome: ToolExecutionOutcome,
+  copy: TranslationCopy,
+) {
+  const localizedToolName = toolName ? localizeToolName(toolName, copy) : "";
+
+  switch (outcome) {
+    case "started":
+      return localizedToolName
+        ? `${copy.agent.timelineDetails.summary.toolStarted} · ${localizedToolName}`
+        : copy.agent.timelineDetails.summary.toolStarted;
+    case "success":
+      return localizedToolName
+        ? `${localizedToolName} · ${copy.agent.timelineDetails.result.success}`
+        : copy.agent.timelineDetails.summary.toolCompleted;
+    case "failure":
+      return localizedToolName
+        ? `${localizedToolName} · ${copy.agent.timelineDetails.result.failure}`
+        : copy.agent.timelineDetails.summary.toolFailed;
+    case "completed":
+      return localizedToolName
+        ? `${localizedToolName} · ${copy.agent.timelineDetails.statusValues.completed}`
+        : copy.agent.timelineDetails.summary.toolCompleted;
+    default:
+      return localizedToolName || copy.agent.timelineDetails.summary.toolCompleted;
+  }
+}
+
+function localizePermissionKind(kind: string | null | undefined, copy: TranslationCopy) {
+  if (!kind) return "";
+
+  const permissionKinds = copy.agent.timelineDetails.permissionKinds as Record<string, string | undefined>;
+  return permissionKinds[kind] || kind;
+}
+
+function localizeStatusValue(value: unknown, copy: TranslationCopy) {
+  if (typeof value !== "string" || !value.trim()) {
+    return value;
+  }
+
+  const statusLabels = copy.agent.timelineDetails.statusValues as Record<string, string | undefined>;
+  return statusLabels[value] || value;
+}
+
+function formatLocalizedTimeoutSummary(timeoutSeconds: number | null, locale: string, copy: TranslationCopy) {
+  if (!timeoutSeconds) {
+    return copy.agent.timelineDetails.summary.turnTimedOut;
+  }
+
+  return locale === "zh-CN"
+    ? `本轮请求在 ${timeoutSeconds} 秒后超时`
+    : `This turn timed out after ${timeoutSeconds} seconds`;
+}
+
+function looksLikeMostlyAsciiEnglish(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+
+  const letterCount = (trimmed.match(/[A-Za-z]/g) || []).length;
+  const nonAsciiCount = (trimmed.match(/[^\x00-\x7F]/g) || []).length;
+  return letterCount >= 3 && nonAsciiCount === 0;
+}
+
+function maybePreferLocalizedFallbackTitle(value: string | null | undefined, locale: string) {
+  if (!value) return null;
+  if (locale !== "zh-CN") return value;
+  return looksLikeMostlyAsciiEnglish(value) ? null : value;
+}
+
+function localizeFrameworkMessage(value: string | null | undefined, locale: string, copy: TranslationCopy) {
+  if (!value) return value;
+
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+
+  const timeoutMatch = trimmed.match(/^Shotwright timed out waiting for this turn after (\d+(?:\.\d+)?) seconds\.?$/i);
+  if (timeoutMatch) {
+    return formatLocalizedTimeoutSummary(Number(timeoutMatch[1]), locale, copy);
+  }
+
+  if (/^Shotwright timed out waiting for this turn\.?$/i.test(trimmed)) {
+    return copy.agent.timelineDetails.summary.turnTimedOut;
+  }
+
+  const compactTimeoutMatch = trimmed.match(/^Turn timed out after (\d+(?:\.\d+)?)s$/i);
+  if (compactTimeoutMatch) {
+    return formatLocalizedTimeoutSummary(Number(compactTimeoutMatch[1]), locale, copy);
+  }
+
+  if (/^Turn timed out$/i.test(trimmed)) {
+    return copy.agent.timelineDetails.summary.turnTimedOut;
+  }
+
+  if (/^Turn submitted to Copilot runtime$/i.test(trimmed)) {
+    return copy.agent.timelineDetails.summary.turnSubmitted;
+  }
+
+  if (/^Turn cancelled$/i.test(trimmed)) {
+    return copy.agent.timelineDetails.summary.turnCancelled;
+  }
+
+  if (/^Agent task completed$/i.test(trimmed)) {
+    return copy.agent.timelineDetails.summary.taskCompleted;
+  }
+
+  if (
+    /^Shotwright completed the requested work\. Inspect the updated session state for the active project, renders, or other artifacts\.?$/i.test(
+      trimmed,
+    )
+  ) {
+    return copy.agent.timelineDetails.summary.workCompleted;
+  }
+
+  if (/^Tool execution failed\b/i.test(trimmed)) {
+    return trimmed.replace(/^Tool execution failed\b/i, copy.agent.timelineDetails.summary.toolFailed);
+  }
+
+  if (/^Tool execution completed\b/i.test(trimmed)) {
+    return trimmed.replace(/^Tool execution completed\b/i, copy.agent.timelineDetails.summary.toolCompleted);
+  }
+
+  if (/^Tool execution started\b/i.test(trimmed)) {
+    return trimmed.replace(/^Tool execution started\b/i, copy.agent.timelineDetails.summary.toolStarted);
+  }
+
+  if (/^Permission requested\b/i.test(trimmed)) {
+    return trimmed.replace(/^Permission requested\b/i, copy.agent.timelineDetails.summary.permissionRequested);
+  }
+
+  return value;
+}
+
+function localizeSessionErrorMessage(value: string | null | undefined, locale: string, copy: TranslationCopy) {
+  return localizeFrameworkMessage(value, locale, copy);
+}
+
+function getTimelineExpandedSummary(event: SessionEvent, copy: TranslationCopy, locale = "zh-CN") {
+  const payload = getCompactEventPayloadRecord(event);
+  const parsedToolSummary = parseToolExecutionSummary(event.summary);
+  const toolName = getEventToolName(event) ?? parsedToolSummary.toolName;
+  const localizedToolName = toolName ? localizeToolName(toolName, copy) : "";
+  const resultLabel = getTimelineResultLabel(event, payload, copy);
+
+  switch (event.type) {
+    case "session.turn.started":
+      return copy.agent.timelineDetails.summary.turnSubmitted;
+    case "session.cancelled":
+      return copy.agent.timelineDetails.summary.turnCancelled;
+    case "session.timeout": {
+      const timeoutSeconds = typeof payload.timeout_seconds === "number" ? payload.timeout_seconds : null;
+      return formatLocalizedTimeoutSummary(timeoutSeconds, locale, copy);
+    }
+    case "session.task_complete":
+      return copy.agent.timelineDetails.summary.taskCompleted;
+    case "tool.execution_start":
+      return formatToolExecutionSummary(toolName, "started", copy);
+    case "tool.execution_complete":
+      if (localizedToolName && resultLabel) {
+        return `${localizedToolName} · ${resultLabel}`;
+      }
+      if (parsedToolSummary.outcome) {
+        return formatToolExecutionSummary(toolName, parsedToolSummary.outcome, copy);
+      }
+      if (localizedToolName) {
+        return `${localizedToolName} · ${copy.agent.timelineDetails.statusValues.completed}`;
+      }
+      return copy.agent.timelineDetails.summary.toolCompleted;
+    case "permission.requested": {
+      const permissionKind = localizePermissionKind(
+        ((payload.permission_request as Record<string, unknown> | undefined)?.kind as string | undefined) ??
+          (typeof payload.kind === "string" ? payload.kind : undefined),
+        copy,
+      );
+      return permissionKind
+        ? `${copy.agent.timelineDetails.summary.permissionRequested} · ${permissionKind}`
+        : copy.agent.timelineDetails.summary.permissionRequested;
+    }
+    case "skill.invoked": {
+      const skillName = extractEventText(payload.name);
+      return skillName ? `${copy.agent.timelineDetails.summary.skillInvoked} · ${skillName}` : copy.agent.timelineDetails.summary.skillInvoked;
+    }
+    default:
+      break;
+  }
+
+  if (/^Tool (start|complete):/i.test(event.summary)) {
+    return localizedToolName || event.summary;
+  }
+  if (/^Turn submitted to Copilot runtime$/i.test(event.summary)) {
+    return copy.agent.timelineDetails.summary.turnSubmitted;
+  }
+  if (/^Turn cancelled$/i.test(event.summary)) {
+    return copy.agent.timelineDetails.summary.turnCancelled;
+  }
+  if (/^Turn timed out after (\d+)s$/i.test(event.summary)) {
+    const match = event.summary.match(/(\d+)/);
+    const timeoutSeconds = match ? Number(match[1]) : null;
+    return formatLocalizedTimeoutSummary(Number.isFinite(timeoutSeconds) ? timeoutSeconds : null, locale, copy);
+  }
+  if (/^Agent task completed$/i.test(event.summary)) {
+    return copy.agent.timelineDetails.summary.taskCompleted;
+  }
+  if (/^Permission requested:/i.test(event.summary)) {
+    const permissionKind = localizePermissionKind(
+      ((payload.permission_request as Record<string, unknown> | undefined)?.kind as string | undefined) ??
+        (typeof payload.kind === "string" ? payload.kind : undefined),
+      copy,
+    );
+    return permissionKind
+      ? `${copy.agent.timelineDetails.summary.permissionRequested} · ${permissionKind}`
+      : copy.agent.timelineDetails.summary.permissionRequested;
+  }
+
+  return event.summary === event.type ? formatTimelineEventLabel(event.type, copy) : event.summary;
+}
+
+function getTimelinePreviewText(event: SessionEvent, copy: TranslationCopy, locale: string) {
+  const localizedSummary = getTimelineExpandedSummary(event, copy, locale);
+  if (event.summary !== event.type && localizedSummary) {
+    return localizedSummary;
   }
 
   const payload = getCompactEventPayloadRecord(event);
+  const localizedMessageText = localizeFrameworkMessage(extractEventText(payload.message), locale, copy);
+  const localizedErrorText = localizeFrameworkMessage(extractEventText(payload.error), locale, copy);
 
   const preview = [
     payload.tool_name,
@@ -730,18 +1024,14 @@ function getTimelinePreviewText(event: SessionEvent) {
     payload.path,
     payload.command,
     payload.reason,
-    payload.message,
-    payload.error,
+    localizedMessageText,
+    localizedErrorText,
   ]
     .map((value) => extractEventText(value))
     .find(Boolean);
 
   if (!preview) return "";
   return preview.length > 180 ? `${preview.slice(0, 177)}...` : preview;
-}
-
-function getTimelineExpandedSummary(event: SessionEvent) {
-  return event.summary === event.type ? formatTimelineEventLabel(event.type) : event.summary;
 }
 
 function getTimelineEventTone(event: SessionEvent, payload: Record<string, unknown>): TimelineTone {
@@ -813,7 +1103,7 @@ function getTimelineResultLabel(event: SessionEvent, payload: Record<string, unk
   return null;
 }
 
-function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): TimelinePresentation {
+function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy, locale: string): TimelinePresentation {
   const payload = getCompactEventPayloadRecord(event);
   const tone = getTimelineEventTone(event, payload);
   const fields: TimelineDetailField[] = [];
@@ -853,7 +1143,8 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
     addField(copy.agent.timelineDetails.labels.result, resultLabel, { tone });
   }
 
-  addField(copy.agent.timelineDetails.labels.tool, payload.tool_name ?? payload.toolName);
+  const toolFieldValue = extractEventText(payload.tool_name ?? payload.toolName);
+  addField(copy.agent.timelineDetails.labels.tool, toolFieldValue ? localizeToolName(toolFieldValue, copy) : null);
   if (event.type.startsWith("skill") || payload.name) {
     addField(copy.agent.timelineDetails.labels.skill, payload.name);
   }
@@ -862,14 +1153,21 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
     copy.agent.timelineDetails.labels.model,
     payload.model ?? payload.current_model ?? payload.new_model ?? payload.selected_model,
   );
-  addField(copy.agent.timelineDetails.labels.status, payload.status);
-  addField(copy.agent.timelineDetails.labels.permission, (payload.permission_request as Record<string, unknown> | undefined)?.kind ?? payload.kind);
+  addField(copy.agent.timelineDetails.labels.status, localizeStatusValue(payload.status, copy));
+  addField(
+    copy.agent.timelineDetails.labels.permission,
+    localizePermissionKind(
+      ((payload.permission_request as Record<string, unknown> | undefined)?.kind as string | undefined) ??
+        (typeof payload.kind === "string" ? payload.kind : undefined),
+      copy,
+    ),
+  );
   addField(copy.agent.timelineDetails.labels.phase, payload.phase);
   addField(copy.agent.timelineDetails.labels.path, payload.path, { mono: true });
   addField(copy.agent.timelineDetails.labels.reason, payload.reason);
 
-  const errorText = extractEventText(payload.error);
-  const messageText = extractEventText(payload.message);
+  const errorText = localizeFrameworkMessage(extractEventText(payload.error), locale, copy);
+  const messageText = localizeFrameworkMessage(extractEventText(payload.message), locale, copy);
   if (errorText) {
     addBlock(copy.agent.timelineDetails.labels.error, errorText, "error");
   } else if (messageText) {
@@ -886,8 +1184,9 @@ function buildTimelinePresentation(event: SessionEvent, copy: TranslationCopy): 
   addBlock(copy.agent.timelineDetails.labels.output, payload.output ?? payload.result, "markdown");
 
   if (typeof payload.content === "string") {
-    if (payload.content.length <= 600) {
-      addBlock(copy.agent.timelineDetails.labels.content, payload.content, "markdown");
+    const localizedContent = localizeFrameworkMessage(payload.content, locale, copy) ?? payload.content;
+    if (localizedContent.length <= 600) {
+      addBlock(copy.agent.timelineDetails.labels.content, localizedContent, "markdown");
     }
   } else {
     addBlock(copy.agent.timelineDetails.labels.content, payload.content, "markdown");
@@ -925,43 +1224,30 @@ function summarizePreviewItems(items: string[], locale: string, limit = 2) {
 function getEventToolName(event: SessionEvent | null): string | null {
   if (!event) return null;
   const payload = getCompactEventPayloadRecord(event);
-  const toolName = payload.tool_name ?? payload.toolName ?? payload.name;
+  const summaryToolName = parseToolExecutionSummary(event.summary).toolName;
+  const toolName = payload.tool_name ?? payload.toolName ?? payload.name ?? summaryToolName;
   return typeof toolName === "string" && toolName.trim() ? toolName.trim() : null;
 }
 
-function humanizeToolName(toolName: string) {
-  const overrides: Record<string, string> = {
-    rg: "Ran Rg",
-    glob: "Ran Glob",
-    glob_search: "Ran Glob",
-    report_intent: "Planned next step",
-    inspect_workspace: "Inspect workspace",
-    list_uploaded_projects: "Checked uploaded projects",
-    ensure_after_effects_container: "Ensure After Effects container",
-    create_after_effects_project: "Create managed project",
-    create_empty_after_effects_project: "Create empty project",
-    generate_storyboard_from_reference_video: "Generate storyboard",
-    stage_reference_images: "Stage reference images",
-    create_reference_composition: "Create reference composition",
-    run_after_effects_jsx: "Run After Effects JSX",
-    stop_after_effects_container: "Stop After Effects container",
-    read_file: "Read file",
-    view: "Read file",
-  };
-
-  if (overrides[toolName]) {
-    return overrides[toolName];
-  }
-
-  return toolName
-    .split(/[._-]+/)
-    .filter(Boolean)
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(" ");
+function humanizeToolName(toolName: string, copy: TranslationCopy) {
+  return localizeToolName(toolName, copy);
 }
 
-function isGenericToolSummary(summary: string) {
-  return /^Tool (start|complete):/i.test(summary) || summary === "tool.execution_start" || summary === "tool.execution_complete";
+function isGenericToolSummary(summary: string, copy: TranslationCopy) {
+  const normalized = summary.trim();
+  if (!normalized) return true;
+
+  const genericSummaries = new Set([
+    "tool.execution_start",
+    "tool.execution_complete",
+    copy.agent.timelineDetails.summary.toolStarted,
+    copy.agent.timelineDetails.summary.toolCompleted,
+    copy.agent.timelineDetails.summary.toolFailed,
+    formatTimelineEventLabel("tool.execution_start", copy),
+    formatTimelineEventLabel("tool.execution_complete", copy),
+  ]);
+
+  return genericSummaries.has(normalized) || /^Tool (start|complete):/i.test(normalized);
 }
 
 function buildMergedExecutionEvent(stepDraft: ExecutionStepDraft): SessionEvent | null {
@@ -985,40 +1271,52 @@ function buildMergedExecutionEvent(stepDraft: ExecutionStepDraft): SessionEvent 
   };
 }
 
-function getStepTitleFromEvents(stepDraft: ExecutionStepDraft, mergedEvent: SessionEvent) {
-  const completeSummary = stepDraft.completeEvent ? getTimelineExpandedSummary(stepDraft.completeEvent).trim() : "";
-  if (completeSummary && !isGenericToolSummary(completeSummary) && completeSummary !== stepDraft.completeEvent?.type) {
+function getStepTitleFromEvents(stepDraft: ExecutionStepDraft, mergedEvent: SessionEvent, copy: TranslationCopy, locale: string) {
+  const mergedSummary = getTimelineExpandedSummary(mergedEvent, copy, locale).trim();
+  if (mergedSummary && !isGenericToolSummary(mergedSummary, copy) && mergedSummary !== mergedEvent.type) {
+    return mergedSummary;
+  }
+
+  const completeSummary = stepDraft.completeEvent ? getTimelineExpandedSummary(stepDraft.completeEvent, copy, locale).trim() : "";
+  if (completeSummary && !isGenericToolSummary(completeSummary, copy) && completeSummary !== stepDraft.completeEvent?.type) {
     return completeSummary;
   }
 
-  const startSummary = stepDraft.startEvent ? getTimelineExpandedSummary(stepDraft.startEvent).trim() : "";
-  if (startSummary && !isGenericToolSummary(startSummary) && startSummary !== stepDraft.startEvent?.type) {
+  const startSummary = stepDraft.startEvent ? getTimelineExpandedSummary(stepDraft.startEvent, copy, locale).trim() : "";
+  if (startSummary && !isGenericToolSummary(startSummary, copy) && startSummary !== stepDraft.startEvent?.type) {
     return startSummary;
   }
 
   const toolName = getEventToolName(mergedEvent) ?? getEventToolName(stepDraft.startEvent) ?? getEventToolName(stepDraft.completeEvent);
   if (toolName === "report_intent") {
-    return extractEventText(stepDraft.startEvent?.data?.arguments ?? stepDraft.completeEvent?.data?.arguments) || humanizeToolName(toolName);
+    return extractEventText(stepDraft.startEvent?.data?.arguments ?? stepDraft.completeEvent?.data?.arguments) || humanizeToolName(toolName, copy);
   }
 
-  return toolName ? humanizeToolName(toolName) : getTimelineExpandedSummary(mergedEvent);
+  return toolName ? humanizeToolName(toolName, copy) : getTimelineExpandedSummary(mergedEvent, copy, locale);
 }
 
-function getStepPreviewFromEvents(stepDraft: ExecutionStepDraft, mergedEvent: SessionEvent, locale: string) {
+function getStepPreviewFromEvents(stepDraft: ExecutionStepDraft, mergedEvent: SessionEvent, locale: string, copy: TranslationCopy) {
   const payload = getCompactEventPayloadRecord(mergedEvent);
-  const errorText = extractEventText(payload.error);
+  const errorText = localizeFrameworkMessage(extractEventText(payload.error), locale, copy);
   if (errorText) {
     return trimPreviewText(errorText);
   }
 
-  const previewTokens = collectPreviewTokens(payload.output ?? payload.result ?? payload.content ?? payload.message ?? payload);
-  const title = getStepTitleFromEvents(stepDraft, mergedEvent);
+  const localizedMessageText = localizeFrameworkMessage(extractEventText(payload.message), locale, copy);
+  const localizedContent = typeof payload.content === "string" ? localizeFrameworkMessage(payload.content, locale, copy) ?? payload.content : payload.content;
+  const previewPayload = {
+    ...payload,
+    message: localizedMessageText ?? payload.message,
+    content: localizedContent,
+  };
+  const previewTokens = collectPreviewTokens(payload.output ?? payload.result ?? localizedContent ?? localizedMessageText ?? previewPayload);
+  const title = getStepTitleFromEvents(stepDraft, mergedEvent, copy, locale);
   const filteredTokens = previewTokens.filter((token) => token && token !== title);
   if (filteredTokens.length) {
     return summarizePreviewItems(filteredTokens, locale, 3);
   }
 
-  const fallbackPreview = getTimelinePreviewText(mergedEvent);
+  const fallbackPreview = getTimelinePreviewText(mergedEvent, copy, locale);
   return fallbackPreview !== title ? fallbackPreview : "";
 }
 
@@ -1035,11 +1333,11 @@ function buildExecutionStepPresentation(
     return null;
   }
 
-  const timelinePresentation = buildTimelinePresentation(mergedEvent, copy);
+  const timelinePresentation = buildTimelinePresentation(mergedEvent, copy, locale);
   return {
     key: stepDraft.completeEvent?._id ?? stepDraft.startEvent?._id ?? mergedEvent._id,
-    title: getStepTitleFromEvents(stepDraft, mergedEvent),
-    preview: getStepPreviewFromEvents(stepDraft, mergedEvent, locale),
+    title: getStepTitleFromEvents(stepDraft, mergedEvent, copy, locale),
+    preview: getStepPreviewFromEvents(stepDraft, mergedEvent, locale, copy),
     tone: timelinePresentation.tone,
     leadEvent: mergedEvent,
     timelinePresentation,
@@ -1109,17 +1407,22 @@ function flushActiveSteps(activeSteps: ExecutionStepDraft[], groupDraft: Executi
   }
 }
 
-function buildGroupTitle(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPresentation[]) {
+function buildGroupTitle(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPresentation[], copy: TranslationCopy, locale: string) {
   const headerEvent = groupDraft.headerEvent;
+  const fallbackTitle = maybePreferLocalizedFallbackTitle(groupDraft.fallbackTitle, locale);
+  const firstStepTitle = maybePreferLocalizedFallbackTitle(steps[0]?.title, locale);
+
   if (headerEvent?.type === "assistant.intent") {
-    return extractEventText(headerEvent.data.intent) || groupDraft.fallbackTitle || steps[0]?.title || getTimelineExpandedSummary(headerEvent);
+    const intentTitle = maybePreferLocalizedFallbackTitle(extractEventText(headerEvent.data.intent), locale);
+    return intentTitle || fallbackTitle || firstStepTitle || getTimelineExpandedSummary(headerEvent, copy, locale);
   }
 
   if (headerEvent) {
-    return getTimelineExpandedSummary(headerEvent);
+    const localizedHeaderTitle = maybePreferLocalizedFallbackTitle(getTimelineExpandedSummary(headerEvent, copy, locale), locale);
+    return localizedHeaderTitle || fallbackTitle || firstStepTitle || getTimelineExpandedSummary(headerEvent, copy, locale);
   }
 
-  return groupDraft.fallbackTitle || steps[0]?.title || "Execution";
+  return fallbackTitle || firstStepTitle || copy.agent.timelineDetails.summary.execution;
 }
 
 function getGroupTone(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPresentation[]) {
@@ -1148,7 +1451,7 @@ function buildExecutionGroupPresentation(
     return null;
   }
 
-  const title = buildGroupTitle(groupDraft, steps);
+  const title = buildGroupTitle(groupDraft, steps, copy, locale);
   const tone = getGroupTone(groupDraft, steps);
   const preview = summarizePreviewItems(
     steps
@@ -1169,7 +1472,7 @@ function buildExecutionGroupPresentation(
     : fallbackStatusLabel;
   const timelinePresentation =
     groupDraft.headerEvent && groupDraft.headerEvent.type !== "assistant.intent"
-      ? buildTimelinePresentation(groupDraft.headerEvent, copy)
+      ? buildTimelinePresentation(groupDraft.headerEvent, copy, locale)
       : null;
 
   return {
@@ -1331,7 +1634,7 @@ function buildExecutionBlockPresentation(
     new Set(
       events
         .filter((event) => event._id !== leadEvent._id && !event.type.startsWith("session."))
-        .map((event) => getTimelineExpandedSummary(event).trim())
+        .map((event) => getTimelineExpandedSummary(event, copy, locale).trim())
         .filter(Boolean),
     ),
   );
@@ -1347,12 +1650,12 @@ function buildExecutionBlockPresentation(
 
   return {
     key: leadEvent._id,
-    title: getTimelineExpandedSummary(leadEvent),
+    title: getTimelineExpandedSummary(leadEvent, copy, locale),
     preview: summary,
     tone,
     statusLabel,
     stepCountLabel: formatExecutionStepCount(events.length, locale),
-    timelinePresentation: buildTimelinePresentation(leadEvent, copy),
+    timelinePresentation: buildTimelinePresentation(leadEvent, copy, locale),
     steps: events
       .map((event) => buildExecutionStepPresentation({ startEvent: event, completeEvent: null, relatedEvents: [event] }, locale, copy))
       .filter((step): step is ExecutionStepPresentation => Boolean(step)),
@@ -1595,6 +1898,7 @@ export default function AgentPanel({
   const [sessions, setSessions] = useState<Session[]>([]);
   const [hasLoadedSessions, setHasLoadedSessions] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
+  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(routedSessionId ?? null);
   const [context, setContext] = useState<AgentContext | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<SessionEvent[]>([]);
@@ -1655,6 +1959,9 @@ export default function AgentPanel({
   const chatStageBodyRef = useRef<HTMLDivElement | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
   const streamRef = useRef<AgentSessionStreamConnection | null>(null);
+  const streamConnectedRef = useRef(false);
+  const lastStreamActivityAtRef = useRef(0);
+  const runningSessionPollInFlightRef = useRef(false);
   const shouldFollowTranscriptRef = useRef(true);
   const sessionStatusLabels = copy.status.session;
   const projectStatusLabels = copy.status.project;
@@ -1791,6 +2098,7 @@ export default function AgentPanel({
   const latestRenderName = latestRenderOutput?.filename || basename(context?.latest_render_path, copy.common.notGenerated);
   const referenceVideos = context?.reference_videos ?? [];
   const storyboards = context?.storyboards ?? [];
+  const recentImageAttachments = context?.recent_image_attachments ?? [];
   const referenceMediaCards = useMemo<ReferenceMediaCard[]>(() => {
     const storyboardsBySource = new Map<string, StoryboardInfo[]>();
 
@@ -1805,7 +2113,7 @@ export default function AgentPanel({
       storyboardsBySource.set(sourceKey, bucket);
     }
 
-    return referenceVideos.map((referenceVideo) => {
+    const videoCards: ReferenceVideoCard[] = referenceVideos.map((referenceVideo) => {
       const relatedStoryboards = [...(storyboardsBySource.get(referenceVideo.shared_relative_path) ?? [])].sort(
         (left, right) => parseDateValue(right.created_at).getTime() - parseDateValue(left.created_at).getTime()
       );
@@ -1857,20 +2165,74 @@ export default function AgentPanel({
       }
 
       return {
+        kind: "reference-video",
+        key: referenceVideo.shared_relative_path,
         referenceVideo,
         storyboards: relatedStoryboards,
         galleryItems,
       };
     });
-  }, [copy.agent.referenceMediaPreviewStoryboard, copy.agent.referenceMediaPreviewVideo, copy.common.notSpecified, locale, referenceVideos, storyboards]);
+
+    const imageCards: ReferenceImageCard[] = recentImageAttachments.map((imageAttachment) => {
+      const imageAssetPath = imageAttachment.shared_relative_path || imageAttachment.workspace_relative_path || null;
+      const imageUrl = buildUploadAssetUrl(imageAssetPath);
+      const imageMeta = [
+        imageAttachment.width && imageAttachment.height ? `${imageAttachment.width} x ${imageAttachment.height}` : null,
+        formatFileSize(imageAttachment.size_bytes, locale, copy.common.notSpecified),
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const galleryItems: ReferenceMediaGalleryItem[] = [];
+
+      if (imageUrl) {
+        galleryItems.push({
+          key: imageAssetPath || imageAttachment.file_path,
+          kind: "image",
+          src: imageUrl,
+          label: copy.agent.referenceMediaPreviewImage,
+          title: imageAttachment.display_name || basename(imageAttachment.file_path, copy.common.notSpecified),
+          meta: imageMeta || null,
+        });
+      }
+
+      return {
+        kind: "reference-image",
+        key: imageAssetPath || imageAttachment.file_path,
+        imageAttachment,
+        galleryItems,
+      };
+    });
+
+    const createdAtForCard = (card: ReferenceMediaCard) => {
+      const createdAt = card.kind === "reference-video" ? card.referenceVideo.created_at : card.imageAttachment.created_at;
+      return createdAt ? parseDateValue(createdAt).getTime() : 0;
+    };
+
+    return [...videoCards, ...imageCards].sort((left, right) => createdAtForCard(right) - createdAtForCard(left));
+  }, [
+    copy.agent.referenceMediaPreviewImage,
+    copy.agent.referenceMediaPreviewStoryboard,
+    copy.agent.referenceMediaPreviewVideo,
+    copy.common.notSpecified,
+    locale,
+    recentImageAttachments,
+    referenceVideos,
+    storyboards,
+  ]);
   const mediaPreviewItem = mediaPreview ? mediaPreview.items[mediaPreview.currentIndex] ?? null : null;
   const mediaPreviewCount = mediaPreview?.items.length ?? 0;
   const mediaPreviewCanNavigate = mediaPreviewCount > 1;
+  const isSessionRouteLoading = Boolean(routedSessionId) && (
+    !hasLoadedSessions ||
+    !currentSession ||
+    currentSession._id !== routedSessionId ||
+    loadingSessionId === routedSessionId
+  );
   const sessionSettingsDirty = Boolean(currentSession) && (
     draftModel !== (currentSession?.copilot_model ?? "") ||
     effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
   );
-  const showStarterCards = Boolean(currentSession) && visibleMessages.length === 0;
+  const showStarterCards = Boolean(currentSession) && !isSessionRouteLoading && visibleMessages.length === 0;
   const metaChips = useMemo((): MetaChip[] => {
     if (!currentSession) {
       return [
@@ -1977,6 +2339,22 @@ export default function AgentPanel({
     textarea.style.height = `${Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, availableHeight, textarea.scrollHeight)}px`;
   };
 
+  const markStreamActivity = () => {
+    lastStreamActivityAtRef.current = Date.now();
+  };
+
+  const shouldBackfillRunningSession = (sessionId: string) => {
+    if (activeSessionIdRef.current !== sessionId) {
+      return false;
+    }
+
+    if (!streamConnectedRef.current) {
+      return true;
+    }
+
+    return Date.now() - lastStreamActivityAtRef.current >= STREAM_STALL_POLL_THRESHOLD_MS;
+  };
+
   const navigateToSession = (sessionId: string | null, replace = false) => {
     const targetPath = sessionId ? `/sessions/${sessionId}` : "/";
     if (location.pathname !== targetPath) {
@@ -2015,6 +2393,7 @@ export default function AgentPanel({
       setSessionsError(null);
       if (res.data.length === 0) {
         setCurrentSession(null);
+        setLoadingSessionId(null);
         setOptimisticTurn(null);
         setContext(null);
         setMessages([]);
@@ -2035,44 +2414,65 @@ export default function AgentPanel({
     setPanelError(null);
   };
 
-  const loadModelOptions = async () => {
+  const loadModelOptions = async (signal?: AbortSignal) => {
     setModelOptionsLoading(true);
+    setSessionSettingsError(null);
     try {
-      const res = await getCopilotModelOptions();
+      const res = await getCopilotModelOptions(signal);
       setModelOptions(res.data);
       setSessionSettingsError(null);
     } catch (err: any) {
+      if (isRequestAbortError(err)) {
+        return;
+      }
       setSessionSettingsError(buildUiError(err, "failedLoadModelOptions"));
     } finally {
       setModelOptionsLoading(false);
     }
   };
 
-  const loadCurrentSession = async (sessionId: string) => {
-    const [contextRes, messageRes, eventRes] = await Promise.all([
-      getAgentContext(sessionId),
-      getAgentMessages(sessionId),
-      getAgentEvents(sessionId),
-    ]);
-    if (activeSessionIdRef.current !== sessionId) return;
+  const loadCurrentSession = async (sessionId: string, options?: { showLoadingShell?: boolean }) => {
+    const showLoadingShell = options?.showLoadingShell ?? false;
+    if (showLoadingShell) {
+      setLoadingSessionId(sessionId);
+    }
 
-    setContext(contextRes.data);
-    setMessages(messageRes.data);
-    setEvents(eventRes.data);
-    setOptimisticTurn((previous) => {
-      if (!previous || previous.sessionId !== sessionId) {
-        return previous;
+    try {
+      const [contextRes, messageRes, eventRes] = await Promise.all([
+        getAgentContext(sessionId),
+        getAgentMessages(sessionId),
+        getAgentEvents(sessionId),
+      ]);
+      if (activeSessionIdRef.current !== sessionId) return;
+
+      setContext(contextRes.data);
+      setMessages(messageRes.data);
+      setEvents(eventRes.data);
+      setOptimisticTurn((previous) => {
+        if (!previous || previous.sessionId !== sessionId) {
+          return previous;
+        }
+
+        if (contextRes.data.session.status !== "running") {
+          return null;
+        }
+
+        return messageRes.data.length >= previous.baselineCount + 2 ? null : previous;
+      });
+      syncSessionRecord(contextRes.data.session);
+      setPanelError(null);
+    } finally {
+      if (showLoadingShell) {
+        setLoadingSessionId((previous) => (previous === sessionId ? null : previous));
       }
-
-      return messageRes.data.length >= previous.baselineCount + 2 ? null : previous;
-    });
-    syncSessionRecord(contextRes.data.session);
-    setPanelError(null);
+    }
   };
 
   useEffect(() => {
+    const controller = new AbortController();
     fetchSessions();
-    loadModelOptions();
+    void loadModelOptions(controller.signal);
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -2091,6 +2491,9 @@ export default function AgentPanel({
       ? sessions.find((session) => session._id === routedSessionId) ?? null
       : null;
     if (routedSession) {
+      if (currentSession?._id !== routedSession._id) {
+        setLoadingSessionId(routedSession._id);
+      }
       setCurrentSession(routedSession);
       return;
     }
@@ -2098,6 +2501,9 @@ export default function AgentPanel({
     const preservedSession = currentSession ? sessions.find((session) => session._id === currentSession._id) ?? null : null;
     const nextSession = preservedSession ?? sessions[0];
 
+    if (nextSession?._id !== currentSession?._id) {
+      setLoadingSessionId(nextSession?._id ?? null);
+    }
     setCurrentSession(nextSession);
 
     if (nextSession) {
@@ -2286,6 +2692,9 @@ export default function AgentPanel({
   useEffect(() => {
     streamRef.current?.close();
     streamRef.current = null;
+    streamConnectedRef.current = false;
+    lastStreamActivityAtRef.current = 0;
+    runningSessionPollInFlightRef.current = false;
 
     if (!currentSession) {
       setContext(null);
@@ -2299,34 +2708,49 @@ export default function AgentPanel({
     const sessionId = currentSession._id;
     activeSessionIdRef.current = sessionId;
 
-    loadCurrentSession(sessionId).catch((err) => {
+    loadCurrentSession(sessionId, { showLoadingShell: true }).catch((err) => {
       setPanelError(buildUiError(err, "failedLoadSessionData"));
     });
 
     const stream = openAgentSessionStream(sessionId, {
+      onOpen: () => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        streamConnectedRef.current = true;
+        markStreamActivity();
+      },
+      onError: () => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        streamConnectedRef.current = false;
+      },
       onSessionUpdated: (session) => {
         if (activeSessionIdRef.current !== sessionId) return;
+        markStreamActivity();
         syncSessionRecord(session);
         if (session.status !== "running") {
           setSendingSessionId((previous) => (previous === sessionId ? null : previous));
           setStoppingGenerationSessionId((previous) => (previous === sessionId ? null : previous));
+          setOptimisticTurn((previous) => (previous?.sessionId === sessionId ? null : previous));
         }
       },
       onMessageUpsert: (message) => {
         if (activeSessionIdRef.current !== sessionId) return;
+        markStreamActivity();
         setMessages((previous) => upsertMessage(previous, message));
       },
       onMessageDeleted: (payload) => {
         if (activeSessionIdRef.current !== sessionId) return;
+        markStreamActivity();
         setMessages((previous) => removeMessage(previous, payload.message_id));
         setOptimisticTurn((previous) => (previous?.sessionId === sessionId ? null : previous));
       },
       onTimelineEvent: (event) => {
         if (activeSessionIdRef.current !== sessionId) return;
+        markStreamActivity();
         setEvents((previous) => upsertTimelineEvent(previous, event));
       },
       onContextRefresh: () => {
         if (activeSessionIdRef.current !== sessionId) return;
+        markStreamActivity();
         void loadSessionContext(sessionId).catch((err) => {
           setPanelError(buildUiError(err, "failedLoadSessionData"));
         });
@@ -2338,6 +2762,11 @@ export default function AgentPanel({
       if (streamRef.current === stream) {
         streamRef.current = null;
       }
+      if (activeSessionIdRef.current === sessionId) {
+        streamConnectedRef.current = false;
+        lastStreamActivityAtRef.current = 0;
+        runningSessionPollInFlightRef.current = false;
+      }
       stream.close();
     };
   }, [currentSession?._id]);
@@ -2348,21 +2777,31 @@ export default function AgentPanel({
 
     const sessionId = currentSession._id;
     const intervalId = window.setInterval(() => {
-      if (activeSessionIdRef.current !== sessionId) return;
+      if (runningSessionPollInFlightRef.current || !shouldBackfillRunningSession(sessionId)) return;
 
-      void loadCurrentSession(sessionId).catch((err) => {
-        setPanelError(buildUiError(err, "failedLoadSessionData"));
-      });
-    }, 1200);
+      runningSessionPollInFlightRef.current = true;
 
-    return () => window.clearInterval(intervalId);
-  }, [currentSession, sessionStatus]);
+      void loadCurrentSession(sessionId)
+        .catch((err) => {
+          setPanelError(buildUiError(err, "failedLoadSessionData"));
+        })
+        .finally(() => {
+          runningSessionPollInFlightRef.current = false;
+        });
+    }, RUNNING_SESSION_POLL_INTERVAL_MS);
+
+    return () => {
+      runningSessionPollInFlightRef.current = false;
+      window.clearInterval(intervalId);
+    };
+  }, [currentSession?._id, sessionStatus]);
 
   const createNewSession = async () => {
     try {
       const name = `${copy.common.sessionPrefix} ${sessions.length + 1}`;
       const res = await createSession(name);
       setSessions((prev: Session[]) => [res.data, ...prev]);
+      setLoadingSessionId(res.data._id);
       setOptimisticTurn(null);
       navigateToSession(res.data._id);
       setSessionsError(null);
@@ -2387,6 +2826,7 @@ export default function AgentPanel({
   };
 
   const handleSelectSession = (session: Session) => {
+    setLoadingSessionId(session._id);
     setCurrentSession(session);
     setPanelError(null);
     navigateToSession(session._id);
@@ -3001,6 +3441,97 @@ export default function AgentPanel({
     );
   };
 
+  const renderSessionLoadingSkeleton = () => (
+    <>
+      <header className="chat-stage-header session-loading-header" aria-busy="true">
+        <div className="chat-stage-heading session-loading-heading">
+          <span className="eyebrow">{copy.agent.sessionLoadingEyebrow}</span>
+          <div className="session-loading-copy">
+            <h1>{copy.agent.sessionLoadingTitle}</h1>
+            <p>{copy.agent.sessionLoadingDescription}</p>
+          </div>
+        </div>
+        <div className="session-loading-toolbar" aria-hidden="true">
+          <span className="session-loading-pill skeleton-block" />
+          <span className="session-loading-pill skeleton-block" />
+          <span className="session-loading-pill skeleton-block" />
+        </div>
+      </header>
+
+      <div className="chat-stage-meta session-loading-meta" aria-hidden="true">
+        <span className="session-loading-chip skeleton-block" />
+        <span className="session-loading-chip skeleton-block" />
+        <span className="session-loading-chip skeleton-block" />
+        <span className="session-loading-chip skeleton-block" />
+      </div>
+
+      <div className="chat-stage-body session-loading-body">
+        <div className="chat-transcript session-loading-transcript" aria-hidden="true">
+          <div className="session-loading-entry role-assistant">
+            <span className="chat-avatar chat-avatar-assistant">SW</span>
+            <div className="session-loading-bubble">
+              <span className="session-loading-line skeleton-block width-sm" />
+              <span className="session-loading-line skeleton-block width-xl" />
+              <span className="session-loading-line skeleton-block width-lg" />
+            </div>
+          </div>
+
+          <div className="session-loading-execution-card">
+            <span className="session-loading-line skeleton-block width-md" />
+            <span className="session-loading-line skeleton-block width-xl" />
+            <span className="session-loading-line skeleton-block width-lg" />
+            <div className="session-loading-pills">
+              <span className="session-loading-pill skeleton-block" />
+              <span className="session-loading-pill skeleton-block" />
+            </div>
+          </div>
+
+          <div className="session-loading-entry role-user">
+            <span className="chat-avatar chat-avatar-user">你</span>
+            <div className="session-loading-bubble align-right">
+              <span className="session-loading-line skeleton-block width-md" />
+              <span className="session-loading-line skeleton-block width-lg" />
+            </div>
+          </div>
+        </div>
+
+        <div className="composer-resizer" aria-hidden="true" />
+
+        <div className="composer-shell session-loading-composer-shell" aria-hidden="true">
+          <div className="composer-card session-loading-composer-card">
+            <span className="session-loading-line skeleton-block width-xl" />
+            <span className="session-loading-line skeleton-block width-lg" />
+            <div className="session-loading-composer-footer">
+              <span className="session-loading-pill skeleton-block" />
+              <span className="session-loading-pill skeleton-block" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  const renderContextLoadingSkeleton = () => (
+    <>
+      <div className="card context-panel session-loading-context-card" aria-hidden="true">
+        <span className="session-loading-line skeleton-block width-sm" />
+        <span className="session-loading-line skeleton-block width-lg" />
+        <div className="session-loading-stats-grid">
+          <span className="session-loading-stat skeleton-block" />
+          <span className="session-loading-stat skeleton-block" />
+          <span className="session-loading-stat skeleton-block" />
+          <span className="session-loading-stat skeleton-block" />
+        </div>
+      </div>
+      <div className="card context-panel session-loading-context-card" aria-hidden="true">
+        <span className="session-loading-line skeleton-block width-sm" />
+        <span className="session-loading-line skeleton-block width-xl" />
+        <span className="session-loading-line skeleton-block width-md" />
+        <span className="session-loading-line skeleton-block width-lg" />
+      </div>
+    </>
+  );
+
   const composerSessionSettings = currentSession ? (
     <div className="composer-session-settings" data-testid="session-settings-card">
       <label className="settings-field settings-field-model">
@@ -3140,6 +3671,8 @@ export default function AgentPanel({
       ) : null}
 
       <section className="chat-stage" data-testid="chat-stage">
+        {isSessionRouteLoading ? renderSessionLoadingSkeleton() : (
+          <>
         <header className="chat-stage-header">
           <div className="chat-stage-heading">
             <span className="eyebrow">{copy.agent.eyebrow}</span>
@@ -3224,6 +3757,10 @@ export default function AgentPanel({
                     const { message } = entry;
                     const streaming = isStreamingMessage(message);
                     const hasContent = hasRenderableMessageContent(message);
+                    const displayContent =
+                      message.role === "assistant"
+                        ? localizeFrameworkMessage(message.content, locale, copy) ?? message.content
+                        : message.content;
                     const messageImageAttachments = getMessageImageAttachments(message);
                     const hasRenderableBody = hasContent || messageImageAttachments.length > 0;
                     const messageTurnId = getMessageTurnId(message);
@@ -3248,7 +3785,7 @@ export default function AgentPanel({
                             {inlineExecutionEvents.length ? renderExecutionBlock(`execution-${messageTurnId}`, inlineExecutionEvents, { inlineAssistant: true }) : null}
 
                             <div className={`chat-message-body markdown-content${streaming ? " streaming" : ""}`} aria-live={streaming ? "polite" : undefined}>
-                              {hasContent ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : null}
+                              {hasContent ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown> : null}
 
                               {messageImageAttachments.length ? (
                                 <div className={`chat-attachment-grid${hasContent ? " has-copy" : ""}`}>
@@ -3497,6 +4034,8 @@ export default function AgentPanel({
             </div>
           </div>
         </div>
+          </>
+        )}
       </section>
 
       {!isContextSidebarCollapsed ? (
@@ -3518,7 +4057,7 @@ export default function AgentPanel({
         data-testid="session-context-sidebar"
         hidden={isContextSidebarCollapsed}
       >
-        {currentSession ? (
+        {isSessionRouteLoading ? renderContextLoadingSkeleton() : currentSession ? (
           <>
             <div className="card context-panel session-overview-panel">
               <div className="session-overview-header">
@@ -3559,7 +4098,9 @@ export default function AgentPanel({
                 </span>
               </div>
 
-              {currentSession.last_error && <div className="inline-alert">{currentSession.last_error}</div>}
+              {currentSession.last_error && (
+                <div className="inline-alert">{localizeSessionErrorMessage(currentSession.last_error, locale, copy)}</div>
+              )}
             </div>
 
             <ContainerManager containers={context?.container ? [context.container] : []} onStop={handleStopContainer} />
@@ -3679,7 +4220,66 @@ export default function AgentPanel({
 
               {referenceMediaCards.length ? (
                 <div className="project-list panel-list-scroll">
-                  {referenceMediaCards.map(({ galleryItems, referenceVideo, storyboards: relatedStoryboards }) => {
+                  {referenceMediaCards.map((card) => {
+                    if (card.kind === "reference-image") {
+                      const imageMeta = [
+                        card.imageAttachment.width && card.imageAttachment.height
+                          ? `${card.imageAttachment.width} x ${card.imageAttachment.height}`
+                          : null,
+                        formatFileSize(card.imageAttachment.size_bytes, locale, copy.common.notSpecified),
+                      ]
+                        .filter(Boolean)
+                        .join(" · ");
+                      const imageTitle = card.imageAttachment.display_name || basename(card.imageAttachment.file_path, copy.common.notSpecified);
+
+                      return (
+                        <div key={card.key} className="reference-media-card">
+                          <div className="reference-media-card-header">
+                            <div className="project-copy">
+                              <div className="project-name">{imageTitle}</div>
+                              <div className="project-meta">{imageMeta}</div>
+                              <div className="project-submeta">{formatDateTime(card.imageAttachment.created_at, locale, copy.common.notStarted)}</div>
+                            </div>
+                            <span className="reference-media-badge">{copy.agent.referenceMediaImageBadge}</span>
+                          </div>
+
+                          {card.galleryItems.length ? (
+                            <div className="reference-media-gallery">
+                              <div className="reference-media-gallery-strip" data-testid="reference-media-gallery-strip">
+                                {card.galleryItems.map((item, index) => (
+                                  <button
+                                    key={item.key}
+                                    type="button"
+                                    className={`reference-media-gallery-chip kind-${item.kind}`}
+                                    data-testid="reference-media-gallery-trigger"
+                                    onClick={() => openMediaPreview(card.galleryItems, index)}
+                                  >
+                                    <span className="reference-media-gallery-chip-topline">
+                                      <span className="reference-media-gallery-chip-label">{item.label}</span>
+                                      <span className="reference-media-gallery-chip-action">{copy.video.preview}</span>
+                                    </span>
+
+                                    <img className="reference-media-gallery-thumb" src={item.src} alt={item.title} loading="lazy" />
+
+                                    <span className="reference-media-gallery-chip-title" title={item.title}>{item.title}</span>
+                                    {item.meta ? <span className="reference-media-gallery-chip-meta">{item.meta}</span> : null}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="reference-media-preview is-empty" data-testid="reference-media-preview-empty">
+                              <span className="reference-media-preview-topline">
+                                <span className="reference-media-preview-label">{copy.agent.referenceMediaPreviewImage}</span>
+                              </span>
+                              <div className="reference-media-preview-placeholder">{copy.common.notSpecified}</div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    const { galleryItems, referenceVideo, storyboards: relatedStoryboards } = card;
                     const referenceVideoMeta = [
                       formatDurationSeconds(referenceVideo.duration_seconds, locale, copy.common.notSpecified),
                       referenceVideo.width && referenceVideo.height ? `${referenceVideo.width} x ${referenceVideo.height}` : null,
@@ -3689,7 +4289,7 @@ export default function AgentPanel({
                       .join(" · ");
 
                     return (
-                      <div key={referenceVideo.shared_relative_path} className="reference-media-card">
+                      <div key={card.key} className="reference-media-card">
                         <div className="reference-media-card-header">
                           <div className="project-copy">
                             <div className="project-name">{referenceVideo.filename}</div>

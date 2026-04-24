@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
 from app.config import settings
@@ -40,6 +40,111 @@ def _read_text_tail(path: str | Path, max_chars: int = 12000) -> str:
         return Path(path).read_text(encoding="utf-8", errors="replace")[-max_chars:]
     except OSError:
         return ""
+
+
+def _trim_excerpt(value: str, max_chars: int = 4000) -> str:
+    excerpt = value.strip()
+    if not excerpt:
+        return ""
+    return excerpt[-max_chars:] if len(excerpt) > max_chars else excerpt
+
+
+def _resolve_patch_script_path(patch_script: str | Path, *, project: dict | None = None) -> Path:
+    raw_value = str(patch_script).strip()
+    raw_path = Path(raw_value)
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add_candidate(candidate: Path | None) -> None:
+        if candidate is None:
+            return
+        normalized = str(candidate).lower()
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(candidate)
+
+    add_candidate(raw_path)
+
+    if raw_value:
+        windows_path = PureWindowsPath(raw_value)
+        if windows_path.drive and len(windows_path.parts) >= 2 and windows_path.parts[1].lower() == "workspace":
+            relative_parts = windows_path.parts[2:]
+            if relative_parts:
+                add_candidate(REPO_ROOT.joinpath(*relative_parts))
+
+    if raw_value and not raw_path.is_absolute():
+        add_candidate(REPO_ROOT / raw_path)
+
+    project_workspace_dir = str(project.get("workspace_dir") or "").strip() if project else ""
+    if project_workspace_dir:
+        project_dir = Path(project_workspace_dir)
+        if raw_value and not raw_path.is_absolute():
+            add_candidate(project_dir / raw_path)
+        if raw_path.name:
+            add_candidate(project_dir / raw_path.name)
+            first_match = next(project_dir.rglob(raw_path.name), None)
+            add_candidate(first_match)
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    checked_candidates = ", ".join(str(candidate) for candidate in candidates) or raw_value
+    raise FileNotFoundError(f"Patch script not found at {patch_script}. Checked: {checked_candidates}")
+
+
+def format_render_failure_details(render: dict, *, composition: str | None = None) -> str:
+    summary_lines = ["After Effects render failed."]
+
+    if composition:
+        summary_lines.append(f"Composition: {composition}")
+    if render.get("aep_path"):
+        summary_lines.append(f"AEP: {render['aep_path']}")
+    if render.get("output_path"):
+        summary_lines.append(f"Expected output: {render['output_path']}")
+    if render.get("work_dir"):
+        summary_lines.append(f"Work dir: {render['work_dir']}")
+    if render.get("stdout_path"):
+        summary_lines.append(f"stdout log: {render['stdout_path']}")
+    if render.get("stderr_path"):
+        summary_lines.append(f"stderr log: {render['stderr_path']}")
+    if render.get("exit_code") is not None:
+        summary_lines.append(f"Host exit code: {render['exit_code']}")
+    if render.get("cli_exit_code") is not None:
+        summary_lines.append(f"nexrender exit code: {render['cli_exit_code']}")
+    if render.get("timed_out"):
+        summary_lines.append("Timed out: true")
+
+    sections: list[tuple[str, str]] = []
+
+    output_excerpt = _trim_excerpt(str(render.get("output") or ""))
+    if output_excerpt:
+        sections.append(("nexrender / aerender output", output_excerpt))
+
+    patch_persist_result = render.get("patch_persist_result")
+    if isinstance(patch_persist_result, dict) and not patch_persist_result.get("success"):
+        patch_output = _trim_excerpt(str(patch_persist_result.get("output") or ""))
+        if patch_output:
+            sections.append(("patch persistence output", patch_output))
+
+    stdout_excerpt = _trim_excerpt(str(render.get("stdout_excerpt") or ""))
+    if not stdout_excerpt and render.get("stdout_path"):
+        stdout_excerpt = _trim_excerpt(_read_text_tail(render["stdout_path"], max_chars=4000))
+    if stdout_excerpt:
+        sections.append(("nexrender stdout tail", stdout_excerpt))
+
+    stderr_excerpt = _trim_excerpt(str(render.get("stderr_excerpt") or ""))
+    if not stderr_excerpt and render.get("stderr_path"):
+        stderr_excerpt = _trim_excerpt(_read_text_tail(render["stderr_path"], max_chars=4000))
+    if stderr_excerpt and stderr_excerpt != stdout_excerpt:
+        sections.append(("nexrender stderr tail", stderr_excerpt))
+
+    parts = ["\n".join(summary_lines)]
+    for title, content in sections:
+        parts.append(f"{title}:\n{content}")
+
+    return "\n\n".join(part for part in parts if part).strip()
 
 
 def _runtime_helper_files() -> dict[str, str]:
@@ -440,10 +545,9 @@ def _build_nexrender_script_job(
     template_payload: dict[str, str] = {
         "src": _to_file_uri(template_path),
         "name": template_path.name,
+        "composition": (composition or BOOTSTRAP_TEMPLATE_COMPOSITION).strip() or BOOTSTRAP_TEMPLATE_COMPOSITION,
         "outputExt": "mp4",
     }
-    if composition:
-        template_payload["composition"] = composition
     return {
         "template": template_payload,
         "assets": [
@@ -608,9 +712,7 @@ async def persist_patch_script_to_project(
     patch_script: str,
     timeout_seconds: int = 300,
 ) -> dict:
-    patch_script_path = Path(patch_script)
-    if not patch_script_path.exists() or not patch_script_path.is_file():
-        raise FileNotFoundError(f"Patch script not found at {patch_script_path}")
+    patch_script_path = _resolve_patch_script_path(patch_script, project=project)
 
     managed_project_path = Path(project["workspace_dir"]) / (
         project.get("entry_aep_file") or project.get("filename") or "project.aep"
@@ -729,6 +831,8 @@ async def run_render(
     success = bool(helper_result.get("success")) or output_exists
 
     combined_output = helper_result.get("output") or raw_output
+    stdout_excerpt = _trim_excerpt(_read_text_tail(stdout_path, max_chars=4000))
+    stderr_excerpt = _trim_excerpt(_read_text_tail(stderr_path, max_chars=4000))
 
     return {
         "exit_code": exit_code,
@@ -743,6 +847,8 @@ async def run_render(
         "binary_path": str(binary_path),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
+        "stdout_excerpt": stdout_excerpt,
+        "stderr_excerpt": stderr_excerpt,
         "output_exists": output_exists,
         "output": combined_output[-2000:] if len(combined_output) > 2000 else combined_output,
     }
@@ -776,9 +882,11 @@ async def render_project(
     if not aep_path.exists():
         raise ValueError(f"AEP file not found at {aep_path}")
 
+    resolved_patch_script = str(_resolve_patch_script_path(patch_script, project=project)) if patch_script else None
+
     persisted_patch_result: dict | None = None
-    patch_script_for_render = patch_script
-    if patch_script:
+    patch_script_for_render = resolved_patch_script
+    if resolved_patch_script:
         try:
             persisted_patch_result = await persist_patch_script_to_project(
                 container_db_id=container_db_id,
@@ -787,7 +895,7 @@ async def render_project(
                     "entry_aep_file": aep_file,
                     "filename": aep_file,
                 },
-                patch_script=patch_script,
+                patch_script=resolved_patch_script,
                 timeout_seconds=min(max(timeout_seconds, 30), 300),
             )
             patch_script_for_render = None
@@ -804,7 +912,7 @@ async def render_project(
                 "persistence_confirmed": False,
                 "output": str(exc).strip() or exc.__class__.__name__,
                 "fallback_to_render_patch": True,
-                "patch_script": patch_script,
+                "patch_script": resolved_patch_script,
             }
 
     work_dir = output_dir / "_nexrender_work" / f"{project_id}-{uuid4().hex[:8]}"

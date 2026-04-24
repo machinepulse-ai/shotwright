@@ -52,7 +52,25 @@ export const getSessions = () => api.get("/sessions");
 export const createSession = (name: string) => api.post("/sessions", { name });
 export const updateSession = (id: string, payload: Record<string, unknown>) => api.patch(`/sessions/${id}`, payload);
 export const deleteSession = (id: string) => api.delete(`/sessions/${id}`);
-export const getCopilotModelOptions = () => api.get("/sessions/model-options");
+export const getCopilotModelOptions = (signal?: AbortSignal) => api.get("/sessions/model-options", { signal });
+
+export function isRequestAbortError(error: unknown) {
+  if (axios.isCancel(error)) {
+    return true;
+  }
+
+  const name = typeof (error as { name?: unknown })?.name === "string" ? String((error as { name?: string }).name) : "";
+  const code = typeof (error as { code?: unknown })?.code === "string" ? String((error as { code?: string }).code) : "";
+  const message =
+    typeof (error as { message?: unknown })?.message === "string" ? String((error as { message?: string }).message) : "";
+  const detail =
+    typeof (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail === "string"
+      ? String((error as { response?: { data?: { detail?: string } } }).response?.data?.detail)
+      : "";
+  const diagnostic = `${name} ${code} ${message} ${detail}`;
+
+  return code === "ERR_CANCELED" || /abort(?:ed)?|cancel(?:ed|led)/i.test(diagnostic);
+}
 
 // --- Containers ---
 export const getContainers = (sessionId?: string) =>

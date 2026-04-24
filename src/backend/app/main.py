@@ -15,6 +15,7 @@ from app.services.copilot_runtime import runtime_manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_db()
+    await runtime_manager.ensure_repo_skills_available()
     yield
     await runtime_manager.shutdown()
     await close_db()

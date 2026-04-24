@@ -14,6 +14,7 @@ def test_build_nexrender_script_job_omits_composition_when_unspecified() -> None
     assert job["template"] == {
         "src": "file:///C:/data/uploads/session/project.aep",
         "name": "project.aep",
+        "composition": "Main",
         "outputExt": "mp4",
     }
     assert job["assets"] == [
@@ -24,6 +25,41 @@ def test_build_nexrender_script_job_omits_composition_when_unspecified() -> None
         }
     ]
     assert job["ae_render"]["script_only"] is True
+
+
+def test_resolve_patch_script_path_maps_container_workspace_path_to_repo_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    patch_script = repo_root / "circle_round1_patch.jsx"
+    patch_script.write_text("// patch\n", encoding="utf-8")
+    monkeypatch.setattr(module, "REPO_ROOT", repo_root)
+
+    resolved = module._resolve_patch_script_path("C:/workspace/circle_round1_patch.jsx")
+
+    assert resolved == patch_script
+
+
+def test_resolve_patch_script_path_falls_back_to_project_workspace_basename(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    project_dir = tmp_path / "uploads" / "session-1" / "project-1"
+    project_dir.mkdir(parents=True)
+    patch_script = project_dir / "circle_round1_patch.jsx"
+    patch_script.write_text("// patch\n", encoding="utf-8")
+    monkeypatch.setattr(module, "REPO_ROOT", repo_root)
+
+    resolved = module._resolve_patch_script_path(
+        "C:/workspace/circle_round1_patch.jsx",
+        project={"workspace_dir": str(project_dir)},
+    )
+
+    assert resolved == patch_script
 
 
 def test_build_nexrender_script_job_keeps_bootstrap_composition() -> None:

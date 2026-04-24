@@ -182,6 +182,57 @@ async def test_stage_session_image_attachments_copies_into_project_workspace(mon
 
 
 @pytest.mark.asyncio
+async def test_inspect_workspace_serializes_recent_image_attachment_datetimes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    attachment_time = datetime(2026, 4, 22, 16, 25, 29, tzinfo=timezone.utc)
+    image_path = tmp_path / 'reference.png'
+    image_path.write_bytes(b'png')
+
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'status': 'idle',
+            'container_id': 'container-1',
+            'active_project_id': None,
+        }
+    )
+
+    async def fake_get_container(container_id: str) -> dict:
+        assert container_id == 'container-1'
+        return {'_id': 'container-1', 'status': 'running', 'docker_id': 'docker-1'}
+
+    async def fake_list_projects(_session_id: str) -> list[dict]:
+        return []
+
+    async def fake_list_session_image_attachments(_session_id: str, *, limit: int = 8) -> list[dict]:
+        return [
+            {
+                'file_path': str(image_path),
+                'display_name': 'reference.png',
+                'created_at': attachment_time,
+            }
+        ][:limit]
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.cm, 'get_container', fake_get_container)
+    monkeypatch.setattr(module.pm, 'list_projects', fake_list_projects)
+    monkeypatch.setattr(module, '_list_session_image_attachments', fake_list_session_image_attachments)
+    monkeypatch.setattr(module.nr, 'list_render_outputs', lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(module.rm, 'list_reference_videos', lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(module.rm, 'list_storyboards', lambda *_args, **_kwargs: [])
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['inspect_workspace'].handler(SimpleNamespace(arguments={}))
+
+    assert result.result_type == 'success'
+
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['recent_image_attachments'][0]['created_at'] == attachment_time.isoformat()
+
+
+@pytest.mark.asyncio
 async def test_generate_storyboard_tool_passes_crop_to_reference_media(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -305,3 +356,78 @@ async def test_render_tool_sets_rendered_project_back_to_active(monkeypatch: pyt
     assert payload['active_project_id'] == 'project-1'
     assert payload['project']['_id'] == 'project-1'
     assert payload['render_output']['id'] == 'render-1'
+
+
+@pytest.mark.asyncio
+async def test_render_tool_returns_detailed_failure_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'container_id': 'container-1',
+            'active_project_id': 'project-1',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'scene.aep',
+        'workspace_dir': 'C:/data/uploads/session-1/project-1',
+        'entry_aep_file': 'scene.aep',
+        'aep_files': ['scene.aep'],
+        'compositions': [{'name': 'Main'}],
+        'composition_catalog_updated_at': '2026-04-22T12:00:00Z',
+    }
+    stdout_log = tmp_path / 'nexrender.stdout.log'
+    stderr_log = tmp_path / 'nexrender.stderr.log'
+    stdout_log.write_text('stdout tail\n> job rendering failed\n', encoding='utf-8')
+    stderr_log.write_text('aerender ERROR: Composition Main not found\n', encoding='utf-8')
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_set_active_project(session_id: str, project_id: str) -> dict:
+        assert session_id == 'session-1'
+        return {'_id': project_id}
+
+    async def fake_render_project(**kwargs) -> dict:
+        assert kwargs['project_id'] == 'project-1'
+        return {
+            'success': False,
+            'exit_code': 1,
+            'cli_exit_code': 1,
+            'aep_path': 'C:/data/uploads/session-1/project-1/scene.aep',
+            'output_path': 'C:/data/exports/session-1/round1.mp4',
+            'work_dir': 'C:/data/exports/session-1/_nexrender_work/project-1-abc123',
+            'stdout_path': str(stdout_log),
+            'stderr_path': str(stderr_log),
+            'output': "Error: Couldn't find a result file",
+            'patch_persist_result': {
+                'success': False,
+                'output': 'AssertionError [ERR_ASSERTION]: job must have template.composition defined',
+            },
+        }
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+    monkeypatch.setattr(module.pm, 'set_active_project', fake_set_active_project)
+    monkeypatch.setattr(module.nr, 'render_project', fake_render_project)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['render_after_effects_project'].handler(
+        SimpleNamespace(arguments={'project_id': 'project-1', 'composition': 'Main'})
+    )
+
+    assert result.result_type == 'failure'
+    assert 'After Effects render failed.' in result.error
+    assert 'Composition: Main' in result.error
+    assert 'aerender ERROR: Composition Main not found' in result.error
+    assert 'job must have template.composition defined' in result.error
+
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['requested_composition'] == 'Main'
+    assert 'failure_details' in payload

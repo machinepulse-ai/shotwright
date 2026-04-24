@@ -35,7 +35,6 @@ WORKDIR C:/workspace
 COPY AGENTS.md C:/workspace/AGENTS.md
 COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
-COPY .github/skills/ C:/workspace/.github/skills/
 COPY scripts/ C:/workspace/scripts/
 COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
 

@@ -88,6 +88,36 @@ if (-not $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS) {
 }
 
 $gracefulShutdownSeconds = $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS
+$verifySkillsSsl = $true
+if ($env:SHOTWRIGHT_SKILLS_VERIFY_SSL) {
+    $normalizedSkillsVerifySsl = $env:SHOTWRIGHT_SKILLS_VERIFY_SSL.Trim().ToLowerInvariant()
+    if (@('0', 'false', 'no', 'off') -contains $normalizedSkillsVerifySsl) {
+        $verifySkillsSsl = $false
+    }
+}
+
+$skillsDownloadArgs = @(
+    'C:\workspace\scripts\skills\download_skills_bundle.py',
+    '--install-root', 'C:\workspace',
+    '--no-progress'
+)
+if ($env:SHOTWRIGHT_GITHUB_TOKEN) {
+    $skillsDownloadArgs += '--token-env'
+    $skillsDownloadArgs += 'SHOTWRIGHT_GITHUB_TOKEN'
+}
+elseif ($env:GITHUB_TOKEN) {
+    $skillsDownloadArgs += '--token-env'
+    $skillsDownloadArgs += 'GITHUB_TOKEN'
+}
+if (-not $verifySkillsSsl) {
+    $skillsDownloadArgs += '--no-verify-ssl'
+}
+
+Write-Host '[dev-container] Hydrating repo skills into .github/skills ...' -ForegroundColor Green
+& python @skillsDownloadArgs
+if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to hydrate .github/skills before starting dev processes.'
+}
 
 Write-Host '[dev-container] Starting backend and frontend inside the dev container ...' -ForegroundColor Green
 
@@ -104,7 +134,13 @@ if (-not (Test-Path (Join-Path $frontendNodeModules '.bin\webpack.cmd'))) {
 else {
     $expectedDependencyFingerprint = Get-FrontendDependencyFingerprint -Paths @($frontendPackageJson, $frontendPackageLock)
     $cachedDependencyFingerprint = if (Test-Path $frontendDependencyStamp) {
-        (Get-Content -Path $frontendDependencyStamp -Raw -ErrorAction SilentlyContinue).Trim()
+        $cachedDependencyFingerprintContent = Get-Content -Path $frontendDependencyStamp -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $cachedDependencyFingerprintContent) {
+            $cachedDependencyFingerprintContent.Trim()
+        }
+        else {
+            ''
+        }
     }
     else {
         ''

@@ -231,6 +231,23 @@ validation-data/
 	work/                                     nexrender 工作目录与日志
 ```
 
+## 🧠 Skills Bundle 维护流程
+
+Shotwright 的 Copilot skills 只放在 `.github/skills`。这个目录仍然不进 Git；当仓库启动流程或开发启动入口发现它缺失时，会从当前版本对应的 release bundle 自动补齐。
+
+如果你要手动补齐或刷新本地技能目录，可以执行：
+
+```powershell
+python .\scripts\skills\download_skills_bundle.py
+```
+
+然后直接修改 `.github/skills` 下的文件，再更新 [shotwright-config.json](shotwright-config.json) 里的 `tooling.skills.artifactVersion`，重新打包并发布：
+
+```powershell
+python .\scripts\skills\package_skills_bundle.py
+python .\scripts\skills\publish_skills_release.py
+```
+
 ## 📝 设计说明
 
 - 默认工作镜像是 `shotwright:runtime`，它会在镜像构建阶段把 GHCR 发布的 setup payload 复制进来，并完成 `setup-versions.yml` 当前选择版本的 AE 安装。

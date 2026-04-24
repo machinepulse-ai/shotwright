@@ -36,6 +36,10 @@
     },
     "ci": {
       "pythonVersion": "3.13"
+    },
+    "skills": {
+      "artifactVersion": "0.0.1",
+      "releaseRepo": "LiuChangFreeman/shotwright"
     }
   }
 }

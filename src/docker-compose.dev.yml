@@ -8,6 +8,10 @@
 #   - Frontend webpack-dev-server with HMR via source mount
 
 services:
+  mongo:
+    volumes:
+      - mongo-data-dev:C:/data/db
+
   backend:
     profiles: ["split-services"]
 
@@ -51,6 +55,10 @@ services:
       SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE: ${SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE:-}
       SHOTWRIGHT_DEBUG: "true"
       SHOTWRIGHT_API_PROXY_TARGET: http://127.0.0.1:8000
+      SHOTWRIGHT_SKILLS_VERIFY_SSL: ${SHOTWRIGHT_SKILLS_VERIFY_SSL:-true}
+      SHOTWRIGHT_SKILLS_DOWNLOAD_CONCURRENCY: ${SHOTWRIGHT_SKILLS_DOWNLOAD_CONCURRENCY:-1}
+      SHOTWRIGHT_SKILLS_DOWNLOAD_BUFFER_SIZE: ${SHOTWRIGHT_SKILLS_DOWNLOAD_BUFFER_SIZE:-65536}
+      SHOTWRIGHT_SKILLS_DOWNLOAD_BACKEND: ${SHOTWRIGHT_SKILLS_DOWNLOAD_BACKEND:-curl}
       PYTHONPATH: C:/workspace/src/backend
     volumes:
       - ../scripts:C:/workspace/scripts
@@ -68,7 +76,9 @@ services:
         target: \\.\pipe\docker_engine
 
 volumes:
+  mongo-data-dev:
   frontend-node-modules:
+    name: shotwright_frontend_node_modules_v2
   uploads:
   exports:
   hls:

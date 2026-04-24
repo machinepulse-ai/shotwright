@@ -119,7 +119,6 @@ COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
 COPY scripts/ C:/workspace/scripts/
 COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
-COPY .github/skills/ C:/workspace/.github/skills/
 COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
 COPY src/backend/app/ C:/workspace/src/backend/app/
 WORKDIR C:/workspace/src/backend
