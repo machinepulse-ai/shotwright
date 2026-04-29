@@ -29,6 +29,7 @@ from app.services.codex_config import (
     build_codex_sdk_config,
     load_local_codex_profile,
     resolve_codex_runtime_settings,
+    resolve_codex_runtime_home,
     resolve_openai_api_key,
 )
 from app.services.copilot_runtime import (
@@ -490,6 +491,8 @@ class ShotwrightCodexRuntimeManager:
     ) -> CodexBridgeClient:
         node_path = _first_non_empty(str(runtime_settings.get("codex_node_path") or ""))
         bridge_script = _first_non_empty(str(runtime_settings.get("codex_bridge_script") or ""))
+        codex_runtime_home = resolve_codex_runtime_home()
+        Path(codex_runtime_home).mkdir(parents=True, exist_ok=True)
         return CodexBridgeClient(
             node_binary=node_path or None,
             bridge_script=bridge_script or None,
@@ -497,6 +500,7 @@ class ShotwrightCodexRuntimeManager:
             base_url=str(runtime_settings.get("codex_base_url") or ""),
             codex_path_override=str(runtime_settings.get("codex_path_override") or ""),
             extra_env={
+                "CODEX_HOME": codex_runtime_home,
                 "http_proxy": str(runtime_settings.get("codex_http_proxy") or ""),
                 "https_proxy": str(runtime_settings.get("codex_https_proxy") or ""),
                 "no_proxy": str(runtime_settings.get("codex_no_proxy") or ""),

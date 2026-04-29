@@ -91,7 +91,9 @@ def _event_type_name(event) -> str:
 
 def _event_summary(event_type: str, data: dict) -> str:
     if event_type == "session.turn.started":
-        return "Turn submitted to Copilot runtime"
+        provider = str(data.get("provider") or "copilot").strip().lower()
+        provider_name = "Codex" if provider == "codex" else "Copilot"
+        return f"Turn submitted to {provider_name} runtime"
     if event_type == "session.cancelled":
         return data.get("message") or "Turn cancelled"
     if event_type == "session.timeout":

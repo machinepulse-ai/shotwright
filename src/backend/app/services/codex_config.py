@@ -13,6 +13,15 @@ from app.config import settings
 
 _CODEX_DIR_NAME = ".codex"
 _SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_SDK_CONFIG_KEYS = {
+    "model",
+    "model_provider",
+    "model_providers",
+    "model_reasoning_effort",
+    "model_max_output_tokens",
+    "preferred_auth_method",
+    "disable_response_storage",
+}
 
 
 def _first_non_empty(*values: str | None) -> str:
@@ -111,12 +120,20 @@ def build_codex_sdk_config(local_profile: dict[str, Any] | None = None) -> dict[
     if not isinstance(config, dict):
         return {}
 
-    sdk_config = deepcopy(config)
+    sdk_config = {key: deepcopy(value) for key, value in config.items() if key in _SDK_CONFIG_KEYS}
     # Runtime credentials are passed through apiKey/env, never through this
     # serialized config object.
     sdk_config.pop("OPENAI_API_KEY", None)
     sdk_config.pop("openai_api_key", None)
     return sdk_config
+
+
+def resolve_codex_runtime_home() -> str:
+    return _first_non_empty(
+        _configured_setting("codex_runtime_home"),
+        os.environ.get("SHOTWRIGHT_CODEX_RUNTIME_HOME"),
+        str(Path(settings.container_data_root) / "codex-runtime"),
+    )
 
 
 def resolve_openai_api_key(admin_doc: dict[str, Any] | None = None) -> str:

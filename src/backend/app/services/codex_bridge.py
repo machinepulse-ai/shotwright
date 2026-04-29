@@ -6,6 +6,8 @@ import asyncio
 import inspect
 import json
 import os
+import subprocess
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +56,10 @@ def _first_non_empty(*values: str | None) -> str:
 def default_bridge_script_path() -> Path:
     configured_path = _first_non_empty(settings.codex_bridge_script)
     return Path(configured_path) if configured_path else _DEFAULT_BRIDGE_SCRIPT
+
+
+async def _await_callback_result(awaitable: Awaitable[Any]) -> Any:
+    return await awaitable
 
 
 def build_codex_input(content: str, attachments: list[dict[str, Any]] | None = None) -> str | list[dict[str, str]]:
@@ -198,7 +204,8 @@ class CodexBridgeClient:
         request["env"] = {
             key: value
             for key, value in bridge_env.items()
-            if key.upper() in {"PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "OPENAI_API_KEY"}
+            if key.upper()
+            in {"PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "OPENAI_API_KEY", "CODEX_HOME"}
             or key.lower() in {"http_proxy", "https_proxy", "no_proxy"}
         }
         return request
@@ -251,35 +258,99 @@ class CodexBridgeClient:
         if not self.bridge_script.is_file():
             raise CodexBridgeError(f"Codex bridge script not found: {self.bridge_script}")
 
-        process = await asyncio.create_subprocess_exec(
-            self.node_binary,
-            str(self.bridge_script),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_build_child_env(self.extra_env),
+        loop = asyncio.get_running_loop()
+        cancel_event = threading.Event()
+        process_ref: dict[str, subprocess.Popen[str]] = {}
+        worker = loop.run_in_executor(
+            None,
+            self._run_request_blocking,
+            request,
+            on_event,
+            loop,
+            cancel_event,
+            process_ref,
         )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        assert process.stderr is not None
 
-        stderr_task = asyncio.create_task(process.stderr.read())
+        try:
+            return await worker
+        except asyncio.CancelledError:
+            cancel_event.set()
+            process = process_ref.get("process")
+            if process and process.poll() is None:
+                process.kill()
+            raise
+
+    def _dispatch_event_callback(
+        self,
+        on_event: CodexBridgeEventHandler | None,
+        event: dict[str, Any],
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        if not on_event:
+            return
+        callback_result = on_event(event)
+        if inspect.isawaitable(callback_result):
+            future = asyncio.run_coroutine_threadsafe(_await_callback_result(callback_result), loop)
+            future.result()
+
+    def _run_request_blocking(
+        self,
+        request: dict[str, Any],
+        on_event: CodexBridgeEventHandler | None,
+        loop: asyncio.AbstractEventLoop,
+        cancel_event: threading.Event,
+        process_ref: dict[str, subprocess.Popen[str]],
+    ) -> CodexBridgeTurnResult:
+        try:
+            process = subprocess.Popen(
+                [self.node_binary, str(self.bridge_script)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=_build_child_env(self.extra_env),
+            )
+        except OSError as exc:
+            raise CodexBridgeError(f"Failed to start Codex bridge: {exc}") from exc
+
+        process_ref["process"] = process
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            if process.poll() is None:
+                process.kill()
+            raise CodexBridgeError("Codex bridge process did not expose stdio pipes.")
+
         complete_record: dict[str, Any] | None = None
         error_record: dict[str, Any] | None = None
         events: list[dict[str, Any]] = []
+        stderr_chunks: list[str] = []
+
+        def read_stderr() -> None:
+            stderr_chunks.append(process.stderr.read())
+
+        stderr_thread = threading.Thread(target=read_stderr, name="codex-bridge-stderr", daemon=True)
+        stderr_thread.start()
 
         try:
-            process.stdin.write(json.dumps(request, ensure_ascii=False).encode("utf-8"))
-            await process.stdin.drain()
-            process.stdin.close()
-            await process.stdin.wait_closed()
+            try:
+                process.stdin.write(json.dumps(request, ensure_ascii=False))
+                process.stdin.close()
+            except OSError:
+                # The bridge may have failed before reading stdin. Continue so
+                # the structured error or stderr can be reported below.
+                pass
 
             while True:
-                line = await process.stdout.readline()
+                if cancel_event.is_set():
+                    if process.poll() is None:
+                        process.kill()
+                    break
+                line = process.stdout.readline()
                 if not line:
                     break
                 try:
-                    record = json.loads(line.decode("utf-8"))
+                    record = json.loads(line)
                 except json.JSONDecodeError as exc:
                     raise CodexBridgeError(f"Codex bridge emitted invalid JSONL: {line!r}") from exc
 
@@ -287,17 +358,15 @@ class CodexBridgeClient:
                 if record_type == "event":
                     event = record.get("event") or {}
                     events.append(event)
-                    if on_event:
-                        callback_result = on_event(event)
-                        if inspect.isawaitable(callback_result):
-                            await callback_result
+                    self._dispatch_event_callback(on_event, event, loop)
                 elif record_type == "complete":
                     complete_record = record
                 elif record_type == "error":
                     error_record = record
 
-            exit_code = await process.wait()
-            stderr = (await stderr_task).decode("utf-8", errors="replace")
+            exit_code = process.wait()
+            stderr_thread.join(timeout=5)
+            stderr = "".join(stderr_chunks)
 
             if error_record:
                 raise CodexBridgeError(
@@ -323,12 +392,7 @@ class CodexBridgeClient:
                 usage=complete_record.get("usage") if isinstance(complete_record.get("usage"), dict) else None,
                 events=events,
             )
-        except asyncio.CancelledError:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            raise
         finally:
-            if not stderr_task.done():
-                stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
+            process_ref.pop("process", None)
+            if process.poll() is None:
+                process.kill()

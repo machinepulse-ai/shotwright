@@ -84,7 +84,7 @@ elseif (-not ($env:PYTHONPATH -split ';' | Where-Object { $_ -eq $backendRoot })
     $env:PYTHONPATH = "$backendRoot;$env:PYTHONPATH"
 }
 if (-not $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS) {
-    $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS = '120'
+    $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS = '12'
 }
 
 $gracefulShutdownSeconds = $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS

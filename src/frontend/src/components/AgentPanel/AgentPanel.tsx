@@ -891,7 +891,7 @@ function localizeFrameworkMessage(value: string | null | undefined, locale: stri
     return copy.agent.timelineDetails.summary.turnTimedOut;
   }
 
-  if (/^Turn submitted to Copilot runtime$/i.test(trimmed)) {
+  if (/^Turn submitted to (?:Copilot|Codex|Agent) runtime$/i.test(trimmed)) {
     return copy.agent.timelineDetails.summary.turnSubmitted;
   }
 
@@ -986,7 +986,7 @@ function getTimelineExpandedSummary(event: SessionEvent, copy: TranslationCopy, 
   if (/^Tool (start|complete):/i.test(event.summary)) {
     return localizedToolName || event.summary;
   }
-  if (/^Turn submitted to Copilot runtime$/i.test(event.summary)) {
+  if (/^Turn submitted to (?:Copilot|Codex|Agent) runtime$/i.test(event.summary)) {
     return copy.agent.timelineDetails.summary.turnSubmitted;
   }
   if (/^Turn cancelled$/i.test(event.summary)) {

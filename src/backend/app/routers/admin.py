@@ -119,7 +119,12 @@ async def update_openai_api_key(body: OpenAIKeyUpdate):
 
 @router.get("/copilot-model-options", response_model=list[CopilotModelOption], dependencies=[Depends(require_admin)])
 async def list_admin_copilot_model_options():
-    return await copilot_runtime_manager.list_available_models()
+    try:
+        return await copilot_runtime_manager.list_available_models()
+    except ValueError as exc:
+        if "GitHub token is not configured" in str(exc):
+            return []
+        raise
 
 
 @router.get("/dashboard", dependencies=[Depends(require_admin)])

@@ -50,6 +50,12 @@ def test_codex_sdk_config_does_not_serialize_api_key(monkeypatch, tmp_path) -> N
         """
 model = "gpt-5.5"
 OPENAI_API_KEY = "do-not-forward"
+
+[tui.model_availability_nux]
+"gpt-5.5" = 2
+
+[plugins."browser-use@openai-bundled"]
+enabled = true
 """,
         encoding="utf-8",
     )
@@ -59,3 +65,11 @@ OPENAI_API_KEY = "do-not-forward"
 
     assert sdk_config["model"] == "gpt-5.5"
     assert "OPENAI_API_KEY" not in sdk_config
+    assert "tui" not in sdk_config
+    assert "plugins" not in sdk_config
+
+
+def test_codex_runtime_home_defaults_to_data_root(monkeypatch) -> None:
+    monkeypatch.delenv("SHOTWRIGHT_CODEX_RUNTIME_HOME", raising=False)
+
+    assert codex_config.resolve_codex_runtime_home().endswith("codex-runtime")

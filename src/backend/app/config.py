@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     codex_node_path: str = ""
     codex_bridge_script: str = ""
     codex_path_override: str = ""
+    codex_runtime_home: str = ""
     codex_base_url: str = ""
     codex_model: str = "gpt-5.4"
     codex_reasoning_effort: str = "high"
