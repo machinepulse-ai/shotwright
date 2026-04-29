@@ -2,9 +2,12 @@ export interface Session {
   _id: string;
   name: string;
   status: "idle" | "running" | "awaiting_input" | "error" | "closed";
+  agent_provider: AgentProvider;
   copilot_model: string;
   copilot_reasoning_effort: ReasoningEffort | null;
   copilot_session_id: string | null;
+  agent_thread_id: string | null;
+  codex_thread_id: string | null;
   container_id: string | null;
   active_project_id: string | null;
   latest_render_path: string | null;
@@ -15,10 +18,17 @@ export interface Session {
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type AgentProvider = "copilot" | "codex";
 
 export interface CopilotModelOption {
   id: string;
   name: string;
+  provider?: string | null;
+  model_provider?: string | null;
+  brand?: string | null;
+  family?: string | null;
+  submodel?: string | null;
+  display_name?: string | null;
   supports_reasoning_effort: boolean;
   supported_reasoning_efforts: ReasoningEffort[];
   default_reasoning_effort: ReasoningEffort | null;
@@ -200,7 +210,9 @@ export interface DashboardData {
 }
 
 export interface AdminSettings {
+  agent_provider: AgentProvider;
   github_token_set: boolean;
+  openai_api_key_set: boolean;
   default_copilot_model: string;
   default_copilot_reasoning_effort: ReasoningEffort | null;
   copilot_turn_timeout_seconds: number;
@@ -210,4 +222,20 @@ export interface AdminSettings {
   copilot_http_proxy: string;
   copilot_https_proxy: string;
   copilot_no_proxy: string;
+  codex_node_path: string;
+  codex_bridge_script: string;
+  codex_path_override: string;
+  codex_base_url: string;
+  codex_model: string;
+  codex_reasoning_effort: ReasoningEffort | null;
+  codex_turn_timeout_seconds: number;
+  codex_workspace_root: string;
+  codex_approval_policy: string;
+  codex_sandbox_mode: string;
+  codex_network_access_enabled: boolean;
+  codex_skip_git_repo_check: boolean;
+  codex_web_search_mode: string;
+  codex_http_proxy: string;
+  codex_https_proxy: string;
+  codex_no_proxy: string;
 }

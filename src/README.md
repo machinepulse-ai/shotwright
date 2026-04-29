@@ -17,6 +17,7 @@ src/
 │   │   ├── routers/          API 路由
 │   │   ├── services/         业务逻辑
 │   │   └── middleware/       认证中间件
+│   ├── codex-bridge/         Node.js bridge for @openai/codex-sdk
 │   └── pyproject.toml
 ├── frontend/         React 18 + TypeScript + Webpack 5
 │   ├── src/
@@ -107,6 +108,14 @@ npm run dev
 - 会话数据管理
 - 容器实例管理
 - 仪表盘统计
+
+### Codex Bridge
+- `src/backend/codex-bridge/bridge.mjs` 是同容器内的 Node bridge，Python 后端通过 JSONL stdin/stdout 调用它。
+- bridge 使用 `@openai/codex-sdk` 的 streamed thread API，保留 `thread_id`、最终回复、usage 和中间事件。
+- 后端 Python client 在 `app/services/codex_bridge.py`，Codex runtime provider 在 `app/services/codex_runtime.py`。
+- Admin 页可以在 Copilot 和 Codex Bridge 之间切换全局 agent provider，并分别保存 GitHub Token 与 OpenAI API Key。
+- Codex 默认值会优先参考容器可见的 `.codex/config.toml` 与 `.codex/auth.json`（可通过 `SHOTWRIGHT_CODEX_HOME` 指定），再回落到环境变量和应用默认值；API 响应只返回 Key 是否已设置，不返回密钥内容。
+- 容器构建会在 backend 镜像内安装 `src/backend/codex-bridge/package-lock.json` 锁定的 Node 依赖。
 
 ## 升级路径
 

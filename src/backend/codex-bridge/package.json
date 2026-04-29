@@ -1,0 +1,16 @@
+{
+  "name": "shotwright-codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node bridge that exposes the OpenAI Codex SDK to the Python Shotwright API.",
+  "dependencies": {
+    "@openai/codex-sdk": "0.125.0"
+  },
+  "scripts": {
+    "check": "node --check bridge.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

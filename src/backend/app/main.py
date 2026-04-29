@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.database import close_db, connect_db
 from app.routers import admin, agent, containers, projects, sessions, streaming
-from app.services.copilot_runtime import runtime_manager
+from app.services.agent_runtime import runtime_manager
 
 
 @asynccontextmanager

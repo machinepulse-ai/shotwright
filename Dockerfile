@@ -117,12 +117,18 @@ WORKDIR C:/workspace
 COPY AGENTS.md C:/workspace/AGENTS.md
 COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
-COPY scripts/ C:/workspace/scripts/
+COPY scripts/install/ensure_pwsh_compat.ps1 C:/workspace/scripts/install/ensure_pwsh_compat.ps1
+COPY scripts/install/install_pyproject_dependencies.py C:/workspace/scripts/install/install_pyproject_dependencies.py
 COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
 COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
+RUN & python C:/workspace/scripts/install/install_pyproject_dependencies.py C:/workspace/src/backend/pyproject.toml --index-url $env:PIP_INDEX_URL
+COPY src/backend/codex-bridge/package.json src/backend/codex-bridge/package-lock.json C:/workspace/src/backend/codex-bridge/
+RUN Set-Location C:/workspace/src/backend/codex-bridge; \
+      & 'C:/Program Files/nodejs/npm.cmd' ci --omit=dev --no-progress --fetch-retries 5 --fetch-timeout 120000
+COPY scripts/ C:/workspace/scripts/
 COPY src/backend/app/ C:/workspace/src/backend/app/
+COPY src/backend/codex-bridge/ C:/workspace/src/backend/codex-bridge/
 WORKDIR C:/workspace/src/backend
-RUN & python -m uv pip install --system --index-url $env:PIP_INDEX_URL .
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -134,8 +140,8 @@ FROM base AS frontend-build
 
 WORKDIR C:/frontend
 
-COPY src/frontend/package.json ./
-RUN & 'C:/Program Files/nodejs/npm.cmd' install --no-progress
+COPY src/frontend/package.json src/frontend/package-lock.json ./
+RUN & 'C:/Program Files/nodejs/npm.cmd' ci --no-progress
 
 COPY src/frontend/ ./
 RUN & 'C:/Program Files/nodejs/npm.cmd' run build

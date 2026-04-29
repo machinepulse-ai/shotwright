@@ -10,7 +10,7 @@ from app.config import settings
 from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
 from app.models.session import CopilotModelOption, SessionCreate, SessionInDB, SessionStatus, SessionUpdate
 from app.services import container_manager as cm
-from app.services.copilot_runtime import runtime_manager
+from app.services.agent_runtime import runtime_manager
 from app.services.session_streams import publish_session_updated
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -19,14 +19,18 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 @router.post("", response_model=SessionInDB, status_code=201)
 async def create_session(body: SessionCreate):
     now = datetime.now(timezone.utc)
+    agent_provider = await runtime_manager.get_active_provider()
     default_model, default_reasoning_effort = await runtime_manager.resolve_default_session_settings()
     doc = {
         "_id": str(uuid4()),
         "name": body.name,
         "status": SessionStatus.idle.value,
+        "agent_provider": agent_provider,
         "copilot_model": default_model,
         "copilot_reasoning_effort": default_reasoning_effort,
         "copilot_session_id": None,
+        "agent_thread_id": None,
+        "codex_thread_id": None,
         "container_id": None,
         "active_project_id": None,
         "latest_render_path": None,

@@ -33,6 +33,7 @@ from app.database import (
 )
 from app.models.session import ReasoningEffort
 from app.services.agent_tools import build_shotwright_tools
+from app.services.agent_model_metadata import build_agent_model_metadata
 from app.services import nexrender as nr
 from app.services.session_streams import (
     publish_context_refresh,
@@ -619,6 +620,7 @@ class ShotwrightCopilotRuntimeManager:
                     {
                         "id": model.id,
                         "name": model.name,
+                        **build_agent_model_metadata(model.id, name=model.name, provider="copilot"),
                         "supports_reasoning_effort": bool(model.capabilities.supports.reasoning_effort),
                         "supported_reasoning_efforts": supported_reasoning_efforts,
                         "default_reasoning_effort": model.default_reasoning_effort,

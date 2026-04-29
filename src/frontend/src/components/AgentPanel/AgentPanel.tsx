@@ -50,6 +50,13 @@ import {
   StoryboardInfo,
 } from "../../types";
 import { Locale, TranslationCopy, useI18n } from "../../i18n";
+import {
+  formatAgentModelLabel,
+  formatModelOptionLabel,
+  getAgentModelDescriptor,
+  getAgentRuntimeLabel,
+  getSessionModelToneClass,
+} from "../../utils/agentModel";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
 import "./AgentPanel.css";
@@ -1253,6 +1260,15 @@ function isGenericToolSummary(summary: string, copy: TranslationCopy) {
   return genericSummaries.has(normalized) || /^Tool (start|complete):/i.test(normalized);
 }
 
+function getEventAuthoredSummary(event: SessionEvent | null | undefined, copy: TranslationCopy, locale: string) {
+  if (!event?.summary) return "";
+  const localizedSummary = localizeFrameworkMessage(event.summary, locale, copy) ?? event.summary;
+  const candidate = maybePreferLocalizedFallbackTitle(localizedSummary, locale) || localizedSummary;
+  const normalized = candidate.trim();
+  if (!normalized || normalized === event.type || isGenericToolSummary(normalized, copy)) return "";
+  return normalized;
+}
+
 function buildMergedExecutionEvent(stepDraft: ExecutionStepDraft): SessionEvent | null {
   const leadEvent = stepDraft.completeEvent ?? stepDraft.startEvent ?? stepDraft.relatedEvents[stepDraft.relatedEvents.length - 1] ?? null;
   if (!leadEvent) return null;
@@ -1275,6 +1291,14 @@ function buildMergedExecutionEvent(stepDraft: ExecutionStepDraft): SessionEvent 
 }
 
 function getStepTitleFromEvents(stepDraft: ExecutionStepDraft, mergedEvent: SessionEvent, copy: TranslationCopy, locale: string) {
+  const authoredSummary =
+    getEventAuthoredSummary(mergedEvent, copy, locale) ||
+    getEventAuthoredSummary(stepDraft.completeEvent, copy, locale) ||
+    getEventAuthoredSummary(stepDraft.startEvent, copy, locale);
+  if (authoredSummary) {
+    return authoredSummary;
+  }
+
   const mergedSummary = getTimelineExpandedSummary(mergedEvent, copy, locale).trim();
   if (mergedSummary && !isGenericToolSummary(mergedSummary, copy) && mergedSummary !== mergedEvent.type) {
     return mergedSummary;
@@ -1679,9 +1703,14 @@ function getReasoningSelectLabel(effort: ReasoningEffort, locale: string, copy: 
 }
 
 function buildModelFallbackOption(session: Session): CopilotModelOption {
+  const descriptor = getAgentModelDescriptor(session.agent_provider, session.copilot_model);
   return {
     id: session.copilot_model,
     name: session.copilot_model,
+    provider: session.agent_provider,
+    brand: descriptor.brandLabel,
+    submodel: descriptor.submodelLabel,
+    display_name: descriptor.modelLabel,
     supports_reasoning_effort: Boolean(session.copilot_reasoning_effort),
     supported_reasoning_efforts: session.copilot_reasoning_effort ? [session.copilot_reasoning_effort] : [],
     default_reasoning_effort: session.copilot_reasoning_effort,
@@ -1849,40 +1878,6 @@ function upsertSessionRecord(sessions: Session[], nextSession: Session) {
 
 function buildRenderUrl(sessionId: string, latestRenderPath: string | null | undefined) {
   return latestRenderPath ? `/api/streams/renders/${sessionId}` : null;
-}
-
-function getSessionModelToneClass(model: string) {
-  const normalized = model.trim().toLowerCase();
-  if (normalized.includes("gpt-5.4-mini")) return "tone-gpt-54-mini";
-  if (normalized.includes("gpt-5.4")) return "tone-gpt-54";
-  if (normalized.startsWith("gpt")) return "tone-gpt";
-  if (normalized.includes("claude") && normalized.includes("haiku")) return "tone-claude-haiku";
-  if (normalized.includes("claude") && normalized.includes("sonnet")) return "tone-claude-sonnet";
-  if (normalized.includes("claude")) return "tone-claude";
-  if (normalized.includes("gemini")) return "tone-gemini";
-  if (normalized.includes("qwen")) return "tone-qwen";
-  return "tone-neutral";
-}
-
-function formatSessionModelLabel(model: string) {
-  const normalized = model.trim();
-  if (!normalized) return "Unknown";
-
-  if (/^gpt-/i.test(normalized)) {
-    return normalized.replace(/^gpt-/i, "GPT-").replace(/-mini$/i, " mini");
-  }
-
-  return normalized
-    .split("-")
-    .map((segment, index) => {
-      if (index === 0 && /^claude$/i.test(segment)) return "Claude";
-      if (index === 0 && /^gemini$/i.test(segment)) return "Gemini";
-      if (index === 0 && /^qwen$/i.test(segment)) return "Qwen";
-      if (/^mini$/i.test(segment)) return "mini";
-      if (!segment) return segment;
-      return segment.charAt(0).toUpperCase() + segment.slice(1);
-    })
-    .join(" ");
 }
 
 const MARKDOWN_LANGUAGE_LABELS: Record<string, { "zh-CN": string; "en-US": string }> = {
@@ -2214,10 +2209,29 @@ export default function AgentPanel({
     return sessionModelOptions.find((option) => option.id === draftModel) ?? null;
   }, [draftModel, sessionModelOptions]);
 
+  const currentModelOption = useMemo(() => {
+    if (!currentSession) return null;
+    return sessionModelOptions.find((option) => option.id === currentSession.copilot_model) ?? null;
+  }, [currentSession, sessionModelOptions]);
+
+  const currentModelDescriptor = useMemo(() => {
+    if (!currentSession) return null;
+    return getAgentModelDescriptor(currentSession.agent_provider, currentSession.copilot_model, currentModelOption);
+  }, [currentModelOption, currentSession]);
+
   const currentModelLabel = useMemo(() => {
     if (!currentSession) return copy.common.copilot;
-    return sessionModelOptions.find((option) => option.id === currentSession.copilot_model)?.name || currentSession.copilot_model;
-  }, [copy.common.copilot, currentSession, sessionModelOptions]);
+    return currentModelDescriptor?.combinedLabel || formatAgentModelLabel(currentSession.agent_provider, currentSession.copilot_model);
+  }, [copy.common.copilot, currentModelDescriptor?.combinedLabel, currentSession]);
+
+  const currentRuntimeId = useMemo(() => {
+    const session = context?.session || currentSession;
+    if (!session) return null;
+    if (session.agent_provider === "codex") {
+      return session.codex_thread_id || session.agent_thread_id || null;
+    }
+    return session.copilot_session_id || session.agent_thread_id || null;
+  }, [context?.session, currentSession]);
 
   const sending = Boolean(currentSession && sendingSessionId === currentSession._id);
   const stoppingGeneration = Boolean(currentSession && stoppingGenerationSessionId === currentSession._id);
@@ -2451,9 +2465,16 @@ export default function AgentPanel({
     const chips: MetaChip[] = [];
 
     chips.push({
+      key: "agent",
+      label: copy.agent.sessionPanelFields.runtime,
+      value: getAgentRuntimeLabel(currentSession.agent_provider),
+      tone: "primary",
+    });
+
+    chips.push({
       key: "model",
       label: copy.agent.sessionSettingsFields.model,
-      value: currentModelLabel,
+      value: currentModelDescriptor?.modelLabel || currentSession.copilot_model,
       tone: "primary",
     });
 
@@ -2497,12 +2518,13 @@ export default function AgentPanel({
     copy.agent.containerPrefix,
     copy.agent.noActiveSession,
     copy.agent.sessionPanelFields.activeProject,
+    copy.agent.sessionPanelFields.runtime,
     copy.agent.sessionPanelFields.status,
     copy.agent.sessionSettingsFields.model,
     copy.agent.sessionSettingsFields.reasoning,
     copy.common.notSpecified,
     copy.common.reasoningEfforts,
-    currentModelLabel,
+    currentModelDescriptor?.modelLabel,
     currentSession,
     sessionStatus,
     sessionStatusLabels,
@@ -3751,7 +3773,7 @@ export default function AgentPanel({
             {sessionModelOptions.length ? (
               sessionModelOptions.map((option) => (
                 <option key={option.id} value={option.id}>
-                  {option.name}
+                  {formatModelOptionLabel(option)}
                 </option>
               ))
             ) : (
@@ -3836,7 +3858,7 @@ export default function AgentPanel({
                         <div className="session-title-copy">
                           <span className="session-name">{session.name}</span>
                           <span className={`session-model-chip ${getSessionModelToneClass(session.copilot_model)}`}>
-                            {formatSessionModelLabel(session.copilot_model)}
+                            {formatAgentModelLabel(session.agent_provider, session.copilot_model)}
                           </span>
                         </div>
                       </div>
@@ -4269,7 +4291,7 @@ export default function AgentPanel({
                   <h3 title={currentSession.name}>{currentSession.name}</h3>
                 </div>
                 <div className="session-overview-badges">
-                  <span className={`session-model-chip ${getSessionModelToneClass(currentSession.copilot_model)}`}>
+                  <span className={`session-model-chip ${currentModelDescriptor?.toneClass || getSessionModelToneClass(currentSession.copilot_model)}`}>
                     {currentModelLabel}
                   </span>
                   <span className={`status-badge status-${sessionStatus}`}>{sessionStatusLabels[sessionStatus]}</span>
@@ -4295,9 +4317,11 @@ export default function AgentPanel({
               </div>
 
               <div className="session-runtime-meta">
-                <span className="eyebrow">{copy.agent.sessionPanelFields.runtime}</span>
+                <span className="eyebrow">
+                  {copy.agent.sessionPanelFields.runtime} · {getAgentRuntimeLabel(currentSession.agent_provider)}
+                </span>
                 <span className="mono" data-testid="session-runtime-id">
-                  {context?.session.copilot_session_id || copy.common.notStarted}
+                  {currentRuntimeId || copy.common.notStarted}
                 </span>
               </div>
 

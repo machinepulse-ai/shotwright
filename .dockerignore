@@ -14,7 +14,12 @@ node_modules/
 !src/backend/.python-version
 !src/backend/app/
 !src/backend/app/**
+!src/backend/codex-bridge/
+!src/backend/codex-bridge/package.json
+!src/backend/codex-bridge/package-lock.json
+!src/backend/codex-bridge/bridge.mjs
 !src/frontend/package.json
+!src/frontend/package-lock.json
 !src/frontend/webpack.config.js
 !src/frontend/tsconfig.json
 !src/frontend/public/

@@ -13,7 +13,7 @@ from app.models.media import ReferenceVideoInfo, RenderOutputInfo, StoryboardInf
 from app.models.project import ProjectInfo
 from app.models.session import SessionInDB
 from app.services.agent_tools import list_session_image_attachments
-from app.services.copilot_runtime import runtime_manager
+from app.services.agent_runtime import runtime_manager
 from app.services.session_streams import session_stream_broker
 from app.services import container_manager as cm
 from app.services import nexrender as nr

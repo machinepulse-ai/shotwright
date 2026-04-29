@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     shared_hls_volume: str = "shotwright_hls"
 
     # --- Copilot ---
+    agent_provider: str = "copilot"
     github_token: str = ""
     copilot_model: str = "gpt-5.4"
     copilot_reasoning_effort: str = "high"
@@ -37,6 +38,25 @@ class Settings(BaseSettings):
     copilot_https_proxy: str = ""
     copilot_no_proxy: str = ""
     copilot_turn_timeout_seconds: float = 900.0
+
+    # --- Codex bridge ---
+    openai_api_key: str = ""
+    codex_node_path: str = ""
+    codex_bridge_script: str = ""
+    codex_path_override: str = ""
+    codex_base_url: str = ""
+    codex_model: str = "gpt-5.4"
+    codex_reasoning_effort: str = "high"
+    codex_turn_timeout_seconds: float = 900.0
+    codex_workspace_root: str = "C:\\workspace"
+    codex_approval_policy: str = "never"
+    codex_sandbox_mode: str = "workspace-write"
+    codex_network_access_enabled: bool = False
+    codex_skip_git_repo_check: bool = False
+    codex_web_search_mode: str = ""
+    codex_http_proxy: str = ""
+    codex_https_proxy: str = ""
+    codex_no_proxy: str = ""
 
     # --- Paths ---
     upload_dir: str = "C:\\data\\uploads"

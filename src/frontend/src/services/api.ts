@@ -365,9 +365,13 @@ export function openAgentSessionStream(
 
 // --- Admin ---
 export const adminLogin = (password: string) => api.post("/admin/login", { password });
+export const getAdminCopilotModelOptions = (signal?: AbortSignal) =>
+  api.get("/admin/copilot-model-options", { signal });
 export const getAdminSettings = () => api.get("/admin/settings");
 export const updateGithubToken = (token: string) =>
   api.put("/admin/github-token", { github_token: token });
+export const updateOpenAIKey = (key: string) =>
+  api.put("/admin/openai-api-key", { openai_api_key: key });
 export const updateAdminSettings = (settings: Record<string, unknown>) =>
   api.put("/admin/settings", settings);
 export const getAdminDashboard = () => api.get("/admin/dashboard");
