@@ -61,7 +61,7 @@ _CODEX_TOOL_COMMAND_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SHELL_ARG_RE_TEMPLATE = r"--{name}(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))"
-_DIRECT_TOOL_MAX_STEPS = 10
+_DIRECT_TOOL_MAX_STEPS = 18
 _DIRECT_TOOL_PLAN_SCHEMA: dict = {
     "type": "object",
     "properties": {
