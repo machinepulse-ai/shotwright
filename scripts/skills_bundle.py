@@ -43,6 +43,9 @@ DOWNLOAD_BUFFER_SIZE = int(
     os.environ.get("SHOTWRIGHT_SKILLS_DOWNLOAD_BUFFER_SIZE", str(1024 * 1024 * 8))
 )
 DOWNLOAD_BACKEND = os.environ.get("SHOTWRIGHT_SKILLS_DOWNLOAD_BACKEND", "").strip().lower()
+PLACEHOLDER_SKILL_MARKERS = (
+    "local placeholder skill descriptor",
+)
 
 
 class SkillsBundleError(RuntimeError):
@@ -361,7 +364,8 @@ def _download_file(
     download_concurrency: int = DOWNLOAD_CONCURRENCY,
     show_progress: bool = False,
 ) -> None:
-    if DOWNLOAD_BACKEND == "curl":
+    has_authorization_header = any(key.lower() == "authorization" for key in (headers or {}))
+    if DOWNLOAD_BACKEND == "curl" and not has_authorization_header:
         _download_file_with_curl(
             url,
             destination,
@@ -473,7 +477,7 @@ def _download_file_with_curl(
         stderr = exc.stderr.strip() if exc.stderr else ""
         raise SkillsBundleError(
             f"Failed to download {url} with curl: {stderr or f'exit code {exc.returncode}'}"
-        ) from exc
+        )
 
     if not destination.exists() or destination.stat().st_size == 0:
         stderr = completed.stderr.strip() if completed.stderr else ""
@@ -611,11 +615,20 @@ def _has_skill_descriptors(skills_root: Path) -> bool:
         return False
     try:
         for entry in skills_root.iterdir():
-            if entry.is_dir() and (entry / "SKILL.md").is_file():
+            skill_path = entry / "SKILL.md"
+            if entry.is_dir() and skill_path.is_file() and not _is_placeholder_skill_descriptor(skill_path):
                 return True
     except OSError:
         return False
     return False
+
+
+def _is_placeholder_skill_descriptor(skill_path: Path) -> bool:
+    try:
+        text = skill_path.read_text(encoding="utf-8", errors="ignore").lower()
+    except OSError:
+        return False
+    return any(marker in text for marker in PLACEHOLDER_SKILL_MARKERS)
 
 
 def _is_local_repo_skills_tree(skills_root: Path, source_repo_root: Path) -> bool:

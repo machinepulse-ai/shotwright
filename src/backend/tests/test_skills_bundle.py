@@ -187,3 +187,18 @@ def test_ensure_skills_bundle_uses_local_repo_tree_without_downloading(
 
     assert result["status"] == "already-present"
     assert result["skillsRoot"] == str(repo_root / ".github" / "skills")
+
+
+def test_placeholder_skill_descriptor_does_not_satisfy_installed_bundle(tmp_path: Path) -> None:
+    skills_root = tmp_path / ".github" / "skills"
+    skill_root = skills_root / "after-effects-scripting-guide"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        "---\n"
+        "name: after-effects-scripting-guide\n"
+        "description: Local placeholder skill descriptor used while the bundle is unavailable.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+
+    assert module._has_skill_descriptors(skills_root) is False

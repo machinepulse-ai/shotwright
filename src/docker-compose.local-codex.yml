@@ -1,0 +1,8 @@
+services:
+  dev:
+    environment:
+      SHOTWRIGHT_AGENT_PROVIDER: codex
+      SHOTWRIGHT_CODEX_HOME: C:/Users/ContainerAdministrator/.codex
+      SHOTWRIGHT_CODEX_RUNTIME_HOME: C:/data/codex-runtime
+    volumes:
+      - C:/Users/super/.codex:C:/Users/ContainerAdministrator/.codex:ro

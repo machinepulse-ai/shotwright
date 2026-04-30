@@ -27,6 +27,26 @@ def test_build_nexrender_script_job_omits_composition_when_unspecified() -> None
     assert job["ae_render"]["script_only"] is True
 
 
+def test_apply_jsx_compatibility_rewrites_project_items_add_solid() -> None:
+    script = "var solid = proj.items.addSolid([1, 0, 0], 'Red', W, H, 1, DUR);"
+
+    rewritten, rewrites = module._apply_jsx_compatibility_rewrites(script)
+
+    assert rewrites == ["project_items_addSolid"]
+    assert "function __shotwrightCreateSolidFootage" in rewritten
+    assert "proj.items.addSolid" not in rewritten
+    assert "__shotwrightCreateSolidFootage([1, 0, 0], 'Red', W, H, 1, DUR)" in rewritten
+
+
+def test_apply_jsx_compatibility_rewrites_leaves_normal_script_unchanged() -> None:
+    script = "var solid = comp.layers.addSolid([1, 0, 0], 'Red', W, H, 1, DUR);"
+
+    rewritten, rewrites = module._apply_jsx_compatibility_rewrites(script)
+
+    assert rewrites == []
+    assert rewritten == script
+
+
 def test_resolve_patch_script_path_maps_container_workspace_path_to_repo_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

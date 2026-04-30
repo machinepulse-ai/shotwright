@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,67 @@ NEXRENDER_BINARY_CANDIDATES = (
     Path("nexrender-cli.cmd"),
 )
 _RUNTIME_HELPER_SYNC_DIGESTS: dict[str, str] = {}
+_PROJECT_ITEMS_ADD_SOLID_RE = re.compile(
+    r"\b(?:app\.project|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.items\.addSolid\s*\("
+)
+_JSX_COMPAT_CREATE_SOLID_FOOTAGE = r"""
+function __shotwrightCreateSolidFootage(color, name, width, height, pixelAspect, duration) {
+    if (!app.project) {
+        app.newProject();
+    }
+    var __swWidth = Math.max(4, Math.round(Number(width) || 16));
+    var __swHeight = Math.max(4, Math.round(Number(height) || 16));
+    var __swPixelAspect = Number(pixelAspect) || 1;
+    var __swDuration = Math.max(0.1, Number(duration) || 1);
+    var __swName = name || "Shotwright Solid";
+    var __swColor = color || [1, 1, 1];
+    var __swFactoryName = "__shotwright_solid_factory";
+    var __swFactory = null;
+    for (var __swIndex = 1; __swIndex <= app.project.items.length; __swIndex += 1) {
+        var __swItem = app.project.items[__swIndex];
+        if (__swItem instanceof CompItem && __swItem.name === __swFactoryName) {
+            __swFactory = __swItem;
+            break;
+        }
+    }
+    if (!__swFactory) {
+        __swFactory = app.project.items.addComp(
+            __swFactoryName,
+            __swWidth,
+            __swHeight,
+            __swPixelAspect,
+            __swDuration,
+            24
+        );
+    }
+    var __swLayer = __swFactory.layers.addSolid(
+        __swColor,
+        __swName,
+        __swWidth,
+        __swHeight,
+        __swPixelAspect,
+        __swDuration
+    );
+    try {
+        __swLayer.enabled = false;
+        __swLayer.guideLayer = true;
+    } catch (__swGuideError) {}
+    return __swLayer.source;
+}
+"""
+
+
+def _apply_jsx_compatibility_rewrites(script_content: str) -> tuple[str, list[str]]:
+    """Patch common model-generated AE API slips before the guarded wrapper runs."""
+    rewritten, add_solid_count = _PROJECT_ITEMS_ADD_SOLID_RE.subn(
+        "__shotwrightCreateSolidFootage(",
+        script_content,
+    )
+    rewrites: list[str] = []
+    if add_solid_count:
+        rewrites.append("project_items_addSolid")
+        rewritten = f"{_JSX_COMPAT_CREATE_SOLID_FOOTAGE}\n{rewritten}"
+    return rewritten, rewrites
 
 
 def _read_text_tail(path: str | Path, max_chars: int = 12000) -> str:
@@ -225,6 +287,16 @@ def _build_jsx_wrapper(
             "            return \"\";",
             "        }",
             "    }",
+            "    function __shotwrightEnsureFolder(folderRef) {",
+            "        try {",
+            "            if (!folderRef || folderRef.exists) { return true; }",
+            "            if (folderRef.parent && !folderRef.parent.exists) { __shotwrightEnsureFolder(folderRef.parent); }",
+            "            return folderRef.create();",
+            "        } catch (__shotwrightEnsureFolderError) {",
+            "            __shotwrightLog(\"SHOTWRIGHT_PROJECT_FOLDER_CREATE_FAILED:\" + __shotwrightEnsureFolderError.toString());",
+            "            return false;",
+            "        }",
+            "    }",
             f'    var __shotwrightManagedProjectPath = "{normalized_managed_project_path}";',
             f'    var __shotwrightBootstrapCompName = "{normalized_bootstrap_comp_name}";',
             f'    var __shotwrightTemplateProjectPath = "{normalized_template_project_path}";',
@@ -232,6 +304,7 @@ def _build_jsx_wrapper(
             "    try {",
             "        if (__shotwrightManagedProjectPath && typeof $.setenv === \"function\") {",
             "            $.setenv(\"SHOTWRIGHT_PROJECT_FILE\", __shotwrightManagedProjectPath);",
+            "            if (typeof $ !== \"undefined\" && $.global) { $.global.SHOTWRIGHT_PROJECT_FILE = __shotwrightManagedProjectPath; }",
             "            __shotwrightLog(\"SHOTWRIGHT_PROJECT_ENV_SET:\" + __shotwrightManagedProjectPath);",
             "        }",
             "    } catch (__shotwrightSetEnvError) {",
@@ -306,13 +379,13 @@ def _build_jsx_wrapper(
             "    function __shotwrightEscapeString(value) {",
             "        var __shotwrightText = value === null || typeof value === \"undefined\" ? \"\" : value.toString();",
             "        return __shotwrightText",
-            "            .replace(/\\/g, \"\\\\\")",
-            "            .replace(/\"/g, \"\\\"\")",
-            "            .replace(/\r/g, \"\\r\")",
-            "            .replace(/\n/g, \"\\n\")",
-            "            .replace(/\t/g, \"\\t\")",
-            "            .replace(/\f/g, \"\\f\")",
-            "            .replace(/\u0008/g, \"\\b\");",
+            '            .replace(/\\\\/g, "\\\\\\\\")',
+            '            .replace(/"/g, "\\\\\\\"")',
+            '            .replace(/\\r/g, "\\\\r")',
+            '            .replace(/\\n/g, "\\\\n")',
+            '            .replace(/\\t/g, "\\\\t")',
+            '            .replace(/\\f/g, "\\\\f")',
+            '            .replace(/\\u0008/g, "\\\\b");',
             "    }",
             "    function __shotwrightIndent(level) {",
             "        var __shotwrightIndentText = \"\";",
@@ -394,12 +467,22 @@ def _build_jsx_wrapper(
             "        if (!__shotwrightManagedProjectPath || !app.project || typeof app.project.save !== \"function\") { return; }",
             "        __shotwrightNormalizeBootstrapComp();",
             "        var __shotwrightTargetFile = new File(__shotwrightManagedProjectPath);",
+            "        __shotwrightEnsureFolder(__shotwrightTargetFile.parent);",
             "        var __shotwrightCurrentProjectPath = app.project.file ? __shotwrightNormalizePath(app.project.file) : \"\";",
             "        __shotwrightLog(\"SHOTWRIGHT_PROJECT_SAVE_START:\" + __shotwrightDescribeFile(__shotwrightTargetFile));",
-            "        if (__shotwrightCurrentProjectPath && __shotwrightCurrentProjectPath === __shotwrightManagedProjectPath) {",
-            "            app.project.save();",
-            "        } else {",
-            "            app.project.save(__shotwrightTargetFile);",
+            "        try {",
+            "            if (__shotwrightCurrentProjectPath && __shotwrightCurrentProjectPath === __shotwrightManagedProjectPath) {",
+            "                app.project.save();",
+            "            } else {",
+            "                app.project.save(__shotwrightTargetFile);",
+            "            }",
+            "        } catch (__shotwrightSaveError) {",
+            "            __shotwrightLog(\"SHOTWRIGHT_PROJECT_SAVE_FAILED:\" + __shotwrightSaveError.toString());",
+            "            throw __shotwrightSaveError;",
+            "        }",
+            "        if (!__shotwrightTargetFile.exists) {",
+            "            __shotwrightLog(\"SHOTWRIGHT_PROJECT_SAVE_MISSING_AFTER_SAVE:\" + __shotwrightDescribeFile(__shotwrightTargetFile));",
+            "            throw new Error(\"Shotwright managed project save did not create the expected .aep file\");",
             "        }",
             "        __shotwrightWriteProjectMetadata();",
             "        __shotwrightLog(\"SHOTWRIGHT_PROJECT_SAVE_DONE:\" + __shotwrightDescribeFile(__shotwrightTargetFile));",
@@ -973,7 +1056,8 @@ async def run_jsx_script(
     jsx_log_path = work_dir / "script.log"
     stdout_path = work_dir / "nexrender.stdout.log"
     stderr_path = work_dir / "nexrender.stderr.log"
-    user_script_path.write_text(script_content, encoding="utf-8")
+    prepared_script_content, compatibility_rewrites = _apply_jsx_compatibility_rewrites(script_content)
+    user_script_path.write_text(prepared_script_content, encoding="utf-8")
 
     project_payload = _resolve_project_payload(project)
     bootstrap_project_path = _resolve_nexrender_bootstrap_template()
@@ -1045,6 +1129,7 @@ async def run_jsx_script(
             jsx_log_text.strip(),
             f"Template project: {template_path}",
             f"Bootstrap template used: {template_path == bootstrap_project_path}",
+            f"JSX compatibility rewrites: {', '.join(compatibility_rewrites)}" if compatibility_rewrites else "",
         )
         if part
     )
@@ -1063,6 +1148,7 @@ async def run_jsx_script(
         "bootstrap_template_path": str(bootstrap_project_path),
         "project": project_payload,
         "success": success,
+        "jsx_compatibility_rewrites": compatibility_rewrites,
         "timed_out": bool(helper_result.get("timed_out")) or exit_code == 124,
         "forced_cleanup": False,
         "after_effects_ready": bool(helper_result.get("after_effects_ready")),

@@ -205,7 +205,17 @@ class CodexBridgeClient:
             key: value
             for key, value in bridge_env.items()
             if key.upper()
-            in {"PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TMP", "OPENAI_API_KEY", "CODEX_HOME"}
+            in {
+                "PATH",
+                "PATHEXT",
+                "SYSTEMROOT",
+                "TEMP",
+                "TMP",
+                "OPENAI_API_KEY",
+                "CODEX_HOME",
+                "GITHUB_TOKEN",
+                "SHOTWRIGHT_GITHUB_TOKEN",
+            }
             or key.lower() in {"http_proxy", "https_proxy", "no_proxy"}
         }
         return request

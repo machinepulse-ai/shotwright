@@ -78,8 +78,37 @@ async def test_build_runtime_turn_content_injects_tool_and_skill_bridge(
     assert "codex_tool_runner.py" in content
     assert '"name": "inspect_workspace"' in content
     assert "after-effects-scripting-guide" in content
+    assert "Embedded SKILL.md excerpts" in content
     assert "Active project id: project-1" in content
     assert "Known compositions: Main" in content
+
+
+def test_resolve_matching_skill_invocations_handles_explicit_and_generic_mentions(tmp_path: Path) -> None:
+    skill_dir = tmp_path / ".github" / "skills" / "after-effects-scripting-guide"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("---\nname: after-effects-scripting-guide\n---\n", encoding="utf-8")
+
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+    runtime_settings = {"codex_workspace_root": str(tmp_path)}
+
+    explicit = runtime_manager._resolve_matching_skill_invocations(
+        runtime_settings,
+        "Use after-effects-scripting-guide skill for this render.",
+    )
+    generic = runtime_manager._resolve_matching_skill_invocations(
+        runtime_settings,
+        "请使用仓库索引的 after effects skill 指南制作项目",
+    )
+
+    assert explicit == [
+        {
+            "name": "after-effects-scripting-guide",
+            "path": str(skill_file),
+            "directory": str(skill_dir),
+        }
+    ]
+    assert generic == explicit
 
 
 @pytest.mark.asyncio
@@ -134,3 +163,4 @@ async def test_handle_codex_event_translates_tool_runner_command(monkeypatch: py
     assert persisted_events[1]["data"]["tool_name"] == "inspect_workspace"
     assert persisted_events[2]["data"]["success"] is True
     assert persisted_events[2]["data"]["text_result_for_llm"] == "workspace ok"
+    assert persisted_events[2]["data"]["duration_seconds"] >= 0

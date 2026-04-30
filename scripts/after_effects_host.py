@@ -81,6 +81,7 @@ def build_nexrender_command(
     nexrender_entrypoint: str | None = None,
     nexrender_binary: str | None = None,
     skip_render: bool = False,
+    reuse: bool = True,
 ) -> list[str]:
     if node_binary and nexrender_entrypoint:
         command = [
@@ -90,12 +91,13 @@ def build_nexrender_command(
             job_path,
             "-w",
             work_dir,
-            "--reuse",
             "--skip-cleanup",
             "--debug",
             "--binary",
             binary_path,
         ]
+        if reuse:
+            command.append("--reuse")
         if skip_render:
             command.append("--skip-render")
         return command
@@ -107,12 +109,13 @@ def build_nexrender_command(
             job_path,
             "-w",
             work_dir,
-            "--reuse",
             "--skip-cleanup",
             "--debug",
             "-b",
             binary_path,
         ]
+        if reuse:
+            command.append("--reuse")
         if skip_render:
             command.append("--skip-render")
         return command
@@ -130,6 +133,7 @@ def build_nexrender_command(
             node_binary=resolved_node,
             nexrender_entrypoint=resolved_entrypoint,
             skip_render=skip_render,
+            reuse=reuse,
         )
 
     resolved_cli = resolve_executable(NEXRENDER_BINARY_CANDIDATES)
@@ -140,6 +144,7 @@ def build_nexrender_command(
             binary_path,
             nexrender_binary=resolved_cli,
             skip_render=skip_render,
+            reuse=reuse,
         )
 
     raise FileNotFoundError("nexrender CLI was not found inside the container")
@@ -770,19 +775,11 @@ def run_render(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     render_only_markers: tuple[str, ...] = ()
     try:
         stop_named_processes(("node", "ffmpeg", "aerender", "AfterFX", "AfterFX.com"))
-        afterfx_process, after_effects_ready_marker, render_only_marker_action, render_only_markers = start_after_effects(
-            args.afterfx_gui,
-            ready_timeout,
-            render_only=True,
-            ready_font=args.ready_font,
-            env=env,
-        )
-        after_effects_ready = True
-
         command = build_nexrender_command(
             args.job_path,
             args.work_dir,
             args.binary_path,
+            reuse=False,
         )
         with stdout_log.open("w", encoding="utf-8") as stdout_handle, stderr_log.open(
             "w", encoding="utf-8"
@@ -823,6 +820,8 @@ def run_render(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             output_parts.append(
                 "Shotwright prewarmed After Effects in render-engine mode with -re -noui and observed the font readiness marker."
             )
+        else:
+            output_parts.append("Shotwright ran nexrender with a fresh aerender process.")
         if after_effects_ready_marker:
             output_parts.append(f"Readiness marker: {after_effects_ready_marker}")
         if render_only_markers:

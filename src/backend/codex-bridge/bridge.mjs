@@ -140,6 +140,7 @@ function updateTurnResult(event, result) {
 
   if (event.type === "turn.completed") {
     result.usage = event.usage || null;
+    result.completed = true;
     return;
   }
 
@@ -149,12 +150,12 @@ function updateTurnResult(event, result) {
   }
 
   if (event.type === "turn.failed") {
-    result.error = event.error?.message || "Codex turn failed.";
+    result.fatalError = event.error?.message || "Codex turn failed.";
     return;
   }
 
   if (event.type === "error") {
-    result.error = event.message || "Codex bridge stream failed.";
+    result.lastStreamError = event.message || "Codex bridge stream failed.";
   }
 }
 
@@ -174,7 +175,9 @@ async function runTurn(request) {
     threadId: thread.id || threadId || null,
     finalResponse: "",
     usage: null,
-    error: null,
+    completed: false,
+    fatalError: null,
+    lastStreamError: null,
   };
 
   const streamedTurn = await thread.runStreamed(
@@ -188,8 +191,12 @@ async function runTurn(request) {
   }
 
   result.threadId = thread.id || result.threadId;
-  if (result.error) {
-    throw new Error(result.error);
+  if (result.fatalError) {
+    throw new Error(result.fatalError);
+  }
+
+  if (!result.completed && !result.finalResponse && result.lastStreamError) {
+    throw new Error(result.lastStreamError);
   }
 
   writeRecord({

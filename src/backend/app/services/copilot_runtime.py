@@ -35,6 +35,7 @@ from app.models.session import ReasoningEffort
 from app.services.agent_tools import build_shotwright_tools
 from app.services.agent_model_metadata import build_agent_model_metadata
 from app.services import nexrender as nr
+from app.services.github_token_env import resolve_github_token as resolve_stored_github_token
 from app.services.session_streams import (
     publish_context_refresh,
     publish_message_deleted,
@@ -309,6 +310,7 @@ class _StreamingTurnState:
         self.error_event_seen = False
         self.cancel_requested = False
         self.request_task: asyncio.Task | None = None
+        self.tool_execution_started_at: dict[str, float] = {}
 
 
 class _PendingTurnBootstrap:
@@ -326,6 +328,28 @@ class _PendingTurnBootstrap:
         self.cancellation_message = "Generation stopped by user."
 
 
+def _tool_execution_key(data: dict) -> str | None:
+    for key in (
+        "tool_call_id",
+        "toolCallId",
+        "call_id",
+        "callId",
+        "invocation_id",
+        "invocationId",
+        "id",
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"id:{value.strip()}"
+
+    for key in ("tool_name", "toolName", "name"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"tool:{value.strip()}"
+
+    return None
+
+
 class ShotwrightCopilotRuntimeManager:
     def __init__(self) -> None:
         self._runtimes: dict[str, _RuntimeHandle] = {}
@@ -337,11 +361,7 @@ class ShotwrightCopilotRuntimeManager:
         self._models_lock = asyncio.Lock()
 
     async def _resolve_github_token(self) -> str | None:
-        if settings.github_token:
-            return settings.github_token
-        doc = await get_admin_collection().find_one({"_id": "settings"})
-        token = doc.get("github_token") if doc else None
-        return token or None
+        return await resolve_stored_github_token()
 
     async def _resolve_runtime_settings(self) -> dict[str, str | bool]:
         doc = await get_admin_collection().find_one({"_id": "settings"}) or {}
@@ -473,6 +493,14 @@ class ShotwrightCopilotRuntimeManager:
         for key, value in proxy_map.items():
             if isinstance(value, str) and value.strip():
                 env[key] = value.strip()
+        github_token = _first_non_empty(
+            os.environ.get("SHOTWRIGHT_GITHUB_TOKEN"),
+            os.environ.get("GITHUB_TOKEN"),
+            settings.github_token,
+        )
+        if github_token:
+            env["GITHUB_TOKEN"] = github_token
+            env["SHOTWRIGHT_GITHUB_TOKEN"] = github_token
         return env
 
     def _workspace_root_candidates(self, configured_workspace_root: str | None) -> list[str]:
@@ -1053,6 +1081,21 @@ class ShotwrightCopilotRuntimeManager:
 
                 if turn_state and event_type == "session.idle":
                     turn_state.idle_event.set()
+
+                if turn_state and event_type == "tool.execution_start":
+                    tool_execution_key = _tool_execution_key(data)
+                    if tool_execution_key:
+                        turn_state.tool_execution_started_at[tool_execution_key] = monotonic()
+
+                if turn_state and event_type == "tool.execution_complete":
+                    tool_execution_key = _tool_execution_key(data)
+                    started_at = (
+                        turn_state.tool_execution_started_at.pop(tool_execution_key, None)
+                        if tool_execution_key
+                        else None
+                    )
+                    if started_at is not None and "duration_seconds" not in data:
+                        data = {**data, "duration_seconds": round(monotonic() - started_at, 3)}
 
                 runtime.track_task(
                     self._persist_event(

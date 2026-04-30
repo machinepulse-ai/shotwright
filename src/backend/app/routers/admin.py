@@ -51,6 +51,7 @@ async def get_admin_settings():
 @router.put("/settings", response_model=AdminSettings, dependencies=[Depends(require_admin)])
 async def update_admin_settings(body: AgentSettingsUpdate):
     col = get_admin_collection()
+    existing_doc = await col.find_one({"_id": "settings"}) or {}
     payload = body.model_dump()
     payload["default_copilot_model"] = payload["default_copilot_model"].strip() or settings.copilot_model
     payload["copilot_turn_timeout_seconds"] = float(payload["copilot_turn_timeout_seconds"])
@@ -72,8 +73,10 @@ async def update_admin_settings(body: AgentSettingsUpdate):
     payload["codex_http_proxy"] = payload["codex_http_proxy"].strip()
     payload["codex_https_proxy"] = payload["codex_https_proxy"].strip()
     payload["codex_no_proxy"] = payload["codex_no_proxy"].strip()
-    await col.update_one({"_id": "settings"}, {"$set": payload}, upsert=True)
-    await runtime_manager.shutdown()
+    settings_changed = any(existing_doc.get(key) != value for key, value in payload.items())
+    if settings_changed:
+        await col.update_one({"_id": "settings"}, {"$set": payload}, upsert=True)
+        await runtime_manager.shutdown()
     doc = await col.find_one({"_id": "settings"}) or {}
     copilot_settings = await copilot_runtime_manager.get_runtime_settings()
     codex_settings = resolve_codex_runtime_settings(doc)
@@ -96,24 +99,30 @@ async def update_admin_settings(body: AgentSettingsUpdate):
 @router.put("/github-token", dependencies=[Depends(require_admin)])
 async def update_github_token(body: GithubTokenUpdate):
     col = get_admin_collection()
-    await col.update_one(
-        {"_id": "settings"},
-        {"$set": {"github_token": body.github_token.strip()}},
-        upsert=True,
-    )
-    await runtime_manager.shutdown()
+    github_token = body.github_token.strip()
+    existing_doc = await col.find_one({"_id": "settings"}) or {}
+    if existing_doc.get("github_token") != github_token:
+        await col.update_one(
+            {"_id": "settings"},
+            {"$set": {"github_token": github_token}},
+            upsert=True,
+        )
+        await runtime_manager.shutdown()
     return {"ok": True}
 
 
 @router.put("/openai-api-key", dependencies=[Depends(require_admin)])
 async def update_openai_api_key(body: OpenAIKeyUpdate):
     col = get_admin_collection()
-    await col.update_one(
-        {"_id": "settings"},
-        {"$set": {"openai_api_key": body.openai_api_key.strip()}},
-        upsert=True,
-    )
-    await runtime_manager.shutdown()
+    openai_api_key = body.openai_api_key.strip()
+    existing_doc = await col.find_one({"_id": "settings"}) or {}
+    if existing_doc.get("openai_api_key") != openai_api_key:
+        await col.update_one(
+            {"_id": "settings"},
+            {"$set": {"openai_api_key": openai_api_key}},
+            upsert=True,
+        )
+        await runtime_manager.shutdown()
     return {"ok": True}
 
 

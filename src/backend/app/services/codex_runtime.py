@@ -9,6 +9,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 from pymongo import ReturnDocument
@@ -41,7 +42,8 @@ from app.services.copilot_runtime import (
     _prepare_turn_attachments,
     _utcnow,
 )
-from app.services.codex_tool_runner import build_codex_tool_manifest
+from app.services.codex_tool_runner import build_codex_tool_manifest, run_codex_tool
+from app.services.github_token_env import resolve_github_token as resolve_stored_github_token
 from app.services.session_streams import (
     publish_context_refresh,
     publish_message_upsert,
@@ -59,6 +61,31 @@ _CODEX_TOOL_COMMAND_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SHELL_ARG_RE_TEMPLATE = r"--{name}(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))"
+_DIRECT_TOOL_MAX_STEPS = 10
+_DIRECT_TOOL_PLAN_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["tool_call", "final"],
+            "description": "Use tool_call to request one Shotwright tool execution, or final when the work is complete.",
+        },
+        "tool_name": {
+            "type": "string",
+            "description": "Shotwright tool name when action is tool_call; otherwise an empty string.",
+        },
+        "arguments_json": {
+            "type": "string",
+            "description": "A JSON object string containing the requested Shotwright tool arguments, or {}.",
+        },
+        "response": {
+            "type": "string",
+            "description": "Natural-language final response when action is final; otherwise a short rationale.",
+        },
+    },
+    "required": ["action", "tool_name", "arguments_json", "response"],
+    "additionalProperties": False,
+}
 
 
 class _CodexRuntimeHandle:
@@ -82,6 +109,7 @@ class _CodexTurnState:
         self.version = 0
         self.tool_items_started: set[str] = set()
         self.tool_items_completed: set[str] = set()
+        self.tool_item_started_at: dict[str, float] = {}
 
 
 class ShotwrightCodexRuntimeManager:
@@ -96,13 +124,14 @@ class ShotwrightCodexRuntimeManager:
             str(runtime_settings.get("codex_http_proxy") or ""),
         ) or None
         skills_bundle_error, ensure_bundle = _load_skills_bundle_helpers()
+        github_token = await resolve_stored_github_token()
         try:
             await asyncio.to_thread(
                 ensure_bundle,
                 source_repo_root=_REPO_ROOT,
                 install_root=_REPO_ROOT,
                 proxy=proxy,
-                github_token=None,
+                github_token=github_token,
                 log=logger.info,
             )
         except skills_bundle_error as exc:
@@ -172,6 +201,60 @@ class ShotwrightCodexRuntimeManager:
             except FileNotFoundError:
                 continue
         return sorted(skill_names)
+
+    def _normalize_skill_match_text(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    def _resolve_matching_skill_invocations(
+        self,
+        runtime_settings: dict[str, str | bool | float],
+        content: str,
+    ) -> list[dict[str, str]]:
+        normalized_content = self._normalize_skill_match_text(content)
+        content_lower = content.lower()
+        padded_content = f" {normalized_content} "
+        after_effects_skill_requested = (
+            "skill" in padded_content
+            and (
+                "after effects" in normalized_content
+                or "aftereffects" in normalized_content
+                or " ae " in padded_content
+            )
+        )
+        invocations: list[dict[str, str]] = []
+        seen_paths: set[str] = set()
+        for directory in self._resolve_skill_directories(runtime_settings):
+            try:
+                entries = sorted(
+                    (entry for entry in os.scandir(directory) if entry.is_dir()),
+                    key=lambda entry: entry.name.lower(),
+                )
+            except FileNotFoundError:
+                continue
+            for entry in entries:
+                skill_path = os.path.join(entry.path, "SKILL.md")
+                if not os.path.isfile(skill_path):
+                    continue
+                skill_name = entry.name
+                normalized_name = self._normalize_skill_match_text(skill_name)
+                exact_match = skill_name.lower() in content_lower or (
+                    bool(normalized_name) and normalized_name in normalized_content
+                )
+                ae_skill_match = after_effects_skill_requested and normalized_name.startswith("after effects")
+                if not exact_match and not ae_skill_match:
+                    continue
+                resolved_path = os.path.normcase(os.path.abspath(skill_path))
+                if resolved_path in seen_paths:
+                    continue
+                seen_paths.add(resolved_path)
+                invocations.append(
+                    {
+                        "name": skill_name,
+                        "path": skill_path,
+                        "directory": entry.path,
+                    }
+                )
+        return invocations
 
     async def resolve_turn_timeout_seconds(self) -> float:
         runtime_settings = await self._resolve_runtime_settings()
@@ -392,7 +475,7 @@ class ShotwrightCodexRuntimeManager:
         lines = [
             "Repository skill compatibility:",
             "- Copilot-style Shotwright skills are available as workspace SKILL.md files.",
-            "- Treat matching skills as operating instructions. If the user names a skill or asks for a skill-defined workflow, read that SKILL.md before acting.",
+            "- Treat matching skills as operating instructions. If the user names a skill or asks for a skill-defined workflow, apply that SKILL.md before acting.",
         ]
         if skill_directories:
             lines.append(f"- Skill directories: {json.dumps(skill_directories, ensure_ascii=False)}")
@@ -400,7 +483,44 @@ class ShotwrightCodexRuntimeManager:
             lines.append("- Skill directories: none found in this workspace.")
         if skill_names:
             lines.append(f"- Available skills: {', '.join(skill_names)}")
+            lines.append("- Embedded SKILL.md excerpts:")
+            lines.extend(self._load_skill_excerpts(skill_directories))
         return "\n".join(lines)
+
+    def _load_skill_excerpts(
+        self,
+        skill_directories: list[str],
+        *,
+        per_skill_limit: int = 4000,
+        total_limit: int = 16000,
+    ) -> list[str]:
+        excerpts: list[str] = []
+        total = 0
+        for directory in skill_directories:
+            try:
+                entries = sorted(
+                    (entry for entry in os.scandir(directory) if entry.is_dir()),
+                    key=lambda entry: entry.name.lower(),
+                )
+            except FileNotFoundError:
+                continue
+            for entry in entries:
+                skill_path = os.path.join(entry.path, "SKILL.md")
+                if not os.path.isfile(skill_path):
+                    continue
+                try:
+                    text = Path(skill_path).read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                remaining = total_limit - total
+                if remaining <= 0:
+                    return excerpts
+                excerpt = text[: min(per_skill_limit, remaining)]
+                total += len(excerpt)
+                if len(text) > len(excerpt):
+                    excerpt = f"{excerpt}\n...[truncated]"
+                excerpts.append(f"  - {entry.name} ({skill_path}):\n{excerpt}")
+        return excerpts
 
     def _build_tool_bridge_instructions(self, app_session_id: str, tool_manifest: list[dict]) -> str:
         python_path = str(Path(sys.executable).resolve())
@@ -415,6 +535,9 @@ class ShotwrightCodexRuntimeManager:
                 "- For Shotwright operations, use this runner instead of reimplementing tool behavior in shell.",
                 "- Read each JSON result and use success, text_result_for_llm, error, and session_log as the tool response.",
                 "- Prefer --arguments-json @- with stdin for all non-empty arguments, especially JSX and patch scripts.",
+                "- In this Shotwright web runtime, do not call shell_command yourself. Return structured Shotwright tool calls; the backend executes them directly and sends you the JSON result.",
+                "- Return one tool call at a time. After each tool result, decide the next tool call or final response.",
+                "- For any request to create or render After Effects content, use Shotwright tools before finalizing. Usually call ensure_after_effects_container, create_after_effects_project or create_empty_after_effects_project, then render_after_effects_project, and export_project_archive when useful.",
                 "- List tools:",
                 f"  {base_command} --list",
                 "- Run a tool:",
@@ -505,6 +628,227 @@ class ShotwrightCodexRuntimeManager:
                 "https_proxy": str(runtime_settings.get("codex_https_proxy") or ""),
                 "no_proxy": str(runtime_settings.get("codex_no_proxy") or ""),
             },
+        )
+
+    def _build_direct_tool_protocol_instructions(self) -> str:
+        return "\n".join(
+            [
+                "Direct Shotwright tool protocol:",
+                "- You must respond only with JSON matching the provided schema.",
+                "- Use action=tool_call when a Shotwright backend operation is needed.",
+                "- Use action=final only after the requested creative work is complete or no tool is needed.",
+                "- Never call shell_command, never ask to run codex_tool_runner.py, and never claim a render/export exists until a tool result confirms it.",
+                "- For tool_call, set tool_name to exactly one available Shotwright tool and arguments_json to a JSON object string for that tool.",
+                "- For final, set tool_name to an empty string, arguments_json to {}, and response to the user-facing answer.",
+            ]
+        )
+
+    def _parse_direct_tool_plan(self, raw_response: str) -> dict[str, object]:
+        text = raw_response.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+            text = re.sub(r"\s*```$", "", text).strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Codex returned invalid Shotwright tool JSON: {raw_response[:500]}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("Codex Shotwright tool JSON must be an object.")
+        action = str(parsed.get("action") or "").strip()
+        if action not in {"tool_call", "final"}:
+            raise ValueError(f"Unsupported Codex Shotwright tool action: {action or '<empty>'}")
+        arguments_json = str(parsed.get("arguments_json") or "{}").strip() or "{}"
+        try:
+            arguments = json.loads(arguments_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Codex Shotwright tool arguments_json must be a JSON object string: {arguments_json[:500]}") from exc
+        if not isinstance(arguments, dict):
+            raise ValueError("Codex Shotwright tool arguments_json must decode to a JSON object.")
+        parsed["arguments"] = arguments
+        parsed["tool_name"] = str(parsed.get("tool_name") or "").strip()
+        parsed["response"] = str(parsed.get("response") or "").strip()
+        return parsed
+
+    def _looks_like_direct_tool_plan(self, text: str) -> bool:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE).strip()
+            stripped = re.sub(r"\s*```$", "", stripped).strip()
+        if not stripped.startswith("{"):
+            return False
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(parsed, dict) and parsed.get("action") in {"tool_call", "final"}
+
+    async def _persist_direct_tool_bridge_events(
+        self,
+        app_session_id: str,
+        runtime: _CodexRuntimeHandle,
+        turn_state: _CodexTurnState,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, object],
+        payload: dict[str, object] | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        base_data = {
+            "provider": "codex",
+            "tool_name": tool_name,
+            "codex_item_id": tool_call_id,
+            "command": None,
+            "arguments": arguments,
+        }
+        if payload is None:
+            await self._persist_event(
+                app_session_id,
+                "tool.execution_start",
+                base_data,
+                turn_id=turn_state.turn_id,
+                sequence=runtime.next_event_sequence(),
+            )
+            return
+
+        await self._persist_event(
+            app_session_id,
+            "tool.execution_complete",
+            {
+                **base_data,
+                "success": payload.get("success"),
+                "exit_code": None,
+                "result_type": payload.get("result_type"),
+                "text_result_for_llm": payload.get("text_result_for_llm"),
+                "error": payload.get("error"),
+                "session_log": payload.get("session_log"),
+                "tool_telemetry": payload.get("tool_telemetry"),
+                "duration_seconds": duration_seconds,
+            },
+            turn_id=turn_state.turn_id,
+            sequence=runtime.next_event_sequence(),
+        )
+
+    def _build_tool_result_followup(self, tool_name: str, payload: dict[str, object]) -> str:
+        return "\n".join(
+            [
+                "Shotwright backend executed your requested tool call.",
+                f"Tool: {tool_name}",
+                "Result JSON:",
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                "",
+                "Continue using the Direct Shotwright tool protocol. Return the next tool_call if more work is required; otherwise return final.",
+            ]
+        )
+
+    async def _run_direct_tool_loop(
+        self,
+        *,
+        app_session_id: str,
+        runtime: _CodexRuntimeHandle,
+        turn_state: _CodexTurnState,
+        client: CodexBridgeClient,
+        runtime_content: str,
+        persisted_attachments: list[dict],
+        thread_id: str | None,
+        runtime_settings: dict[str, str | bool | float],
+        session_doc: dict,
+        codex_sdk_config: dict[str, object],
+        on_event,
+    ):
+        model = str(session_doc.get("copilot_model") or runtime_settings.get("codex_model") or "")
+        reasoning_effort = str(
+            session_doc.get("copilot_reasoning_effort")
+            or runtime_settings.get("codex_reasoning_effort")
+            or ""
+        )
+        current_thread_id = thread_id or None
+        current_input: str | list[dict[str, str]] = build_codex_input(
+            "\n\n".join([runtime_content, self._build_direct_tool_protocol_instructions()]),
+            persisted_attachments,
+        )
+
+        for step_index in range(1, _DIRECT_TOOL_MAX_STEPS + 1):
+            result = await client.run_turn(
+                input=current_input,
+                thread_id=current_thread_id,
+                working_directory=str(runtime_settings.get("codex_workspace_root") or ""),
+                model=model,
+                model_reasoning_effort=reasoning_effort,
+                approval_policy=str(runtime_settings.get("codex_approval_policy") or ""),
+                sandbox_mode=str(runtime_settings.get("codex_sandbox_mode") or ""),
+                network_access_enabled=bool(runtime_settings.get("codex_network_access_enabled")),
+                skip_git_repo_check=bool(runtime_settings.get("codex_skip_git_repo_check")),
+                web_search_mode=str(runtime_settings.get("codex_web_search_mode") or ""),
+                config=codex_sdk_config or None,
+                output_schema=_DIRECT_TOOL_PLAN_SCHEMA,
+                on_event=on_event,
+            )
+            current_thread_id = result.thread_id or current_thread_id
+            plan = self._parse_direct_tool_plan(result.final_response)
+            action = str(plan["action"])
+            if action == "final":
+                final_response = str(plan.get("response") or "").strip()
+                if not final_response:
+                    final_response = "Shotwright completed the requested work."
+                return result.__class__(
+                    thread_id=current_thread_id,
+                    final_response=final_response,
+                    usage=result.usage,
+                    events=result.events,
+                )
+
+            tool_name = str(plan.get("tool_name") or "").strip()
+            if not tool_name:
+                raise ValueError("Codex requested a Shotwright tool_call without a tool_name.")
+            arguments = plan.get("arguments") if isinstance(plan.get("arguments"), dict) else {}
+            tool_call_id = f"direct-tool-{step_index}"
+            await self._persist_direct_tool_bridge_events(
+                app_session_id,
+                runtime,
+                turn_state,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+            )
+            tool_started_at = monotonic()
+            try:
+                payload = await run_codex_tool(
+                    app_session_id,
+                    tool_name,
+                    arguments,
+                    tool_call_id=tool_call_id,
+                )
+            except Exception as exc:
+                await self._persist_direct_tool_bridge_events(
+                    app_session_id,
+                    runtime,
+                    turn_state,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    payload={
+                        "success": False,
+                        "result_type": "failure",
+                        "error": str(exc),
+                    },
+                    duration_seconds=round(monotonic() - tool_started_at, 3),
+                )
+                raise
+            await self._persist_direct_tool_bridge_events(
+                app_session_id,
+                runtime,
+                turn_state,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                payload=payload,
+                duration_seconds=round(monotonic() - tool_started_at, 3),
+            )
+            current_input = self._build_tool_result_followup(tool_name, payload)
+
+        raise ValueError(
+            f"Codex did not produce a final Shotwright response after {_DIRECT_TOOL_MAX_STEPS} tool steps."
         )
 
     def _extract_text_value(self, value: object) -> str:
@@ -655,6 +999,7 @@ class ShotwrightCodexRuntimeManager:
         }
         if invocation["is_start"] and item_key not in turn_state.tool_items_started:
             turn_state.tool_items_started.add(item_key)
+            turn_state.tool_item_started_at[item_key] = monotonic()
             await self._persist_event(
                 app_session_id,
                 "tool.execution_start",
@@ -668,6 +1013,7 @@ class ShotwrightCodexRuntimeManager:
 
         if item_key not in turn_state.tool_items_started:
             turn_state.tool_items_started.add(item_key)
+            turn_state.tool_item_started_at[item_key] = monotonic()
             await self._persist_event(
                 app_session_id,
                 "tool.execution_start",
@@ -677,6 +1023,7 @@ class ShotwrightCodexRuntimeManager:
             )
 
         turn_state.tool_items_completed.add(item_key)
+        started_at = turn_state.tool_item_started_at.pop(item_key, None)
         payload = invocation.get("payload") if isinstance(invocation.get("payload"), dict) else {}
         output = str(invocation.get("output") or "")
         complete_data = {
@@ -689,6 +1036,8 @@ class ShotwrightCodexRuntimeManager:
             "session_log": payload.get("session_log"),
             "tool_telemetry": payload.get("tool_telemetry"),
         }
+        if started_at is not None:
+            complete_data["duration_seconds"] = round(monotonic() - started_at, 3)
         await self._persist_event(
             app_session_id,
             "tool.execution_complete",
@@ -707,7 +1056,11 @@ class ShotwrightCodexRuntimeManager:
         event_type = str(event.get("type") or "unknown")
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
         assistant_text = item.get("text") if item.get("type") == "agent_message" else None
-        if isinstance(assistant_text, str) and assistant_text != turn_state.content:
+        if (
+            isinstance(assistant_text, str)
+            and assistant_text != turn_state.content
+            and not self._looks_like_direct_tool_plan(assistant_text)
+        ):
             turn_state.content = assistant_text
             turn_state.version += 1
             await self._sync_streaming_message(
@@ -808,23 +1161,31 @@ class ShotwrightCodexRuntimeManager:
                     sequence=runtime.next_event_sequence(),
                 )
 
+                for skill_invocation in self._resolve_matching_skill_invocations(runtime_settings, content):
+                    await self._persist_event(
+                        app_session_id,
+                        "skill.invoked",
+                        {
+                            "provider": "codex",
+                            "source": "embedded_repo_skill",
+                            **skill_invocation,
+                        },
+                        turn_id=turn_id,
+                        sequence=runtime.next_event_sequence(),
+                    )
+
                 result = await asyncio.wait_for(
-                    client.run_turn(
-                        input=build_codex_input(runtime_content, persisted_attachments),
+                    self._run_direct_tool_loop(
+                        app_session_id=app_session_id,
+                        runtime=runtime,
+                        turn_state=turn_state,
+                        client=client,
+                        runtime_content=runtime_content,
+                        persisted_attachments=persisted_attachments,
                         thread_id=thread_id or None,
-                        working_directory=str(runtime_settings.get("codex_workspace_root") or ""),
-                        model=str(session_doc.get("copilot_model") or runtime_settings.get("codex_model") or ""),
-                        model_reasoning_effort=str(
-                            session_doc.get("copilot_reasoning_effort")
-                            or runtime_settings.get("codex_reasoning_effort")
-                            or ""
-                        ),
-                        approval_policy=str(runtime_settings.get("codex_approval_policy") or ""),
-                        sandbox_mode=str(runtime_settings.get("codex_sandbox_mode") or ""),
-                        network_access_enabled=bool(runtime_settings.get("codex_network_access_enabled")),
-                        skip_git_repo_check=bool(runtime_settings.get("codex_skip_git_repo_check")),
-                        web_search_mode=str(runtime_settings.get("codex_web_search_mode") or ""),
-                        config=codex_sdk_config or None,
+                        runtime_settings=runtime_settings,
+                        session_doc=session_doc,
+                        codex_sdk_config=codex_sdk_config,
                         on_event=lambda event: self._handle_codex_event(
                             app_session_id,
                             runtime,

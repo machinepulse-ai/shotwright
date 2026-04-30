@@ -99,6 +99,7 @@ if ($env:SHOTWRIGHT_SKILLS_VERIFY_SSL) {
 $skillsDownloadArgs = @(
     'C:\workspace\scripts\skills\download_skills_bundle.py',
     '--install-root', 'C:\workspace',
+    '--token-from-db',
     '--no-progress'
 )
 if ($env:SHOTWRIGHT_GITHUB_TOKEN) {

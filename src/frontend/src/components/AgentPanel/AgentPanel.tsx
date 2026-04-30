@@ -1,11 +1,15 @@
 import {
   ReactNode,
   ChangeEvent,
+  Children,
   ClipboardEvent,
   CSSProperties,
   DragEvent,
   KeyboardEvent,
   PointerEvent as ReactPointerEvent,
+  ReactElement,
+  cloneElement,
+  isValidElement,
   useEffect,
   useMemo,
   useRef,
@@ -141,6 +145,7 @@ type ExecutionStepPresentation = {
   tone: TimelineTone;
   leadEvent: SessionEvent;
   timelinePresentation: TimelinePresentation;
+  durationLabel: string | null;
 };
 
 type ExecutionGroupPresentation = {
@@ -313,6 +318,17 @@ function formatDurationSeconds(value: number | null | undefined, locale: string,
 
   const maximumFractionDigits = value >= 10 ? 1 : 2;
   return `${new Intl.NumberFormat(locale, { maximumFractionDigits }).format(value)} s`;
+}
+
+function coerceFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsedValue = Number(value);
+    return Number.isFinite(parsedValue) ? parsedValue : null;
+  }
+  return null;
 }
 
 function formatFileSize(value: number | null | undefined, locale: string, fallback: string) {
@@ -1218,6 +1234,56 @@ function formatExecutionOverflowCount(extraCount: number, locale: string) {
   return locale === "zh-CN" ? `+${extraCount} 项` : `+${extraCount} more`;
 }
 
+function getPayloadDurationSeconds(payload: Record<string, unknown>): number | null {
+  for (const key of ["duration_seconds", "durationSeconds", "elapsed_seconds", "elapsedSeconds"]) {
+    const value = coerceFiniteNumber(payload[key]);
+    if (value !== null && value >= 0) {
+      return value;
+    }
+  }
+
+  for (const key of ["duration_ms", "durationMs", "elapsed_ms", "elapsedMs"]) {
+    const value = coerceFiniteNumber(payload[key]);
+    if (value !== null && value >= 0) {
+      return value / 1000;
+    }
+  }
+
+  const telemetry = payload.tool_telemetry ?? payload.toolTelemetry;
+  if (telemetry && typeof telemetry === "object" && !Array.isArray(telemetry)) {
+    return getPayloadDurationSeconds(telemetry as Record<string, unknown>);
+  }
+
+  return null;
+}
+
+function getEventDurationSeconds(event: SessionEvent | null | undefined): number | null {
+  if (!event) return null;
+  return getPayloadDurationSeconds(getCompactEventPayloadRecord(event));
+}
+
+function getEventPairDurationSeconds(startEvent: SessionEvent | null, completeEvent: SessionEvent | null): number | null {
+  if (!startEvent?.created_at || !completeEvent?.created_at) {
+    return null;
+  }
+
+  const startedAt = parseDateValue(startEvent.created_at).getTime();
+  const completedAt = parseDateValue(completeEvent.created_at).getTime();
+  if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt)) {
+    return null;
+  }
+
+  return Math.max(0, (completedAt - startedAt) / 1000);
+}
+
+function getExecutionStepDurationSeconds(stepDraft: ExecutionStepDraft): number | null {
+  return (
+    getEventDurationSeconds(stepDraft.completeEvent) ??
+    getEventDurationSeconds(stepDraft.startEvent) ??
+    getEventPairDurationSeconds(stepDraft.startEvent, stepDraft.completeEvent)
+  );
+}
+
 function summarizePreviewItems(items: string[], locale: string, limit = 2) {
   const uniqueItems = Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
   const previewItems = uniqueItems.slice(0, limit);
@@ -1286,6 +1352,7 @@ function buildMergedExecutionEvent(stepDraft: ExecutionStepDraft): SessionEvent 
       name: completePayload.name ?? startPayload.name,
       arguments: completePayload.arguments ?? startPayload.arguments,
       input: completePayload.input ?? startPayload.input,
+      duration_seconds: completePayload.duration_seconds ?? startPayload.duration_seconds,
     },
   };
 }
@@ -1361,6 +1428,7 @@ function buildExecutionStepPresentation(
   }
 
   const timelinePresentation = buildTimelinePresentation(mergedEvent, copy, locale);
+  const durationSeconds = getExecutionStepDurationSeconds(stepDraft);
   return {
     key: stepDraft.completeEvent?._id ?? stepDraft.startEvent?._id ?? mergedEvent._id,
     title: getStepTitleFromEvents(stepDraft, mergedEvent, copy, locale),
@@ -1368,6 +1436,10 @@ function buildExecutionStepPresentation(
     tone: timelinePresentation.tone,
     leadEvent: mergedEvent,
     timelinePresentation,
+    durationLabel:
+      durationSeconds !== null
+        ? formatDurationSeconds(durationSeconds, locale, copy.common.notSpecified)
+        : null,
   };
 }
 
@@ -1965,6 +2037,7 @@ function MarkdownCodeBlock({
   const language = parseMarkdownLanguage(className);
   const codeText = flattenMarkdownText(children).replace(/\n$/, "");
   const lineCount = codeText ? codeText.split(/\r?\n/).length : 0;
+  const isInline = inline ?? !language;
 
   useEffect(() => {
     if (!copied) {
@@ -1975,7 +2048,7 @@ function MarkdownCodeBlock({
     return () => window.clearTimeout(timeoutId);
   }, [copied]);
 
-  if (inline) {
+  if (isInline) {
     return <code className={`markdown-inline-code${className ? ` ${className}` : ""}`}>{children}</code>;
   }
 
@@ -2060,6 +2133,13 @@ function buildMarkdownComponents(locale: Locale, copy: TranslationCopy): Compone
         copiedLabel={copy.common.copied}
       />
     ),
+    pre: ({ children }) => {
+      const childArray = Children.toArray(children);
+      if (childArray.length === 1 && isValidElement<MarkdownCodeRendererProps>(childArray[0])) {
+        return cloneElement(childArray[0] as ReactElement<MarkdownCodeRendererProps>, { inline: false });
+      }
+      return <pre>{children}</pre>;
+    },
     hr: () => <hr className="markdown-divider" />,
     input: ({ checked, ...props }) => (
       <input
@@ -2082,11 +2162,13 @@ function buildMarkdownComponents(locale: Locale, copy: TranslationCopy): Compone
 type AgentPanelProps = {
   isSessionSidebarCollapsed?: boolean;
   isContextSidebarCollapsed?: boolean;
+  onRequestCloseSessionSidebar?: () => void;
 };
 
 export default function AgentPanel({
   isSessionSidebarCollapsed = false,
   isContextSidebarCollapsed = false,
+  onRequestCloseSessionSidebar,
 }: AgentPanelProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -2561,7 +2643,9 @@ export default function AgentPanel({
     );
 
     textarea.style.height = "0px";
-    textarea.style.height = `${Math.max(COMPOSER_TEXTAREA_MIN_HEIGHT, availableHeight, textarea.scrollHeight)}px`;
+    const nextHeight = clamp(textarea.scrollHeight, COMPOSER_TEXTAREA_MIN_HEIGHT, availableHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > availableHeight + 1 ? "auto" : "hidden";
   };
 
   const markStreamActivity = () => {
@@ -3038,7 +3122,10 @@ export default function AgentPanel({
   };
 
   const handleNewSession = async () => {
-    await createNewSession();
+    const session = await createNewSession();
+    if (session) {
+      onRequestCloseSessionSidebar?.();
+    }
   };
 
   const handleStarterPrompt = async (starterPrompt: string) => {
@@ -3055,6 +3142,7 @@ export default function AgentPanel({
     setCurrentSession(session);
     setPanelError(null);
     navigateToSession(session._id);
+    onRequestCloseSessionSidebar?.();
   };
 
   const handleStartRenameSession = () => {
@@ -3620,6 +3708,14 @@ export default function AgentPanel({
                             <div className="chat-execution-step-title-row">
                               <span className="chat-execution-step-title">{step.title}</span>
                               <span className={`timeline-stage-badge tone-${timelinePresentation.tone}`}>{timelinePresentation.stage}</span>
+                              {step.durationLabel ? (
+                                <span
+                                  className="chat-execution-step-duration"
+                                  title={`${copy.agent.timelineDetails.labels.duration}: ${step.durationLabel}`}
+                                >
+                                  {step.durationLabel}
+                                </span>
+                              ) : null}
                             </div>
                             {step.preview && step.preview !== step.title ? (
                               <p className="chat-execution-step-summary">{step.preview}</p>
@@ -3824,7 +3920,11 @@ export default function AgentPanel({
   ) : null;
 
   return (
-    <div className="agent-workbench" ref={workbenchRef} style={workbenchLayoutStyle}>
+    <div
+      className={`agent-workbench${!isSessionSidebarCollapsed ? " has-session-sidebar" : ""}${!isContextSidebarCollapsed ? " has-context-sidebar" : ""}`}
+      ref={workbenchRef}
+      style={workbenchLayoutStyle}
+    >
       <aside
         className="secondary-sidebar"
         data-testid="session-list-sidebar"

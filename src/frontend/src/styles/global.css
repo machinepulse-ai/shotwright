@@ -7,6 +7,8 @@
 }
 
 :root {
+  --app-viewport-height: 100vh;
+  --app-keyboard-inset-bottom: 0px;
   --workbench-bg: #f3f3f3;
   --titlebar-bg: #f3f3f3;
   --activitybar-bg: #2c2c2c;
@@ -41,10 +43,16 @@
   --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 }
 
+@supports (height: 100dvh) {
+  :root {
+    --app-viewport-height: 100dvh;
+  }
+}
+
 html,
 body,
 #root {
-  height: 100%;
+  height: var(--app-viewport-height);
 }
 
 html {
@@ -52,7 +60,7 @@ html {
 }
 
 body {
-  min-height: 100%;
+  min-height: var(--app-viewport-height);
   font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
   background: var(--workbench-bg);
   color: var(--text);
@@ -65,8 +73,8 @@ a {
 }
 
 .workbench {
-  height: 100vh;
-  min-height: 100vh;
+  height: var(--app-viewport-height);
+  min-height: var(--app-viewport-height);
   display: flex;
   flex-direction: column;
   background: var(--workbench-bg);
@@ -538,17 +546,104 @@ textarea {
 
 .statusbar {
   flex: none;
-  height: 22px;
+  height: 24px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0 10px;
+  gap: 8px;
+  padding: 0 6px;
   background: var(--primary);
   color: white;
-  font-size: 0.73rem;
+  font-size: 0.72rem;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.statusbar-group {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  height: 100%;
+}
+
+.statusbar-group-right {
+  justify-content: flex-end;
+}
+
+.statusbar-item {
+  min-width: 0;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.96);
+  text-overflow: ellipsis;
+}
+
+.statusbar-item + .statusbar-item {
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.statusbar-item-subtle {
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.statusbar-icon {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+.statusbar-icon-branch::before,
+.statusbar-icon-branch::after {
+  content: "";
+  position: absolute;
+  border-color: currentColor;
+}
+
+.statusbar-icon-branch::before {
+  left: 3px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border-left: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  border-bottom-left-radius: 6px;
+}
+
+.statusbar-icon-branch::after {
+  right: 2px;
+  top: 1px;
+  width: 4px;
+  height: 4px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+
+.statusbar-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.statusbar-dot.is-online {
+  background: #7ee787;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.26);
 }
 
 @media (max-width: 900px) {
+  .titlebar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.65rem;
+  }
+
   .titlebar-center {
     display: none;
   }
@@ -559,6 +654,7 @@ textarea {
   }
 
   .titlebar-right {
+    grid-column: 2;
     min-width: 0;
   }
 
@@ -585,9 +681,112 @@ textarea {
   }
 
   .statusbar {
-    flex-direction: column;
-    height: auto;
-    gap: 0.15rem;
-    padding: 0.2rem 0.5rem;
+    height: 24px;
+    padding: 0 4px;
+  }
+
+  .statusbar-item {
+    padding: 0 6px;
+  }
+}
+
+@media (max-width: 520px) {
+  .titlebar {
+    grid-template-columns: auto auto;
+    gap: 0.45rem;
+    justify-content: space-between;
+    padding: 0 8px;
+  }
+
+  .titlebar-left {
+    gap: 0.4rem;
+  }
+
+  .titlebar-right {
+    gap: 0.4rem;
+  }
+
+  .titlebar-nav,
+  .titlebar-workbench-controls,
+  .titlebar-language {
+    min-height: 32px;
+    padding: 0.16rem;
+  }
+
+  .titlebar-tab:not(.active) {
+    display: none;
+  }
+
+  .titlebar-tab {
+    min-width: 52px;
+    min-height: 28px;
+    padding-inline: 0.58rem;
+  }
+
+  .titlebar-pane-toggle {
+    min-width: 30px;
+    min-height: 28px;
+    justify-content: center;
+    padding: 0.3rem;
+  }
+
+  .titlebar-language::after {
+    right: 12px;
+  }
+
+  .titlebar-language select {
+    min-width: 88px;
+    padding: 0.3rem 1.45rem 0.3rem 0.62rem;
+    font-size: 0.78rem;
+  }
+
+  .statusbar-group-right {
+    display: none;
+  }
+
+  .statusbar-group-left {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 360px) {
+  .titlebar {
+    gap: 0.32rem;
+    padding: 0 6px;
+  }
+
+  .titlebar-left,
+  .titlebar-right {
+    gap: 0.3rem;
+  }
+
+  .titlebar-brand-mark {
+    width: 22px;
+    height: 22px;
+  }
+
+  .titlebar-nav {
+    display: none;
+  }
+
+  .titlebar-tab {
+    min-width: 46px;
+    padding-inline: 0.46rem;
+    font-size: 0.8rem;
+  }
+
+  .titlebar-workbench-controls {
+    gap: 0.12rem;
+  }
+
+  .titlebar-pane-toggle {
+    min-width: 28px;
+    padding-inline: 0.24rem;
+  }
+
+  .titlebar-language select {
+    min-width: 84px;
+    max-width: 84px;
   }
 }
