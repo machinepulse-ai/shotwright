@@ -8,7 +8,7 @@ const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
 const NARROW_CONTEXT_QUERY = "(max-width: 1100px)";
 const KEYBOARD_INSET_THRESHOLD = 80;
 const MAX_KEYBOARD_INSET_RATIO = 0.52;
-const KEYBOARD_STABLE_FRAME_COUNT = 12;
+const KEYBOARD_STABLE_FRAME_COUNT = 4;
 const THEME_STORAGE_KEY = "shotwright_theme";
 
 type ColorTheme = "light" | "dark";
@@ -16,6 +16,29 @@ type VisualKeyboardState = {
   keyboardInset: number;
   composerBottom: number;
   fixedOffsetY: number;
+};
+type KeyboardDiagnostic = {
+  stableFrames: number;
+  thresholdFrames: number;
+  keyboardInset: number;
+  composerBottom: number;
+  fixedOffsetY: number;
+  visualHeight: number;
+  visualOffsetTop: number;
+  innerHeight: number;
+  open: boolean;
+};
+
+const EMPTY_KEYBOARD_DIAGNOSTIC: KeyboardDiagnostic = {
+  stableFrames: 0,
+  thresholdFrames: KEYBOARD_STABLE_FRAME_COUNT,
+  keyboardInset: 0,
+  composerBottom: 0,
+  fixedOffsetY: 0,
+  visualHeight: 0,
+  visualOffsetTop: 0,
+  innerHeight: 0,
+  open: false,
 };
 
 function mediaQueryMatches(query: string) {
@@ -80,6 +103,31 @@ function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardSta
   };
 }
 
+function getVisualKeyboardDiagnostic(state: VisualKeyboardState, stableFrames: number): KeyboardDiagnostic {
+  const visualViewport = window.visualViewport;
+  return {
+    stableFrames,
+    thresholdFrames: KEYBOARD_STABLE_FRAME_COUNT,
+    keyboardInset: state.keyboardInset,
+    composerBottom: state.composerBottom,
+    fixedOffsetY: state.fixedOffsetY,
+    visualHeight: Math.round(visualViewport?.height ?? window.innerHeight ?? 0),
+    visualOffsetTop: Math.round(visualViewport?.offsetTop ?? 0),
+    innerHeight: Math.round(window.innerHeight || document.documentElement.clientHeight || 0),
+    open: state.keyboardInset > 0,
+  };
+}
+
+function formatKeyboardDiagnostic(diagnostic: KeyboardDiagnostic) {
+  return [
+    `KB ${diagnostic.open ? "open" : "idle"}`,
+    `${diagnostic.stableFrames}/${diagnostic.thresholdFrames}`,
+    `inset ${diagnostic.keyboardInset}`,
+    `off ${diagnostic.fixedOffsetY}`,
+    `vv ${diagnostic.visualHeight}@${diagnostic.visualOffsetTop}`,
+  ].join(" ");
+}
+
 function WorkbenchApp() {
   const location = useLocation();
   const { locale, setLocale, copy } = useI18n();
@@ -88,6 +136,7 @@ function WorkbenchApp() {
   const [isSessionSidebarCollapsed, setIsSessionSidebarCollapsed] = useState(() => mediaQueryMatches(MOBILE_DRAWER_QUERY));
   const [isContextSidebarCollapsed, setIsContextSidebarCollapsed] = useState(() => mediaQueryMatches(NARROW_CONTEXT_QUERY));
   const [colorTheme, setColorTheme] = useState<ColorTheme>(() => getInitialColorTheme());
+  const [keyboardDiagnostic, setKeyboardDiagnostic] = useState<KeyboardDiagnostic>(EMPTY_KEYBOARD_DIAGNOSTIC);
   const isAdminSection = location.pathname.startsWith("/admin");
   const showWorkbenchControls = !isAdminSection;
 
@@ -116,6 +165,7 @@ function WorkbenchApp() {
       root.style.setProperty("--app-keyboard-composer-bottom", `${keyboardState.composerBottom}px`);
       root.style.setProperty("--app-keyboard-fixed-offset-y", `${keyboardState.fixedOffsetY}px`);
       root.classList.toggle("is-visual-keyboard-open", keyboardState.keyboardInset > 0);
+      setKeyboardDiagnostic(getVisualKeyboardDiagnostic(keyboardState, stableKeyboardFrames));
     };
 
     const resetKeyboardSettle = () => {
@@ -158,6 +208,7 @@ function WorkbenchApp() {
       }
 
       if (stableKeyboardFrames < KEYBOARD_STABLE_FRAME_COUNT) {
+        setKeyboardDiagnostic(getVisualKeyboardDiagnostic({ ...keyboardState, keyboardInset: 0, composerBottom: 0, fixedOffsetY: 0 }, stableKeyboardFrames));
         frameId = window.requestAnimationFrame(runVisualViewportSync);
         return;
       }
@@ -357,6 +408,9 @@ function WorkbenchApp() {
           </span>
         </div>
         <div className="statusbar-group statusbar-group-right">
+          <span className="statusbar-item statusbar-item-subtle statusbar-keyboard-diagnostic" data-testid="keyboard-diagnostic" title={JSON.stringify(keyboardDiagnostic)}>
+            {formatKeyboardDiagnostic(keyboardDiagnostic)}
+          </span>
           <span className="statusbar-item statusbar-item-subtle">{copy.app.uiEndpoint}</span>
           <span className="statusbar-item statusbar-item-subtle">{copy.app.apiEndpoint}</span>
         </div>

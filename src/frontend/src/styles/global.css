@@ -679,6 +679,11 @@ textarea {
   color: rgba(255, 255, 255, 0.78);
 }
 
+.statusbar-keyboard-diagnostic {
+  max-width: min(360px, 34vw);
+  font-variant-numeric: tabular-nums;
+}
+
 .statusbar-icon {
   position: relative;
   width: 12px;
