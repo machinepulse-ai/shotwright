@@ -466,3 +466,27 @@
     grid-template-columns: 1fr;
   }
 }
+
+html[data-theme="dark"] .admin-shell {
+  background: linear-gradient(180deg, #111318 0%, #0f1117 100%);
+}
+
+html[data-theme="dark"] .stat-card,
+html[data-theme="dark"] .settings-action-bar,
+html[data-theme="dark"] .provider-option,
+html[data-theme="dark"] .admin-section,
+html[data-theme="dark"] .admin-section-hero,
+html[data-theme="dark"] .agent-model-chip {
+  background: var(--panel-bg);
+  border-color: var(--border);
+}
+
+html[data-theme="dark"] .provider-option.active {
+  background: rgba(74, 163, 255, 0.14);
+  border-color: rgba(74, 163, 255, 0.38);
+}
+
+html[data-theme="dark"] .admin-table th,
+html[data-theme="dark"] .admin-table td {
+  border-bottom-color: var(--border);
+}

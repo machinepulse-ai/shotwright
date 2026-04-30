@@ -204,6 +204,65 @@ def test_generate_storyboard_accepts_session_export_video_absolute_path(
     assert Path(metadata["storyboard_image_path"]).exists()
 
 
+def test_generate_storyboard_enriches_export_metadata_without_duration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upload_root = tmp_path / "uploads"
+    export_root = tmp_path / "exports"
+    monkeypatch.setattr(module, "UPLOAD_DIR", upload_root)
+    monkeypatch.setattr(module, "EXPORT_DIR", export_root)
+
+    export_video_path = export_root / "session-1" / "gold.mp4"
+    export_video_path.parent.mkdir(parents=True, exist_ok=True)
+    export_video_path.write_bytes(b"render-bytes")
+    module._write_metadata(
+        export_video_path,
+        {
+            "id": "render-1",
+            "session_id": "session-1",
+            "filename": "gold.mp4",
+            "file_path": str(export_video_path),
+            "shared_relative_path": "session-1/gold.mp4",
+            "mime_type": "video/mp4",
+            "size_bytes": 12,
+            "created_at": "2026-04-21T12:00:00+00:00",
+        },
+    )
+
+    def fake_run_command(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        if command[0] == "ffprobe":
+            return _mock_ffprobe_result(6.0, width=1920, height=1080)
+        if command[0] == "ffmpeg":
+            output_path = Path(command[-1])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"storyboard")
+            return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(module, "_run_command", fake_run_command)
+
+    metadata = module.generate_storyboard(
+        "session-1",
+        reference_video_path="session-1/gold.mp4",
+        output_name="gold-storyboard.jpg",
+        clip_duration_seconds=3.0,
+        interval_seconds=0.75,
+        columns=4,
+        width=320,
+    )
+
+    assert metadata["source_video_duration_seconds"] == 6.0
+    assert metadata["source_video_width"] == 1920
+    assert metadata["source_video_height"] == 1080
+
+    enriched_metadata = module._read_metadata(module._metadata_path(export_video_path))
+    assert enriched_metadata is not None
+    assert enriched_metadata["duration_seconds"] == 6.0
+    assert enriched_metadata["width"] == 1920
+    assert enriched_metadata["height"] == 1080
+
+
 def test_generate_storyboard_rejects_crop_outside_source_frame(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(module, "UPLOAD_DIR", tmp_path)
 

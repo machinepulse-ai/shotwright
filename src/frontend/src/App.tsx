@@ -6,9 +6,78 @@ import { useI18n } from "./i18n";
 
 const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
 const NARROW_CONTEXT_QUERY = "(max-width: 1100px)";
+const KEYBOARD_INSET_THRESHOLD = 80;
+const MAX_KEYBOARD_INSET_RATIO = 0.52;
+const KEYBOARD_STABLE_FRAME_COUNT = 4;
+const THEME_STORAGE_KEY = "shotwright_theme";
+
+type ColorTheme = "light" | "dark";
+type VisualKeyboardState = {
+  keyboardInset: number;
+  composerBottom: number;
+  fixedOffsetY: number;
+};
 
 function mediaQueryMatches(query: string) {
   return typeof window !== "undefined" ? window.matchMedia(query).matches : false;
+}
+
+function getInitialColorTheme(): ColorTheme {
+  if (typeof window === "undefined") return "light";
+
+  try {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (storedTheme === "light" || storedTheme === "dark") {
+      return storedTheme;
+    }
+  } catch {
+    return "light";
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function isAppleTouchViewport() {
+  if (typeof navigator === "undefined") return false;
+  const userAgent = navigator.userAgent.toLowerCase();
+  return /iphone|ipad|ipod/.test(userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function isKeyboardTextTarget(element: Element | null) {
+  if (!(element instanceof HTMLElement)) return false;
+  if (element.isContentEditable) return true;
+
+  const tagName = element.tagName.toLowerCase();
+  if (tagName === "textarea" || tagName === "select") return true;
+  if (tagName !== "input") return false;
+
+  const inputType = ((element as HTMLInputElement).type || "text").toLowerCase();
+  return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(inputType);
+}
+
+function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardState {
+  const visualViewport = window.visualViewport;
+  if (!visualViewport || !isKeyboardTextTarget(document.activeElement)) {
+    return { keyboardInset: 0, composerBottom: 0, fixedOffsetY: 0 };
+  }
+
+  const viewportHeight = visualViewport.height;
+  const rootHeight = document.documentElement.clientHeight || 0;
+  const innerHeight = window.innerHeight || 0;
+  const layoutHeight = Math.max(viewportHeight, layoutViewportHeight, rootHeight, innerHeight);
+  const visualBottom = Math.min(layoutHeight, Math.max(0, visualViewport.offsetTop) + viewportHeight);
+  const rawInset = Math.max(0, layoutHeight - visualBottom);
+  const maxInset = Math.round(layoutHeight * MAX_KEYBOARD_INSET_RATIO);
+  const keyboardInset = Math.min(rawInset, maxInset);
+  const resolvedKeyboardInset = keyboardInset > KEYBOARD_INSET_THRESHOLD ? Math.round(keyboardInset) : 0;
+  const fixedOffsetY = resolvedKeyboardInset > 0 ? Math.round(visualBottom - layoutHeight) : 0;
+  const useFixedOffset = isAppleTouchViewport();
+
+  return {
+    keyboardInset: resolvedKeyboardInset,
+    composerBottom: resolvedKeyboardInset > 0 && !useFixedOffset ? resolvedKeyboardInset : 0,
+    fixedOffsetY: useFixedOffset ? fixedOffsetY : 0,
+  };
 }
 
 function WorkbenchApp() {
@@ -18,27 +87,94 @@ function WorkbenchApp() {
   const [isNarrowContextLayout, setIsNarrowContextLayout] = useState(() => mediaQueryMatches(NARROW_CONTEXT_QUERY));
   const [isSessionSidebarCollapsed, setIsSessionSidebarCollapsed] = useState(() => mediaQueryMatches(MOBILE_DRAWER_QUERY));
   const [isContextSidebarCollapsed, setIsContextSidebarCollapsed] = useState(() => mediaQueryMatches(NARROW_CONTEXT_QUERY));
+  const [colorTheme, setColorTheme] = useState<ColorTheme>(() => getInitialColorTheme());
   const isAdminSection = location.pathname.startsWith("/admin");
   const showWorkbenchControls = !isAdminSection;
 
   useEffect(() => {
     const root = document.documentElement;
+    root.dataset.theme = colorTheme;
+    root.style.colorScheme = colorTheme;
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, colorTheme);
+    } catch {
+      // Ignore storage failures; the in-memory theme still applies.
+    }
+  }, [colorTheme]);
+
+  useEffect(() => {
+    const root = document.documentElement;
     let frameId = 0;
+    let layoutViewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    let layoutViewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    let lastKeyboardSignature = "";
+    let stableKeyboardFrames = 0;
+    root.classList.toggle("is-apple-touch-viewport", isAppleTouchViewport());
+
+    const applyKeyboardState = (keyboardState: VisualKeyboardState) => {
+      root.style.setProperty("--app-keyboard-inset-bottom", `${keyboardState.keyboardInset}px`);
+      root.style.setProperty("--app-keyboard-composer-bottom", `${keyboardState.composerBottom}px`);
+      root.style.setProperty("--app-keyboard-fixed-offset-y", `${keyboardState.fixedOffsetY}px`);
+      root.classList.toggle("is-visual-keyboard-open", keyboardState.keyboardInset > 0);
+    };
+
+    const resetKeyboardSettle = () => {
+      lastKeyboardSignature = "";
+      stableKeyboardFrames = 0;
+    };
+
+    const getKeyboardViewportSignature = () => {
+      const viewport = window.visualViewport;
+      return [
+        Math.round(viewport?.width ?? window.innerWidth),
+        Math.round(viewport?.height ?? window.innerHeight),
+        Math.round(viewport?.offsetTop ?? 0),
+        Math.round(window.innerHeight || document.documentElement.clientHeight || 0),
+      ].join(":");
+    };
+
+    const runVisualViewportSync = () => {
+      frameId = 0;
+      const currentWidth = window.innerWidth || document.documentElement.clientWidth || layoutViewportWidth;
+      const currentHeight = window.innerHeight || document.documentElement.clientHeight || layoutViewportHeight;
+      if (!isKeyboardTextTarget(document.activeElement) || currentWidth !== layoutViewportWidth) {
+        layoutViewportHeight = currentHeight;
+        layoutViewportWidth = currentWidth;
+      }
+
+      const keyboardState = getVisualKeyboardState(layoutViewportHeight);
+      if (keyboardState.keyboardInset <= 0) {
+        resetKeyboardSettle();
+        applyKeyboardState(keyboardState);
+        return;
+      }
+
+      const keyboardSignature = getKeyboardViewportSignature();
+      if (keyboardSignature === lastKeyboardSignature) {
+        stableKeyboardFrames += 1;
+      } else {
+        lastKeyboardSignature = keyboardSignature;
+        stableKeyboardFrames = 1;
+      }
+
+      if (stableKeyboardFrames < KEYBOARD_STABLE_FRAME_COUNT) {
+        frameId = window.requestAnimationFrame(runVisualViewportSync);
+        return;
+      }
+
+      applyKeyboardState(keyboardState);
+    };
 
     const syncVisualViewport = () => {
-      window.cancelAnimationFrame(frameId);
-      frameId = window.requestAnimationFrame(() => {
-        const visualViewport = window.visualViewport;
-        const keyboardInset = visualViewport
-          ? Math.max(0, window.innerHeight - visualViewport.height - visualViewport.offsetTop)
-          : 0;
-
-        root.style.setProperty("--app-keyboard-inset-bottom", `${Math.round(keyboardInset)}px`);
-        root.classList.toggle("is-visual-keyboard-open", keyboardInset > 80);
-      });
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+      frameId = window.requestAnimationFrame(runVisualViewportSync);
     };
 
     syncVisualViewport();
+    window.addEventListener("focusin", syncVisualViewport);
+    window.addEventListener("focusout", syncVisualViewport);
     window.addEventListener("resize", syncVisualViewport);
     window.addEventListener("orientationchange", syncVisualViewport);
     window.visualViewport?.addEventListener("resize", syncVisualViewport);
@@ -46,12 +182,17 @@ function WorkbenchApp() {
 
     return () => {
       window.cancelAnimationFrame(frameId);
+      window.removeEventListener("focusin", syncVisualViewport);
+      window.removeEventListener("focusout", syncVisualViewport);
       window.removeEventListener("resize", syncVisualViewport);
       window.removeEventListener("orientationchange", syncVisualViewport);
       window.visualViewport?.removeEventListener("resize", syncVisualViewport);
       window.visualViewport?.removeEventListener("scroll", syncVisualViewport);
       root.style.removeProperty("--app-keyboard-inset-bottom");
+      root.style.removeProperty("--app-keyboard-composer-bottom");
+      root.style.removeProperty("--app-keyboard-fixed-offset-y");
       root.classList.remove("is-visual-keyboard-open");
+      root.classList.remove("is-apple-touch-viewport");
     };
   }, []);
 
@@ -102,6 +243,10 @@ function WorkbenchApp() {
     }
   };
 
+  const toggleColorTheme = () => {
+    setColorTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"));
+  };
+
   return (
     <div className="workbench">
       <header className="titlebar">
@@ -149,6 +294,18 @@ function WorkbenchApp() {
               </button>
             </div>
           ) : null}
+          <button
+            type="button"
+            className={`titlebar-theme-toggle is-${colorTheme}`}
+            data-testid="toggle-color-theme"
+            aria-pressed={colorTheme === "dark"}
+            aria-label={colorTheme === "dark" ? copy.app.lightModeLabel : copy.app.darkModeLabel}
+            title={colorTheme === "dark" ? copy.app.lightModeLabel : copy.app.darkModeLabel}
+            onClick={toggleColorTheme}
+          >
+            <span className="theme-toggle-icon" aria-hidden="true" />
+            <span className="theme-toggle-text">{colorTheme === "dark" ? copy.app.darkModeShortLabel : copy.app.lightModeShortLabel}</span>
+          </button>
           <label className="titlebar-language" aria-label={copy.app.languageLabel}>
             <select value={locale} onChange={(event) => setLocale(event.target.value as typeof locale)}>
               <option value="zh-CN">{copy.app.languages["zh-CN"]}</option>
@@ -168,6 +325,7 @@ function WorkbenchApp() {
                   isSessionSidebarCollapsed={isSessionSidebarCollapsed}
                   isContextSidebarCollapsed={isContextSidebarCollapsed}
                   onRequestCloseSessionSidebar={isMobileDrawerLayout ? () => setIsSessionSidebarCollapsed(true) : undefined}
+                  onRequestCloseContextSidebar={isMobileDrawerLayout || isNarrowContextLayout ? () => setIsContextSidebarCollapsed(true) : undefined}
                 />
               }
             />
@@ -178,6 +336,7 @@ function WorkbenchApp() {
                   isSessionSidebarCollapsed={isSessionSidebarCollapsed}
                   isContextSidebarCollapsed={isContextSidebarCollapsed}
                   onRequestCloseSessionSidebar={isMobileDrawerLayout ? () => setIsSessionSidebarCollapsed(true) : undefined}
+                  onRequestCloseContextSidebar={isMobileDrawerLayout || isNarrowContextLayout ? () => setIsContextSidebarCollapsed(true) : undefined}
                 />
               }
             />

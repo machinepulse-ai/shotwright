@@ -310,6 +310,53 @@ def _probe_video(file_path: Path) -> dict:
     }
 
 
+def _metadata_missing_video_probe_fields(metadata: dict) -> bool:
+    return (
+        _parse_positive_float(metadata.get("duration_seconds")) is None
+        or _parse_positive_int(metadata.get("width")) is None
+        or _parse_positive_int(metadata.get("height")) is None
+    )
+
+
+def _resolve_video_metadata_from_path(session_id: str, resolved_path: Path, metadata: dict | None = None) -> dict:
+    resolved_metadata = dict(metadata or {})
+    should_write_metadata = not metadata
+
+    if _metadata_missing_video_probe_fields(resolved_metadata):
+        probe = _probe_video(resolved_path)
+        duration_seconds = _parse_positive_float(resolved_metadata.get("duration_seconds"))
+        width = _parse_positive_int(resolved_metadata.get("width"))
+        height = _parse_positive_int(resolved_metadata.get("height"))
+        resolved_metadata.update(
+            {
+                "duration_seconds": duration_seconds if duration_seconds is not None else float(probe["duration_seconds"]),
+                "width": width if width is not None else probe.get("width"),
+                "height": height if height is not None else probe.get("height"),
+            }
+        )
+        should_write_metadata = True
+
+    base_fields = {
+        "id": resolved_metadata.get("id") or uuid4().hex[:12],
+        "session_id": resolved_metadata.get("session_id") or session_id,
+        "filename": resolved_metadata.get("filename") or resolved_path.name,
+        "file_path": str(resolved_path),
+        "reference_video_path": str(resolved_path),
+        "shared_relative_path": _relative_to_session_storage(resolved_path),
+        "mime_type": resolved_metadata.get("mime_type") or mimetypes.guess_type(resolved_path.name)[0] or "video/mp4",
+        "size_bytes": resolved_path.stat().st_size,
+        "created_at": resolved_metadata.get("created_at") or _utcnow().isoformat(),
+    }
+    if any(resolved_metadata.get(key) != value for key, value in base_fields.items()):
+        should_write_metadata = True
+    resolved_metadata.update(base_fields)
+
+    if should_write_metadata:
+        _write_metadata(resolved_path, resolved_metadata)
+
+    return resolved_metadata
+
+
 def _load_asset_metadata(directory: Path, *, limit: int | None = None) -> list[dict]:
     if not directory.exists():
         return []
@@ -435,28 +482,14 @@ def _resolve_reference_video_metadata(session_id: str, reference_video_path: str
     if reference_video_path:
         resolved_path = _resolve_session_asset_path(session_id, reference_video_path, REFERENCE_VIDEOS_DIR)
         metadata = _read_metadata(_metadata_path(resolved_path))
-        if metadata:
-            return metadata
-
-        probe = _probe_video(resolved_path)
-        return {
-            "id": uuid4().hex[:12],
-            "session_id": session_id,
-            "filename": resolved_path.name,
-            "file_path": str(resolved_path),
-            "reference_video_path": str(resolved_path),
-            "shared_relative_path": _relative_to_session_storage(resolved_path),
-            "mime_type": mimetypes.guess_type(resolved_path.name)[0] or "video/mp4",
-            "size_bytes": resolved_path.stat().st_size,
-            "duration_seconds": float(probe["duration_seconds"]),
-            "width": probe.get("width"),
-            "height": probe.get("height"),
-            "created_at": _utcnow().isoformat(),
-        }
+        return _resolve_video_metadata_from_path(session_id, resolved_path, metadata)
 
     candidates = list_reference_videos(session_id, limit=1)
     if not candidates:
         raise ValueError("No uploaded reference videos are available for this session.")
+    candidate_path = Path(str(candidates[0].get("file_path") or ""))
+    if candidate_path.exists():
+        return _resolve_video_metadata_from_path(session_id, candidate_path, candidates[0])
     return candidates[0]
 
 

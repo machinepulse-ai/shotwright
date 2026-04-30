@@ -145,3 +145,15 @@
     grid-template-columns: 1fr;
   }
 }
+
+html[data-theme="dark"] .container-manager,
+html[data-theme="dark"] .container-item,
+html[data-theme="dark"] .container-fact {
+  background: var(--panel-bg);
+  border-color: var(--border);
+}
+
+html[data-theme="dark"] .container-item.is-running {
+  background: rgba(126, 231, 135, 0.1);
+  border-color: rgba(126, 231, 135, 0.22);
+}

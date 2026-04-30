@@ -17,6 +17,7 @@ import {
 } from "react";
 import ReactMarkdown, { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import Hls from "hls.js";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
@@ -93,6 +94,7 @@ type MetaChip = {
 };
 
 const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const SUPPORTED_PROJECT_ARCHIVE_EXTENSIONS = new Set([".zip"]);
 const SUPPORTED_REFERENCE_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".wmv", ".mpeg", ".mpg"]);
 const MAX_COMPOSER_IMAGE_BYTES = 6 * 1024 * 1024;
 const MAX_COMPOSER_ATTACHMENTS = 4;
@@ -184,10 +186,30 @@ type ReferenceMediaGalleryItem = {
   key: string;
   kind: "video" | "image";
   src: string;
+  format?: "mp4" | "hls";
   label: string;
   title: string;
   meta: string | null;
   thumbnailSrc?: string | null;
+};
+
+type ChatResultAssetKind = "mp4" | "stream" | "storyboard" | "archive";
+
+type ChatResultAsset = {
+  kind: ChatResultAssetKind;
+  label: string;
+  value: string;
+};
+
+type ChatResultCard = {
+  key: string;
+  title: string;
+  mp4Name: string | null;
+  videoSrc: string | null;
+  videoFormat: "mp4" | "hls" | null;
+  storyboardUrl: string | null;
+  storyboardName: string | null;
+  archiveUrl: string | null;
 };
 
 type ReferenceVideoCard = {
@@ -445,9 +467,13 @@ function isReferenceVideoFile(file: File) {
   return SUPPORTED_REFERENCE_VIDEO_EXTENSIONS.has(getFileExtension(file.name));
 }
 
+function isProjectArchiveFile(file: File) {
+  return SUPPORTED_PROJECT_ARCHIVE_EXTENSIONS.has(getFileExtension(file.name));
+}
+
 function getDroppedMediaFiles(event: DragEvent<HTMLElement>) {
   return Array.from(event.dataTransfer?.files || []).filter(
-    (file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()) || isReferenceVideoFile(file),
+    (file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()) || isReferenceVideoFile(file) || isProjectArchiveFile(file),
   );
 }
 
@@ -1062,12 +1088,33 @@ function getTimelinePreviewText(event: SessionEvent, copy: TranslationCopy, loca
 }
 
 function getTimelineEventTone(event: SessionEvent, payload: Record<string, unknown>): TimelineTone {
-  if (event.type.includes("error") || payload.success === false || Boolean(extractEventText(payload.error))) {
+  const summary = event.summary.trim().toLowerCase();
+  const resultRecord = payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)
+    ? (payload.result as Record<string, unknown>)
+    : null;
+  const resultType = extractEventText(payload.result_type ?? payload.resultType ?? resultRecord?.result_type ?? resultRecord?.resultType).toLowerCase();
+  const explicitSuccess =
+    payload.success === true ||
+    resultType === "success" ||
+    summary.endsWith("(ok)") ||
+    summary.endsWith("(success)");
+  const explicitFailure =
+    payload.success === false ||
+    resultType === "failure" ||
+    resultType === "failed" ||
+    summary.endsWith("(failed)") ||
+    summary.endsWith("(failure)");
+
+  if (event.type.includes("error") || explicitFailure) {
     return "danger";
   }
 
-  if (event.type.includes("complete") || event.type.endsWith("idle") || payload.success === true) {
+  if (explicitSuccess || event.type.includes("complete") || event.type.endsWith("idle")) {
     return "success";
+  }
+
+  if (Boolean(extractEventText(payload.error))) {
+    return "danger";
   }
 
   if (
@@ -1507,10 +1554,19 @@ function flushActiveSteps(activeSteps: ExecutionStepDraft[], groupDraft: Executi
   }
 }
 
-function buildGroupTitle(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPresentation[], copy: TranslationCopy, locale: string) {
+function buildGroupTitle(
+  groupDraft: ExecutionGroupDraft,
+  steps: ExecutionStepPresentation[],
+  copy: TranslationCopy,
+  locale: string,
+  preferFailingStep: boolean,
+) {
   const headerEvent = groupDraft.headerEvent;
   const fallbackTitle = maybePreferLocalizedFallbackTitle(groupDraft.fallbackTitle, locale);
   const firstStepTitle = maybePreferLocalizedFallbackTitle(steps[0]?.title, locale);
+  const failingStepTitle = preferFailingStep
+    ? maybePreferLocalizedFallbackTitle([...steps].reverse().find((step) => step.tone === "danger")?.title, locale)
+    : null;
 
   if (headerEvent?.type === "assistant.intent") {
     const intentTitle = maybePreferLocalizedFallbackTitle(extractEventText(headerEvent.data.intent), locale);
@@ -1522,18 +1578,17 @@ function buildGroupTitle(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPr
     return localizedHeaderTitle || fallbackTitle || firstStepTitle || getTimelineExpandedSummary(headerEvent, copy, locale);
   }
 
-  return fallbackTitle || firstStepTitle || copy.agent.timelineDetails.summary.execution;
+  return failingStepTitle || fallbackTitle || firstStepTitle || copy.agent.timelineDetails.summary.execution;
 }
 
 function getGroupTone(groupDraft: ExecutionGroupDraft, steps: ExecutionStepPresentation[]) {
   const tones = [
-    ...steps.map((step) => step.tone),
     ...(groupDraft.headerEvent ? [getTimelineEventTone(groupDraft.headerEvent, getCompactEventPayloadRecord(groupDraft.headerEvent))] : []),
+    ...steps.map((step) => step.tone),
   ];
+  const terminalTone = [...tones].reverse().find((tone) => tone === "danger" || tone === "success" || tone === "accent");
+  if (terminalTone) return terminalTone;
 
-  if (tones.includes("danger")) return "danger";
-  if (tones.includes("success")) return "success";
-  if (tones.includes("accent")) return "accent";
   if (tones.includes("muted")) return "muted";
   return "neutral";
 }
@@ -1551,8 +1606,8 @@ function buildExecutionGroupPresentation(
     return null;
   }
 
-  const title = buildGroupTitle(groupDraft, steps, copy, locale);
   const tone = getGroupTone(groupDraft, steps);
+  const title = buildGroupTitle(groupDraft, steps, copy, locale, tone === "danger");
   const preview = summarizePreviewItems(
     steps
       .map((step) => step.preview || step.title)
@@ -1705,10 +1760,9 @@ function getExecutionLeadEvent(events: SessionEvent[]) {
 
 function getExecutionBlockTone(events: SessionEvent[]) {
   const tones = events.map((event) => getTimelineEventTone(event, getCompactEventPayloadRecord(event)));
+  const terminalTone = [...tones].reverse().find((tone) => tone === "danger" || tone === "success" || tone === "accent");
+  if (terminalTone) return terminalTone;
 
-  if (tones.includes("danger")) return "danger";
-  if (tones.includes("success")) return "success";
-  if (tones.includes("accent")) return "accent";
   if (tones.includes("muted")) return "muted";
   return "neutral";
 }
@@ -1953,6 +2007,155 @@ function buildRenderUrl(sessionId: string, latestRenderPath: string | null | und
   return latestRenderPath ? `/api/streams/renders/${sessionId}` : null;
 }
 
+const CHAT_RESULT_LABEL_PATTERN =
+  /^(?:[-*+]\s*)?(?:\*\*)?\s*((?:新版|修正版|updated|revised|fixed)?\s*(?:MP4|Output|Render|Rendered MP4|视频|渲染视频|预览流|HLS|HLS stream|Preview stream|分镜图|Storyboard|Storyboard sheet|项目归档|工程归档|Archive|Project archive|归档))(?:\s*\*\*)?\s*[：:]\s*(.+?)\s*$/i;
+
+function classifyChatResultAsset(label: string, value: string): ChatResultAssetKind | null {
+  const normalizedLabel = label.trim().toLowerCase();
+  const normalizedValue = value.trim().toLowerCase();
+
+  if (/预览流|hls|stream/.test(normalizedLabel) || normalizedValue.includes(".m3u8")) {
+    return "stream";
+  }
+  if (/分镜|storyboard/.test(normalizedLabel) || /\.(jpe?g|png|webp|gif)(?:[?#].*)?$/i.test(normalizedValue)) {
+    return "storyboard";
+  }
+  if (/归档|archive/.test(normalizedLabel) || normalizedValue.includes("/archive")) {
+    return "archive";
+  }
+  if (/mp4|output|render|视频|渲染/.test(normalizedLabel) || /\.mp4(?:[?#].*)?$/i.test(normalizedValue)) {
+    return "mp4";
+  }
+
+  return null;
+}
+
+function extractChatResultAssetValue(rawValue: string) {
+  const linkMatch = /\[[^\]]*]\(([^)]+)\)/.exec(rawValue);
+  const codeMatch = /`([^`]+)`/.exec(rawValue);
+  const value = linkMatch?.[1] || codeMatch?.[1] || rawValue;
+
+  return value
+    .replace(/\*\*/g, "")
+    .replace(/^["']+|["']+$/g, "")
+    .replace(/[，,。.;；]+$/g, "")
+    .trim();
+}
+
+function parseChatResultAssets(content: string) {
+  const assets: ChatResultAsset[] = [];
+  const markdownLines: string[] = [];
+
+  for (const line of content.split(/\r?\n/)) {
+    const match = CHAT_RESULT_LABEL_PATTERN.exec(line.trim());
+    if (!match) {
+      markdownLines.push(line);
+      continue;
+    }
+
+    const value = extractChatResultAssetValue(match[2]);
+    const kind = value ? classifyChatResultAsset(match[1], value) : null;
+    if (!kind) {
+      markdownLines.push(line);
+      continue;
+    }
+
+    assets.push({ kind, label: match[1].trim(), value });
+  }
+
+  return {
+    assets,
+    markdown: markdownLines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+  };
+}
+
+function isDirectAssetUrl(value: string) {
+  return /^(https?:)?\/\//i.test(value) || value.startsWith("/");
+}
+
+function looksLikeLocalDrivePath(value: string) {
+  return /^[a-z]:[\\/]/i.test(value);
+}
+
+function resolveUploadOrDirectUrl(value: string | null | undefined) {
+  if (!value) return null;
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return null;
+  if (isDirectAssetUrl(trimmedValue)) return trimmedValue;
+  if (looksLikeLocalDrivePath(trimmedValue)) return null;
+  return buildUploadAssetUrl(trimmedValue);
+}
+
+function findRenderOutputForValue(value: string | null | undefined, context: AgentContext | null) {
+  if (!value || !context?.render_outputs?.length) return null;
+
+  const targetName = basename(value, value).toLowerCase();
+  return context.render_outputs.find((output) => {
+    const candidates = [output.filename, output.shared_relative_path, output.file_path].map((candidate) => basename(candidate, "").toLowerCase());
+    return candidates.includes(targetName);
+  }) ?? null;
+}
+
+function resolveChatResultRenderUrl(value: string | null | undefined, sessionId: string | null | undefined, context: AgentContext | null) {
+  if (!value) return null;
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return null;
+
+  if (isDirectAssetUrl(trimmedValue) && !trimmedValue.endsWith(".m3u8")) {
+    return trimmedValue;
+  }
+
+  const renderOutput = findRenderOutputForValue(trimmedValue, context);
+  if (renderOutput && sessionId) {
+    return buildRenderOutputUrl(sessionId, renderOutput.id);
+  }
+
+  const targetName = basename(trimmedValue, trimmedValue).toLowerCase();
+  const latestName = basename(context?.latest_render_path, "").toLowerCase();
+  if (context?.latest_render_url && targetName && latestName && targetName === latestName) {
+    return context.latest_render_url;
+  }
+
+  return null;
+}
+
+function buildChatResultCards(content: string, sessionId: string | null | undefined, context: AgentContext | null, copy: TranslationCopy) {
+  const parsed = parseChatResultAssets(content);
+  if (!parsed.assets.length) {
+    return { markdown: content, cards: [] as ChatResultCard[] };
+  }
+
+  const latestByKind = parsed.assets.reduce<Record<ChatResultAssetKind, ChatResultAsset | null>>(
+    (accumulator, asset) => ({ ...accumulator, [asset.kind]: asset }),
+    { mp4: null, stream: null, storyboard: null, archive: null },
+  );
+  const mp4Name = latestByKind.mp4 ? basename(latestByKind.mp4.value, latestByKind.mp4.value) : null;
+  const mp4Url = resolveChatResultRenderUrl(latestByKind.mp4?.value, sessionId, context);
+  const streamUrl = latestByKind.stream ? resolveUploadOrDirectUrl(latestByKind.stream.value) : null;
+  const storyboardUrl = latestByKind.storyboard ? resolveUploadOrDirectUrl(latestByKind.storyboard.value) : null;
+  const storyboardName = latestByKind.storyboard ? basename(latestByKind.storyboard.value, latestByKind.storyboard.value) : null;
+  const archiveUrl = latestByKind.archive ? resolveUploadOrDirectUrl(latestByKind.archive.value) : null;
+  const videoSrc = mp4Url || streamUrl;
+  const videoFormat: ChatResultCard["videoFormat"] = mp4Url ? "mp4" : streamUrl ? "hls" : null;
+  const fallbackTitle = streamUrl ? copy.video.previewStream : storyboardName || (archiveUrl ? copy.video.archive : copy.video.resultTitle);
+
+  return {
+    markdown: parsed.markdown,
+    cards: [
+      {
+        key: `${mp4Name || storyboardName || archiveUrl || "result"}:${parsed.assets.length}`,
+        title: mp4Name || fallbackTitle,
+        mp4Name,
+        videoSrc,
+        videoFormat,
+        storyboardUrl,
+        storyboardName,
+        archiveUrl,
+      },
+    ],
+  };
+}
+
 const MARKDOWN_LANGUAGE_LABELS: Record<string, { "zh-CN": string; "en-US": string }> = {
   bash: { "zh-CN": "Bash", "en-US": "Bash" },
   css: { "zh-CN": "CSS", "en-US": "CSS" },
@@ -2160,16 +2363,71 @@ function buildMarkdownComponents(locale: Locale, copy: TranslationCopy): Compone
   };
 }
 
+function ChatResultInlineVideo({ src, format, title }: { src: string; format: "mp4" | "hls"; title: string }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !src) return undefined;
+
+    const resetVideo = () => {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    };
+
+    resetVideo();
+
+    if (format === "mp4") {
+      video.src = src;
+      video.load();
+      return () => resetVideo();
+    }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      return () => {
+        hls.destroy();
+        resetVideo();
+      };
+    }
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = src;
+      video.load();
+      return () => resetVideo();
+    }
+
+    return () => resetVideo();
+  }, [format, src]);
+
+  return (
+    <video
+      ref={videoRef}
+      className="chat-result-video-element"
+      controls
+      muted
+      playsInline
+      preload="metadata"
+      title={title}
+    />
+  );
+}
+
 type AgentPanelProps = {
   isSessionSidebarCollapsed?: boolean;
   isContextSidebarCollapsed?: boolean;
   onRequestCloseSessionSidebar?: () => void;
+  onRequestCloseContextSidebar?: () => void;
 };
 
 export default function AgentPanel({
   isSessionSidebarCollapsed = false,
   isContextSidebarCollapsed = false,
   onRequestCloseSessionSidebar,
+  onRequestCloseContextSidebar,
 }: AgentPanelProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -2184,7 +2442,7 @@ export default function AgentPanel({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [optimisticTurn, setOptimisticTurn] = useState<OptimisticTurn | null>(null);
-  const [prompt, setPrompt] = useState("");
+  const [composerHasText, setComposerHasTextState] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingImageAttachment[]>([]);
   const [composerAttachmentError, setComposerAttachmentError] = useState<string | null>(null);
   const [isDraggingComposer, setIsDraggingComposer] = useState(false);
@@ -2225,7 +2483,7 @@ export default function AgentPanel({
   const [sessionsError, setSessionsError] = useState<UiError | null>(null);
   const [panelError, setPanelError] = useState<UiError | null>(null);
   const [sessionSettingsError, setSessionSettingsError] = useState<UiError | null>(null);
-  const [editingSessionName, setEditingSessionName] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [draftSessionName, setDraftSessionName] = useState("");
   const [savingSessionName, setSavingSessionName] = useState(false);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
@@ -2233,6 +2491,9 @@ export default function AgentPanel({
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerPromptRef = useRef("");
+  const composerHasTextRef = useRef(false);
+  const composerResizeFrameRef = useRef<number | null>(null);
   const composerAttachmentInputRef = useRef<HTMLInputElement | null>(null);
   const composerCardRef = useRef<HTMLDivElement | null>(null);
   const composerFooterRef = useRef<HTMLDivElement | null>(null);
@@ -2664,6 +2925,48 @@ export default function AgentPanel({
     textarea.style.overflowY = textarea.scrollHeight > availableHeight + 1 ? "auto" : "hidden";
   };
 
+  const scheduleComposerTextareaResize = () => {
+    if (typeof window === "undefined") {
+      resizeComposerTextarea();
+      return;
+    }
+
+    if (composerResizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(composerResizeFrameRef.current);
+    }
+
+    composerResizeFrameRef.current = window.requestAnimationFrame(() => {
+      composerResizeFrameRef.current = null;
+      resizeComposerTextarea();
+    });
+  };
+
+  const updateComposerHasText = (value: string) => {
+    const nextHasText = Boolean(value.trim());
+    if (composerHasTextRef.current === nextHasText) {
+      return;
+    }
+
+    composerHasTextRef.current = nextHasText;
+    setComposerHasTextState(nextHasText);
+  };
+
+  const setComposerPromptValue = (value: string) => {
+    composerPromptRef.current = value;
+    if (composerTextareaRef.current && composerTextareaRef.current.value !== value) {
+      composerTextareaRef.current.value = value;
+    }
+    updateComposerHasText(value);
+    scheduleComposerTextareaResize();
+  };
+
+  const handleComposerPromptChange = (event: ChangeEvent<HTMLTextAreaElement>) => {
+    const value = event.currentTarget.value;
+    composerPromptRef.current = value;
+    updateComposerHasText(value);
+    scheduleComposerTextareaResize();
+  };
+
   const markStreamActivity = () => {
     lastStreamActivityAtRef.current = Date.now();
   };
@@ -2841,7 +3144,7 @@ export default function AgentPanel({
       setDraftModel("");
       setDraftReasoning(null);
       setDraftSessionName("");
-      setEditingSessionName(false);
+      setEditingSessionId(null);
       setSessionSettingsError(null);
       return;
     }
@@ -2849,16 +3152,23 @@ export default function AgentPanel({
     setDraftModel(currentSession.copilot_model);
     setDraftReasoning(currentSession.copilot_reasoning_effort);
     setDraftSessionName(currentSession.name);
-    setEditingSessionName(false);
     setSessionSettingsError(null);
   }, [currentSession?._id, currentSession?.copilot_model, currentSession?.copilot_reasoning_effort, currentSession?.name]);
 
   useEffect(() => {
-    if (!editingSessionName) return;
+    if (!editingSessionId) return;
 
     renameInputRef.current?.focus();
     renameInputRef.current?.select();
-  }, [editingSessionName, currentSession?._id]);
+  }, [editingSessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && composerResizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(composerResizeFrameRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (hasRenderPreview) {
@@ -2945,7 +3255,7 @@ export default function AgentPanel({
     });
 
     return () => window.cancelAnimationFrame(frameId);
-  }, [prompt, pendingAttachments.length, composerHeight, currentSession?._id, isResponding]);
+  }, [pendingAttachments.length, composerHeight, currentSession?._id, isResponding]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3150,7 +3460,8 @@ export default function AgentPanel({
       if (!session) return;
     }
 
-    setPrompt(starterPrompt);
+    setComposerPromptValue(starterPrompt);
+    composerTextareaRef.current?.focus();
   };
 
   const handleSelectSession = (session: Session) => {
@@ -3161,35 +3472,35 @@ export default function AgentPanel({
     onRequestCloseSessionSidebar?.();
   };
 
-  const handleStartRenameSession = () => {
-    if (!currentSession) return;
-
-    setDraftSessionName(currentSession.name);
-    setEditingSessionName(true);
+  const handleStartRenameSession = (session: Session) => {
+    setDraftSessionName(session.name);
+    setEditingSessionId(session._id);
     setPanelError(null);
   };
 
   const handleCancelRenameSession = () => {
-    setDraftSessionName(currentSession?.name ?? "");
-    setEditingSessionName(false);
+    const editingSession = sessions.find((session) => session._id === editingSessionId) ?? currentSession;
+    setDraftSessionName(editingSession?.name ?? "");
+    setEditingSessionId(null);
   };
 
   const handleRenameSession = async () => {
-    if (!currentSession) return;
+    if (!editingSessionId) return;
 
     const nextName = draftSessionName.trim();
     if (!nextName) return;
-    if (nextName === currentSession.name) {
-      setEditingSessionName(false);
+    const editingSession = sessions.find((session) => session._id === editingSessionId) ?? (currentSession?._id === editingSessionId ? currentSession : null);
+    if (editingSession && nextName === editingSession.name) {
+      setEditingSessionId(null);
       return;
     }
 
     setSavingSessionName(true);
     try {
-      const response = await updateSession(currentSession._id, { name: nextName });
+      const response = await updateSession(editingSessionId, { name: nextName });
       syncSessionRecord(response.data);
       setDraftSessionName(response.data.name);
-      setEditingSessionName(false);
+      setEditingSessionId(null);
       setPanelError(null);
     } catch (err: any) {
       setPanelError(buildUiError(err, "failedRenameSession"));
@@ -3234,11 +3545,131 @@ export default function AgentPanel({
     });
   };
 
+  const shouldRenderDrawerDismissLayer =
+    (!isSessionSidebarCollapsed && Boolean(onRequestCloseSessionSidebar)) ||
+    (!isContextSidebarCollapsed && Boolean(onRequestCloseContextSidebar));
+
+  const handleDrawerDismiss = () => {
+    if (!isSessionSidebarCollapsed) {
+      onRequestCloseSessionSidebar?.();
+    }
+    if (!isContextSidebarCollapsed) {
+      onRequestCloseContextSidebar?.();
+    }
+  };
+
+  const renderChatResultCards = (cards: ChatResultCard[]) => {
+    if (!cards.length) {
+      return null;
+    }
+
+    return (
+      <div className="chat-result-cards" data-testid="chat-result-cards">
+        {cards.map((card) => {
+          const mediaTypes = [
+            card.videoFormat === "mp4" ? copy.video.sourceMp4 : card.videoFormat === "hls" ? copy.video.sourceHls : null,
+            card.storyboardUrl ? copy.video.storyboard : null,
+            card.archiveUrl ? copy.video.archive : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          const storyboardPreviewItems: ReferenceMediaGalleryItem[] = card.storyboardUrl
+            ? [
+                {
+                  key: `${card.key}:storyboard`,
+                  kind: "image",
+                  src: card.storyboardUrl,
+                  label: copy.video.storyboard,
+                  title: card.storyboardName || copy.video.storyboard,
+                  meta: null,
+                },
+              ]
+            : [];
+
+          return (
+            <section key={card.key} className="chat-result-card" data-testid="chat-result-card">
+              <div className="chat-result-card-header">
+                <div className="chat-result-card-heading">
+                  <span className="chat-result-card-kicker">{copy.video.resultTitle}</span>
+                  <h4 className="chat-result-card-title" title={card.title}>{card.title}</h4>
+                  {mediaTypes ? <p className="chat-result-card-meta">{mediaTypes}</p> : null}
+                </div>
+                <div className="chat-result-card-controls">
+                  {card.videoFormat ? (
+                    <span className={`video-source-badge format-${card.videoFormat}`}>
+                      {card.videoFormat === "mp4" ? copy.video.sourceMp4 : copy.video.sourceHls}
+                    </span>
+                  ) : null}
+                  {card.videoSrc || card.storyboardUrl || card.archiveUrl ? (
+                    <details className="chat-result-menu">
+                      <summary
+                        className="chat-result-menu-trigger"
+                        data-testid="chat-result-actions-menu"
+                        aria-label={copy.video.resultMenu}
+                        title={copy.video.resultMenu}
+                      >
+                        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                          <path d="M3.25 8a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm3.5 0a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm3.5 0a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Z" fill="currentColor"/>
+                        </svg>
+                      </summary>
+                      <div className="chat-result-menu-popover">
+                        {card.videoSrc ? (
+                          <a href={card.videoSrc} target="_blank" rel="noreferrer" data-testid="chat-result-open-video">
+                            {copy.video.openPreviewSource}
+                          </a>
+                        ) : null}
+                        {card.storyboardUrl ? (
+                          <button type="button" onClick={() => openMediaPreview(storyboardPreviewItems, 0)}>
+                            {copy.video.openStoryboard}
+                          </button>
+                        ) : null}
+                        {card.archiveUrl ? (
+                          <a href={card.archiveUrl} target="_blank" rel="noreferrer" data-testid="chat-result-open-archive">
+                            {copy.video.openArchive}
+                          </a>
+                        ) : null}
+                      </div>
+                    </details>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className={`chat-result-card-body${card.storyboardUrl && card.videoSrc ? " has-storyboard" : ""}`}>
+                {card.videoSrc && card.videoFormat ? (
+                  <div className="chat-result-card-media is-video" data-testid="chat-result-video">
+                    <ChatResultInlineVideo src={card.videoSrc} format={card.videoFormat} title={card.title} />
+                  </div>
+                ) : null}
+
+                {card.storyboardUrl ? (
+                  <button
+                    type="button"
+                    className="chat-result-card-media is-storyboard"
+                    data-testid="chat-result-storyboard"
+                    onClick={() => openMediaPreview(storyboardPreviewItems, 0)}
+                  >
+                    <span className="chat-result-card-media-label">{copy.video.storyboard}</span>
+                    <img src={card.storyboardUrl} alt={card.storyboardName || copy.video.storyboard} loading="lazy" />
+                  </button>
+                ) : null}
+
+                {!card.videoSrc && !card.storyboardUrl ? (
+                  <div className="chat-result-card-placeholder">{copy.video.assetLinksReady}</div>
+                ) : null}
+              </div>
+
+            </section>
+          );
+        })}
+      </div>
+    );
+  };
+
   const handleSend = () => {
-    if (!currentSession || sending || uploadingReferenceVideo) return;
+    if (!currentSession || sending || uploadingReferenceVideo || uploadingProject) return;
 
     const sessionId = currentSession._id;
-    const content = prompt.trim();
+    const content = composerPromptRef.current.trim();
     const attachmentsToSend = pendingAttachments.map(({ id, ...attachment }) => attachment);
     if (!content && !attachmentsToSend.length) return;
 
@@ -3257,7 +3688,7 @@ export default function AgentPanel({
       assistantMessage: optimisticAssistantMessage,
     });
     setSendingSessionId(sessionId);
-    setPrompt("");
+    setComposerPromptValue("");
     setPendingAttachments([]);
     setComposerAttachmentError(null);
     setPanelError(null);
@@ -3275,7 +3706,7 @@ export default function AgentPanel({
       })
       .catch(async (err: any) => {
         setPanelError(buildUiError(err, "failedSendPrompt"));
-        setPrompt(content);
+        setComposerPromptValue(content);
         setPendingAttachments((previous) => (previous.length ? previous : pendingAttachments));
         setOptimisticTurn((previous) => (previous?.sessionId === sessionId ? null : previous));
         await Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
@@ -3359,9 +3790,16 @@ export default function AgentPanel({
   const handleAppendMediaFiles = async (files: File[]) => {
     if (!files.length) return;
 
+    const projectFiles = files.filter((file) => isProjectArchiveFile(file));
     const imageFiles = files.filter((file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()));
-    const videoFiles = files.filter((file) => isReferenceVideoFile(file));
-    const unsupportedCount = files.length - imageFiles.length - videoFiles.length;
+    const videoFiles = files.filter((file) => !isProjectArchiveFile(file) && isReferenceVideoFile(file));
+    const unsupportedCount = files.length - projectFiles.length - imageFiles.length - videoFiles.length;
+
+    if (projectFiles.length) {
+      for (const file of projectFiles) {
+        await handleProjectUpload(file);
+      }
+    }
 
     if (imageFiles.length) {
       await handleAppendAttachments(imageFiles);
@@ -3371,7 +3809,7 @@ export default function AgentPanel({
       await handleUploadReferenceVideos(videoFiles);
     }
 
-    if (unsupportedCount > 0 && !imageFiles.length && !videoFiles.length) {
+    if (unsupportedCount > 0 && !projectFiles.length && !imageFiles.length && !videoFiles.length) {
       setComposerAttachmentError(copy.agent.attachmentErrorUnsupported);
     }
   };
@@ -3414,7 +3852,7 @@ export default function AgentPanel({
   };
 
   const handleOpenComposerAttachmentPicker = () => {
-    if (!currentSession || uploadingReferenceVideo) return;
+    if (!currentSession || uploadingReferenceVideo || uploadingProject) return;
     composerAttachmentInputRef.current?.click();
   };
 
@@ -3589,8 +4027,9 @@ export default function AgentPanel({
       setPanelError(null);
     } catch (err: any) {
       setPanelError(buildUiError(err, "uploadFailed"));
+    } finally {
+      setUploadingProject(false);
     }
-    setUploadingProject(false);
   };
 
   const handleDownload = async (project: ProjectInfo) => {
@@ -3630,6 +4069,7 @@ export default function AgentPanel({
       setSessions(remaining);
       setCurrentSession(remaining[0] ?? null);
       setOptimisticTurn(null);
+      setEditingSessionId((previous) => (previous === sessionId ? null : previous));
       navigateToSession(remaining[0]?._id ?? null);
       setSessionsError(null);
     } catch (err: any) {
@@ -3941,6 +4381,16 @@ export default function AgentPanel({
       ref={workbenchRef}
       style={workbenchLayoutStyle}
     >
+      {shouldRenderDrawerDismissLayer ? (
+        <button
+          type="button"
+          className="drawer-dismiss-layer"
+          data-testid="drawer-dismiss-layer"
+          aria-label={copy.agent.closeSidebars}
+          onClick={handleDrawerDismiss}
+        />
+      ) : null}
+
       <aside
         className="secondary-sidebar"
         data-testid="session-list-sidebar"
@@ -3962,32 +4412,118 @@ export default function AgentPanel({
             {sessions.length ? (
               sessions.map((session) => (
                 <li key={session._id}>
-                  <button
-                    type="button"
+                  <div
                     data-testid="session-list-item"
-                    className={`session-item ${currentSession?._id === session._id ? "active" : ""}`}
-                    onClick={() => handleSelectSession(session)}
+                    className={`session-item ${currentSession?._id === session._id ? "active" : ""}${editingSessionId === session._id ? " is-editing" : ""}`}
                     title={session.name}
                   >
-                    <div className="session-item-top">
-                      <div className="session-title-group">
-                        <div className="session-title-copy">
-                          <span className="session-name">{session.name}</span>
-                          <span className={`session-model-chip ${getSessionModelToneClass(session.copilot_model)}`}>
-                            {formatAgentModelLabel(session.agent_provider, session.copilot_model)}
-                          </span>
+                    {editingSessionId === session._id ? (
+                      <form
+                        className="session-rename-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void handleRenameSession();
+                        }}
+                      >
+                        <input
+                          ref={renameInputRef}
+                          className="session-title-input"
+                          data-testid="session-rename-input"
+                          value={draftSessionName}
+                          onChange={(event: ChangeEvent<HTMLInputElement>) => setDraftSessionName(event.target.value)}
+                          onKeyDown={handleRenameSessionKeyDown}
+                          disabled={savingSessionName}
+                        />
+                        <div className="session-rename-actions">
+                          <button
+                            type="submit"
+                            className="icon-button session-rename-action"
+                            data-testid="session-rename-confirm"
+                            aria-label={savingSessionName ? copy.common.saving : copy.common.confirm}
+                            title={savingSessionName ? copy.common.saving : copy.common.confirm}
+                            disabled={savingSessionName || !draftSessionName.trim()}
+                          >
+                            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                              <path d="M4.2 8.15 6.8 10.8 11.8 5.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button session-rename-action"
+                            aria-label={copy.common.cancel}
+                            title={copy.common.cancel}
+                            onClick={handleCancelRenameSession}
+                            disabled={savingSessionName}
+                          >
+                            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                              <path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z" fill="currentColor"/>
+                            </svg>
+                          </button>
                         </div>
-                      </div>
-                      <span className={`status-badge status-${session.status}`}>{sessionStatusLabels[session.status]}</span>
-                    </div>
-                    <div className="session-footline">
-                      <span className={`session-info-chip ${session.active_project_id ? "is-linked" : "is-empty"}`}>
-                        <span className="session-chip-dot" aria-hidden="true" />
-                        <span>{session.active_project_id ? copy.common.yesBoundProject : copy.common.noProjectUploaded}</span>
-                      </span>
-                      <time className="session-time-chip">{formatDateTime(session.updated_at, locale, copy.common.notStarted)}</time>
-                    </div>
-                  </button>
+                      </form>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="session-item-select"
+                          onClick={() => handleSelectSession(session)}
+                        >
+                          <div className="session-item-top">
+                            <div className="session-title-group">
+                              <div className="session-title-copy">
+                                <span className="session-name">{session.name}</span>
+                                <span className={`session-model-chip ${getSessionModelToneClass(session.copilot_model)}`}>
+                                  {formatAgentModelLabel(session.agent_provider, session.copilot_model)}
+                                </span>
+                              </div>
+                            </div>
+                            <span className={`status-badge status-${session.status}`}>{sessionStatusLabels[session.status]}</span>
+                          </div>
+                          <div className="session-footline">
+                            <span className={`session-info-chip ${session.active_project_id ? "is-linked" : "is-empty"}`}>
+                              <span className="session-chip-dot" aria-hidden="true" />
+                              <span>{session.active_project_id ? copy.common.yesBoundProject : copy.common.noProjectUploaded}</span>
+                            </span>
+                            <time className="session-time-chip">{formatDateTime(session.updated_at, locale, copy.common.notStarted)}</time>
+                          </div>
+                        </button>
+                        <details className="session-item-menu" onClick={(event) => event.stopPropagation()}>
+                          <summary
+                            className="session-item-menu-trigger"
+                            data-testid="session-actions-menu"
+                            aria-label={copy.agent.sessionMenu}
+                            title={copy.agent.sessionMenu}
+                          >
+                            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                              <path d="M3.25 8a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm3.5 0a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm3.5 0a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Z" fill="currentColor"/>
+                            </svg>
+                          </summary>
+                          <div className="session-item-menu-popover">
+                            <button
+                              type="button"
+                              data-testid="session-rename-trigger"
+                              onClick={(event) => {
+                                event.currentTarget.closest("details")?.removeAttribute("open");
+                                handleStartRenameSession(session);
+                              }}
+                            >
+                              {copy.common.rename}
+                            </button>
+                            <button
+                              type="button"
+                              className="danger"
+                              onClick={(event) => {
+                                event.currentTarget.closest("details")?.removeAttribute("open");
+                                void handleDeleteSession(session._id);
+                              }}
+                            >
+                              {copy.common.deleteSession}
+                            </button>
+                          </div>
+                        </details>
+                      </>
+                    )}
+                  </div>
                 </li>
               ))
             ) : (
@@ -4014,71 +4550,6 @@ export default function AgentPanel({
       <section className="chat-stage" data-testid="chat-stage">
         {isSessionRouteLoading ? renderSessionLoadingSkeleton() : (
           <>
-        <header className="chat-stage-header">
-          <div className="chat-stage-heading">
-            <span className="eyebrow">{copy.agent.eyebrow}</span>
-            {currentSession && editingSessionName ? (
-              <input
-                ref={renameInputRef}
-                className="session-title-input"
-                data-testid="session-rename-input"
-                value={draftSessionName}
-                onChange={(event: ChangeEvent<HTMLInputElement>) => setDraftSessionName(event.target.value)}
-                onKeyDown={handleRenameSessionKeyDown}
-                disabled={savingSessionName}
-              />
-            ) : (
-              <h1>{currentSession ? currentSession.name : copy.agent.title.empty}</h1>
-            )}
-          </div>
-          <div className="chat-stage-actions">
-            {currentSession && !editingSessionName && (
-              <button
-                type="button"
-                className="ghost-button chat-stage-action-button"
-                data-testid="session-rename-trigger"
-                onClick={handleStartRenameSession}
-              >
-                {copy.common.rename}
-              </button>
-            )}
-            {currentSession && editingSessionName && (
-              <>
-                <button
-                  type="button"
-                  className="btn-primary chat-stage-action-button"
-                  onClick={() => void handleRenameSession()}
-                  disabled={savingSessionName || !draftSessionName.trim()}
-                >
-                  {savingSessionName ? copy.common.saving : copy.common.confirm}
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button chat-stage-action-button"
-                  onClick={handleCancelRenameSession}
-                  disabled={savingSessionName}
-                >
-                  {copy.common.cancel}
-                </button>
-              </>
-            )}
-            <label className="toolbar-button chat-stage-action-button file-action">
-              {uploadingProject ? copy.common.uploading : copy.common.uploadProject}
-              <input
-                type="file"
-                accept=".zip"
-                hidden
-                onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files?.[0] && handleProjectUpload(e.target.files[0])}
-              />
-            </label>
-            {currentSession && (
-              <button className="btn-danger chat-stage-action-button" onClick={() => handleDeleteSession(currentSession._id)}>
-                {copy.common.deleteSession}
-              </button>
-            )}
-          </div>
-        </header>
-
         <div className="chat-stage-meta">
           {metaChips.map((chip) => (
             <span key={chip.key} className={`meta-chip tone-${chip.tone} meta-chip-${chip.icon}`} title={`${chip.label}: ${chip.value}`}>
@@ -4098,13 +4569,17 @@ export default function AgentPanel({
                   if (entry.kind === "message") {
                     const { message } = entry;
                     const streaming = isStreamingMessage(message);
-                    const hasContent = hasRenderableMessageContent(message);
                     const displayContent =
                       message.role === "assistant"
                         ? localizeFrameworkMessage(message.content, locale, copy) ?? message.content
                         : message.content;
+                    const assistantResultView =
+                      message.role === "assistant" ? buildChatResultCards(displayContent, currentSession?._id, context, copy) : null;
+                    const markdownContent = assistantResultView?.markdown ?? displayContent;
+                    const resultCards = assistantResultView?.cards ?? [];
                     const messageImageAttachments = getMessageImageAttachments(message);
-                    const hasRenderableBody = hasContent || messageImageAttachments.length > 0;
+                    const hasMarkdownContent = Boolean(markdownContent.trim());
+                    const hasRenderableBody = hasMarkdownContent || resultCards.length > 0 || messageImageAttachments.length > 0;
                     const messageTurnId = getMessageTurnId(message);
                     const inlineExecutionEvents =
                       message.role === "assistant" && messageTurnId ? executionEventsByTurn.get(messageTurnId) ?? [] : [];
@@ -4127,10 +4602,12 @@ export default function AgentPanel({
                             {inlineExecutionEvents.length ? renderExecutionBlock(`execution-${messageTurnId}`, inlineExecutionEvents, { inlineAssistant: true }) : null}
 
                             <div className={`chat-message-body markdown-content${streaming ? " streaming" : ""}`} aria-live={streaming ? "polite" : undefined}>
-                              {hasContent ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{displayContent}</ReactMarkdown> : null}
+                              {hasMarkdownContent ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{markdownContent}</ReactMarkdown> : null}
+
+                              {renderChatResultCards(resultCards)}
 
                               {messageImageAttachments.length ? (
-                                <div className={`chat-attachment-grid${hasContent ? " has-copy" : ""}`}>
+                                <div className={`chat-attachment-grid${hasMarkdownContent || resultCards.length ? " has-copy" : ""}`}>
                                   {messageImageAttachments.map((attachment, index) => {
                                     const attachmentMeta = [
                                       attachment.display_name,
@@ -4154,7 +4631,7 @@ export default function AgentPanel({
                                 </div>
                               ) : null}
 
-                              {hasContent && streaming ? <span className="streaming-cursor" aria-hidden="true" /> : null}
+                              {hasMarkdownContent && streaming ? <span className="streaming-cursor" aria-hidden="true" /> : null}
 
                               {!hasRenderableBody && streaming ? (
                                 <div className="chat-message-placeholder">
@@ -4243,17 +4720,6 @@ export default function AgentPanel({
           />
 
           <div className="composer-shell">
-            {currentSession && isResponding ? (
-              <div className="composer-status" data-testid="composer-status">
-                <span className="typing-dots" aria-hidden="true">
-                  <span />
-                  <span />
-                  <span />
-                </span>
-                <span>{copy.agent.respondingStatus}</span>
-              </div>
-            ) : null}
-
             {composerAttachmentError ? <div className="inline-alert composer-alert">{composerAttachmentError}</div> : null}
             {sessionSettingsErrorMessage ? <div className="inline-alert composer-alert">{sessionSettingsErrorMessage}</div> : null}
 
@@ -4267,7 +4733,7 @@ export default function AgentPanel({
               <input
                 ref={composerAttachmentInputRef}
                 type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif,video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.wmv,.mpeg,.mpg"
+                accept="image/png,image/jpeg,image/webp,image/gif,video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.wmv,.mpeg,.mpg,.zip,application/zip,application/x-zip-compressed"
                 hidden
                 multiple
                 onChange={handleComposerAttachmentInputChange}
@@ -4321,9 +4787,9 @@ export default function AgentPanel({
                 rows={3}
                 className="composer-textarea"
                 placeholder={currentSession ? copy.agent.textareaActive : copy.agent.textareaInactive}
-                value={prompt}
+                defaultValue={composerPromptRef.current}
                 disabled={!currentSession}
-                onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setPrompt(e.target.value)}
+                onChange={handleComposerPromptChange}
                 onKeyDown={handlePromptKeyDown}
                 onPaste={handleComposerPaste}
               />
@@ -4337,7 +4803,7 @@ export default function AgentPanel({
                     aria-label={copy.agent.composerAttachImage}
                     title={copy.agent.composerAttachImage}
                     onClick={handleOpenComposerAttachmentPicker}
-                    disabled={!currentSession || uploadingReferenceVideo}
+                    disabled={!currentSession || uploadingReferenceVideo || uploadingProject}
                   >
                     <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                       <path d="M8 2.25a.75.75 0 0 1 .75.75v4.25H13a.75.75 0 0 1 0 1.5H8.75V13a.75.75 0 0 1-1.5 0V8.75H3a.75.75 0 0 1 0-1.5h4.25V3A.75.75 0 0 1 8 2.25Z" fill="currentColor"/>
@@ -4363,7 +4829,7 @@ export default function AgentPanel({
                     <button
                       className="btn-primary send-button"
                       onClick={handleSend}
-                      disabled={!currentSession || sending || uploadingReferenceVideo || (!prompt.trim() && !pendingAttachments.length)}
+                      disabled={!currentSession || sending || uploadingReferenceVideo || uploadingProject || (!composerHasText && !pendingAttachments.length)}
                     >
                       <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                         <path d="M2.5 8.75 11 8.76 7.72 12.04a.75.75 0 1 0 1.06 1.06l4.56-4.57a.75.75 0 0 0 0-1.06L8.78 2.9a.75.75 0 0 0-1.06 1.06L11 7.25H2.5a.75.75 0 0 0 0 1.5Z" fill="currentColor"/>
@@ -4757,19 +5223,6 @@ export default function AgentPanel({
           onClick={() => setMediaPreview(null)}
         >
           <div className="render-preview-modal-shell media-preview-modal-shell" onClick={(event) => event.stopPropagation()}>
-            <button
-              type="button"
-              className="render-preview-modal-close icon-button"
-              data-testid="media-preview-modal-close"
-              aria-label={copy.video.close}
-              title={copy.video.close}
-              onClick={() => setMediaPreview(null)}
-            >
-              <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                <path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z" fill="currentColor"/>
-              </svg>
-            </button>
-
             <div className="media-preview-panel card">
               <div className="panel-heading">
                 <div>
@@ -4781,9 +5234,23 @@ export default function AgentPanel({
                   {mediaPreviewCanNavigate ? (
                     <span className="media-preview-counter">{`${mediaPreview.currentIndex + 1} / ${mediaPreviewCount}`}</span>
                   ) : null}
-                  <a className="ghost-button btn-sm" href={mediaPreviewItem.src} target="_blank" rel="noreferrer">
-                    {copy.video.open}
+                  <a className="media-preview-source-link icon-button" href={mediaPreviewItem.src} target="_blank" rel="noreferrer" aria-label={copy.video.open} title={copy.video.open}>
+                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                      <path d="M9.75 2.75A.75.75 0 0 1 10.5 2h2.75a.75.75 0 0 1 .75.75V5.5a.75.75 0 0 1-1.5 0V4.56L8.53 8.53a.75.75 0 0 1-1.06-1.06l3.97-3.97h-.94a.75.75 0 0 1-.75-.75ZM3.5 4.75a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2v6h6v-2a.75.75 0 0 1 1.5 0v2.25a1.25 1.25 0 0 1-1.25 1.25H4.25A1.25 1.25 0 0 1 3 11.75V5.25a.75.75 0 0 1 .5-.5Z" fill="currentColor"/>
+                    </svg>
                   </a>
+                  <button
+                    type="button"
+                    className="render-preview-modal-close icon-button"
+                    data-testid="media-preview-modal-close"
+                    aria-label={copy.video.close}
+                    title={copy.video.close}
+                    onClick={() => setMediaPreview(null)}
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                      <path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z" fill="currentColor"/>
+                    </svg>
+                  </button>
                 </div>
               </div>
 

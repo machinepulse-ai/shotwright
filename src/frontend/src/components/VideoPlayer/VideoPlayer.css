@@ -71,3 +71,12 @@
     justify-content: flex-start;
   }
 }
+
+html[data-theme="dark"] .video-player {
+  background: var(--panel-bg);
+  border-color: var(--border);
+}
+
+html[data-theme="dark"] .video-element {
+  border-color: var(--border);
+}

@@ -266,7 +266,10 @@ const messagesBySession = {
       content: [
         "**Render ready** once the runtime reconnects.",
         "",
-        "- Output: `result.mp4`",
+        "- MP4: `round3.mp4`",
+        "- Preview stream: `/api/streams/session-ui-regression/render-output-3/index.m3u8`",
+        "- Storyboard: `session-ui-regression/_storyboards/lyrics_seq5_storyboard_really_long_file_name_that_should_wrap_inside_the_reference_media_card.jpg`",
+        "- Project archive: `/api/projects/project-card-3/archive`",
         "- Next step: verify the timing on the title card",
         "",
         "```jsx",
@@ -1069,6 +1072,43 @@ async function collectPaneResizerMetrics(page, testId) {
   });
 }
 
+async function collectModalHeaderMetrics(page, modalSelector) {
+  return page.locator(modalSelector).evaluate((modal) => {
+    const rect = (element) => {
+      if (!element) {
+        return null;
+      }
+      const box = element.getBoundingClientRect();
+      return {
+        left: box.left,
+        right: box.right,
+        top: box.top,
+        bottom: box.bottom,
+        width: box.width,
+        height: box.height,
+      };
+    };
+    const overlaps = (left, right) => {
+      if (!left || !right) {
+        return false;
+      }
+      return !(left.right <= right.left || right.right <= left.left || left.bottom <= right.top || right.bottom <= left.top);
+    };
+
+    const closeRect = rect(modal.querySelector('.render-preview-modal-close'));
+    const openRect = rect(modal.querySelector('.video-player-actions a, .media-preview-header-actions a'));
+    const titleRect = rect(modal.querySelector('.video-player .panel-heading h3, .media-preview-panel h3'));
+
+    return {
+      closeRect,
+      openRect,
+      titleRect,
+      closeOverlapsOpen: overlaps(closeRect, openRect),
+      closeOverlapsTitle: overlaps(closeRect, titleRect),
+    };
+  });
+}
+
 async function collectComposerMetrics(page) {
   return page.evaluate(() => {
     const composerShell = document.querySelector('.composer-shell');
@@ -1359,6 +1399,34 @@ async function collectAssistantExecutionPlacementMetrics(page) {
 
     assert.ok(await assistantMessage.locator("strong").count(), "Assistant Markdown should render strong text");
     assert.ok(await assistantMessage.locator("code").count(), "Assistant Markdown should render code spans or blocks");
+    const chatResultCard = page.locator('[data-testid="chat-result-card"]');
+    await chatResultCard.waitFor();
+    assert.equal(await chatResultCard.count(), 1, "Assistant render links should collapse into a single generated-result card");
+    assert.equal(
+      (await chatResultCard.locator(".chat-result-card-title").textContent())?.trim(),
+      "round3.mp4",
+      "Generated-result card should use the MP4 filename as its title"
+    );
+    assert.ok(
+      (await chatResultCard.locator('[data-testid="chat-result-open-video"]').getAttribute("href"))?.includes(`/api/streams/renders/${primarySessionId}/render-output-3`),
+      "Generated-result card should link to the matched render-output route"
+    );
+    assert.ok(
+      (await chatResultCard.locator('[data-testid="chat-result-storyboard"] img').getAttribute("src"))?.includes("/api/uploads/session-ui-regression/_storyboards/lyrics_seq5"),
+      "Generated-result card should show the storyboard thumbnail instead of leaving the path as markdown"
+    );
+    assert.ok(
+      (await chatResultCard.locator('[data-testid="chat-result-open-archive"]').getAttribute("href"))?.includes("/api/projects/project-card-3/archive"),
+      "Generated-result card should expose the project archive action"
+    );
+    assert.equal(await chatResultCard.locator(".chat-result-card-actions").count(), 0, "Generated-result card actions should live in the secondary menu instead of a prominent footer row");
+    await chatResultCard.locator('[data-testid="chat-result-actions-menu"]').click();
+    const chatResultMenuText = (await chatResultCard.locator(".chat-result-menu-popover").textContent()) || "";
+    assert.ok(
+      chatResultMenuText.includes("Open video source") && chatResultMenuText.includes("Download project archive"),
+      `Generated-result menu should clarify source/archive actions: ${chatResultMenuText}`
+    );
+    await chatResultCard.locator('[data-testid="chat-result-actions-menu"]').click();
 
     const inlineExecutionBlocks = page.locator('[data-testid="conversation-execution-block"]');
     assert.equal(await inlineExecutionBlocks.count(), 1, "Existing turn-scoped execution steps should render inline in the transcript");
@@ -1542,6 +1610,9 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     await page.waitForSelector('[data-testid="render-preview-modal"]');
     const previewVideo = previewModal.locator('.video-element');
     assert.ok((await previewVideo.getAttribute('src'))?.includes(`/api/streams/renders/${primarySessionId}`), 'Preview modal should point at the direct mp4 route');
+    const renderPreviewHeaderMetrics = await collectModalHeaderMetrics(page, '[data-testid="render-preview-modal"]');
+    assert.equal(renderPreviewHeaderMetrics.closeOverlapsOpen, false, `Render preview close button should not overlap the source action: ${JSON.stringify(renderPreviewHeaderMetrics, null, 2)}`);
+    assert.equal(renderPreviewHeaderMetrics.closeOverlapsTitle, false, `Render preview close button should not overlap the filename: ${JSON.stringify(renderPreviewHeaderMetrics, null, 2)}`);
     await page.locator('[data-testid="render-preview-modal-close"]').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="render-preview-modal"]'));
 
@@ -1556,6 +1627,9 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       (await page.locator('.media-preview-video-element').getAttribute('src'))?.includes(`/api/streams/renders/${primarySessionId}/${renderOutputsBySession[primarySessionId][1].id}`),
       'Historical render preview should point at the render-output specific mp4 route'
     );
+    const renderHistoryHeaderMetrics = await collectModalHeaderMetrics(page, '[data-testid="media-preview-modal"]');
+    assert.equal(renderHistoryHeaderMetrics.closeOverlapsOpen, false, `Media preview close button should not overlap the source action: ${JSON.stringify(renderHistoryHeaderMetrics, null, 2)}`);
+    assert.equal(renderHistoryHeaderMetrics.closeOverlapsTitle, false, `Media preview close button should not overlap the filename: ${JSON.stringify(renderHistoryHeaderMetrics, null, 2)}`);
     await page.locator('[data-testid="media-preview-modal-close"]').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="media-preview-modal"]'));
 
@@ -1659,6 +1733,9 @@ async function collectAssistantExecutionPlacementMetrics(page) {
       storyboardsBySession[primarySessionId][4].filename,
       'The preview modal should open the selected gallery item'
     );
+    const longStoryboardHeaderMetrics = await collectModalHeaderMetrics(page, '[data-testid="media-preview-modal"]');
+    assert.equal(longStoryboardHeaderMetrics.closeOverlapsOpen, false, `Long storyboard filename should not push the source action into the close button: ${JSON.stringify(longStoryboardHeaderMetrics, null, 2)}`);
+    assert.equal(longStoryboardHeaderMetrics.closeOverlapsTitle, false, `Long storyboard filename should wrap away from the close button: ${JSON.stringify(longStoryboardHeaderMetrics, null, 2)}`);
 
     await page.locator('[data-testid="media-preview-nav-next"]').click();
     assert.equal(
@@ -1713,12 +1790,13 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     assert.ok(metaAfterReasoning.includes("GPT 5.4"), "Chat header should switch back to GPT 5.4");
     assert.ok(metaAfterReasoning.includes("Medium reasoning"), "Chat header should reflect the saved reasoning effort");
 
-    await page.locator('[data-testid="session-rename-trigger"]').click();
+    const activeSessionItem = page.locator('[data-testid="session-list-item"].active');
+    await activeSessionItem.locator('[data-testid="session-actions-menu"]').click();
+    await activeSessionItem.locator('[data-testid="session-rename-trigger"]').click();
     const renameInput = page.locator('[data-testid="session-rename-input"]');
     await renameInput.fill('Session Sidebar Renamed');
     await renameInput.press('Enter');
     await page.waitForFunction(() => document.body.textContent.includes('Session Sidebar Renamed'));
-    assert.equal((await page.locator('.chat-stage-header h1').textContent())?.trim(), 'Session Sidebar Renamed');
     assert.equal(
       (await page.locator('[data-testid="session-list-item"].active .session-name').textContent())?.trim(),
       'Session Sidebar Renamed'
@@ -1736,7 +1814,8 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     await promptInput.fill("Give me a streamed confirmation message.");
     await sendButton.click();
 
-    await page.waitForSelector('[data-testid="composer-status"]');
+    await page.waitForSelector(".chat-message-placeholder");
+    assert.equal(await page.locator('[data-testid="composer-status"]').count(), 0, "Composer should not duplicate the in-transcript generating status");
     assert.equal(await page.evaluate(() => window.location.pathname), `/sessions/${primarySessionId}`);
     assert.ok(
       ((await page.locator(".chat-message-placeholder").last().textContent()) || "").includes("Generating response"),
@@ -1749,7 +1828,7 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     });
 
     await page.waitForFunction(() => document.body.textContent.includes("Streaming reply 1 ready."));
-    await page.waitForFunction(() => !document.querySelector('[data-testid="composer-status"]'));
+    await page.waitForFunction(() => !document.querySelector(".chat-message-placeholder"));
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="conversation-execution-block"]').length >= 2);
 
     const postSendMeta = (await page.locator(".chat-stage-meta").textContent()) || "";
@@ -1757,9 +1836,10 @@ async function collectAssistantExecutionPlacementMetrics(page) {
 
     await promptInput.fill("Send a second streamed confirmation.");
     await sendButton.click();
-    await page.waitForSelector('[data-testid="composer-status"]');
+    await page.waitForSelector(".chat-message-placeholder");
+    assert.equal(await page.locator('[data-testid="composer-status"]').count(), 0, "Composer status should stay removed on subsequent turns");
     await page.waitForFunction(() => document.body.textContent.includes("Streaming reply 2 ready."));
-    await page.waitForFunction(() => !document.querySelector('[data-testid="composer-status"]'));
+    await page.waitForFunction(() => !document.querySelector(".chat-message-placeholder"));
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="conversation-execution-block"]').length >= 3);
 
     const transcriptText = (await page.locator(".chat-transcript").textContent()) || "";
@@ -1797,9 +1877,10 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     );
 
     await sendButton.click();
-    await page.waitForSelector('[data-testid="composer-status"]');
+    await page.waitForSelector(".chat-message-placeholder");
+    assert.equal(await page.locator('[data-testid="composer-status"]').count(), 0, "Attachment-only sends should not restore the composer status");
     await page.waitForFunction(() => document.body.textContent.includes('Streaming reply 3 ready.'));
-    await page.waitForFunction(() => !document.querySelector('[data-testid="composer-status"]'));
+    await page.waitForFunction(() => !document.querySelector(".chat-message-placeholder"));
     assert.equal(lastTurnPayload?.attachments?.length, 1, `Clipboard image should be sent as a real attachment payload: ${JSON.stringify(lastTurnPayload, null, 2)}`);
     assert.equal(lastTurnPayload?.content, '', 'Attachment-only sends should not require extra placeholder text');
     assert.ok(await page.locator('.chat-attachment-image').count(), 'Sent image attachments should remain visible in the transcript');
@@ -1807,7 +1888,7 @@ async function collectAssistantExecutionPlacementMetrics(page) {
     await page.getByRole("button", { name: /Direct Link Target/i }).click();
     await page.waitForFunction((sessionId) => window.location.pathname === `/sessions/${sessionId}`, secondarySessionId);
     assert.equal(await page.evaluate(() => window.location.pathname), `/sessions/${secondarySessionId}`);
-    assert.equal((await page.locator(".chat-stage-header h1").textContent())?.trim(), "Direct Link Target");
+    assert.equal((await page.locator('[data-testid="session-list-item"].active .session-name').textContent())?.trim(), "Direct Link Target");
     assert.equal(await page.locator('[data-testid="render-preview-panel"]').count(), 0, 'Sessions without a render result should not show the render preview card');
     assert.equal(await page.locator('[data-testid="render-preview-modal"]').count(), 0, 'Preview modal should stay absent when no render exists');
 
