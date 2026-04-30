@@ -527,7 +527,7 @@
 .meta-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.34rem;
+  gap: 0.38rem;
   min-height: 18px;
   max-width: 100%;
   padding: 0;
@@ -539,13 +539,140 @@
   line-height: 1;
 }
 
-.meta-chip::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: rgba(87, 96, 106, 0.4);
+.meta-chip-icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
   flex: none;
+  color: currentColor;
+}
+
+.meta-chip-icon::before,
+.meta-chip-icon::after {
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.meta-chip-icon-runtime::before {
+  inset: 2px 1px;
+  border: 1.4px solid currentColor;
+  border-radius: 3px;
+}
+
+.meta-chip-icon-runtime::after {
+  left: 4px;
+  top: 5px;
+  width: 5px;
+  height: 4px;
+  border-right: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  transform: skewX(-16deg);
+}
+
+.meta-chip-icon-model::before {
+  inset: 3px 2px;
+  border: 1.4px solid currentColor;
+  border-radius: 3px;
+}
+
+.meta-chip-icon-model::after {
+  left: 5px;
+  top: 1px;
+  width: 4px;
+  height: 12px;
+  border-top: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  box-shadow: -4px 3px 0 -2px currentColor, 4px 3px 0 -2px currentColor;
+}
+
+.meta-chip-icon-reasoning::before {
+  left: 6px;
+  top: 1px;
+  width: 2px;
+  height: 12px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: rotate(32deg);
+}
+
+.meta-chip-icon-reasoning::after {
+  left: 2px;
+  top: 5px;
+  width: 10px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: rotate(32deg);
+}
+
+.meta-chip-icon-status::before {
+  inset: 2px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+
+.meta-chip-icon-status::after {
+  left: 5px;
+  top: 5px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.meta-chip-icon-project::before {
+  left: 3px;
+  top: 1px;
+  width: 8px;
+  height: 12px;
+  border: 1.4px solid currentColor;
+  border-radius: 2px;
+}
+
+.meta-chip-icon-project::after {
+  right: 3px;
+  top: 1px;
+  width: 4px;
+  height: 4px;
+  border-left: 1.4px solid currentColor;
+  border-bottom: 1.4px solid currentColor;
+  background: var(--panel-bg);
+}
+
+.meta-chip-icon-container::before {
+  left: 2px;
+  top: 4px;
+  width: 10px;
+  height: 8px;
+  border: 1.4px solid currentColor;
+  border-radius: 2px;
+}
+
+.meta-chip-icon-container::after {
+  left: 5px;
+  top: 1px;
+  width: 4px;
+  height: 4px;
+  border-top: 1.4px solid currentColor;
+  border-left: 1.4px solid currentColor;
+  transform: rotate(45deg);
+  background: var(--panel-bg);
+}
+
+.meta-chip-icon-session::before {
+  inset: 2px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+
+.meta-chip-icon-session::after {
+  left: 4px;
+  right: 4px;
+  top: 6px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: currentColor;
 }
 
 .meta-chip-label,
@@ -573,12 +700,8 @@
   color: #0969da;
 }
 
-.meta-chip.tone-primary::before {
-  background: rgba(0, 120, 212, 0.92);
-}
-
 .meta-chip.tone-accent {
-  color: var(--text);
+  color: #8250df;
 }
 
 .meta-chip.tone-neutral {
@@ -593,16 +716,8 @@
   color: var(--danger);
 }
 
-.meta-chip.tone-danger::before {
-  background: rgba(207, 34, 46, 0.88);
-}
-
 .meta-chip.tone-success {
   color: #1a7f37;
-}
-
-.meta-chip.tone-success::before {
-  background: rgba(26, 127, 55, 0.88);
 }
 
 .notice-banner {
@@ -3472,6 +3587,7 @@
 
   .composer-textarea {
     min-height: 76px;
+    font-size: 16px;
     overflow-y: auto;
   }
 
@@ -3539,11 +3655,11 @@
   }
 
   .composer-session-settings .settings-field-model {
-    flex: 1 1 104px;
+    flex: 1 1 92px;
   }
 
   .composer-session-settings .settings-field-reasoning {
-    flex: 0.8 1 84px;
+    flex: 1 1 96px;
   }
 
   .composer-session-settings .settings-select {
@@ -3552,7 +3668,8 @@
     width: 100%;
     padding-left: 10px;
     padding-right: 24px;
-    font-size: 0.68rem;
+    font-size: 16px;
+    line-height: 1.15;
   }
 
   .composer-attach-button {

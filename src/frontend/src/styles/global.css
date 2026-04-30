@@ -57,6 +57,7 @@ body,
 
 html {
   background: var(--workbench-bg);
+  touch-action: pan-x pan-y;
 }
 
 body {
@@ -66,6 +67,7 @@ body {
   color: var(--text);
   line-height: 1.5;
   overflow: hidden;
+  touch-action: pan-x pan-y;
 }
 
 a {
@@ -788,5 +790,13 @@ textarea {
   .titlebar-language select {
     min-width: 84px;
     max-width: 84px;
+  }
+}
+
+@media (max-width: 820px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
   }
 }

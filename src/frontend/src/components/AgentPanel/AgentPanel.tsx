@@ -88,6 +88,7 @@ type MetaChip = {
   key: string;
   label: string;
   value: string;
+  icon: "session" | "runtime" | "model" | "reasoning" | "status" | "project" | "container";
   tone: "primary" | "accent" | "neutral" | "muted" | "danger" | "success";
 };
 
@@ -2539,6 +2540,7 @@ export default function AgentPanel({
           key: "session",
           label: copy.agent.sessionPanelFields.status,
           value: copy.agent.noActiveSession,
+          icon: "session",
           tone: "muted",
         },
       ];
@@ -2550,6 +2552,7 @@ export default function AgentPanel({
       key: "agent",
       label: copy.agent.sessionPanelFields.runtime,
       value: getAgentRuntimeLabel(currentSession.agent_provider),
+      icon: "runtime",
       tone: "primary",
     });
 
@@ -2557,6 +2560,7 @@ export default function AgentPanel({
       key: "model",
       label: copy.agent.sessionSettingsFields.model,
       value: currentModelDescriptor?.modelLabel || currentSession.copilot_model,
+      icon: "model",
       tone: "primary",
     });
 
@@ -2565,6 +2569,7 @@ export default function AgentPanel({
         key: "reasoning",
         label: copy.agent.sessionSettingsFields.reasoning,
         value: copy.common.reasoningEfforts[currentSession.copilot_reasoning_effort],
+        icon: "reasoning",
         tone: "accent",
       });
     }
@@ -2573,6 +2578,7 @@ export default function AgentPanel({
       key: "status",
       label: copy.agent.sessionPanelFields.status,
       value: sessionStatusLabels[sessionStatus],
+      icon: "status",
       tone: sessionStatus === "error" ? "danger" : sessionStatus === "running" ? "success" : "neutral",
     });
 
@@ -2580,15 +2586,25 @@ export default function AgentPanel({
       key: "project",
       label: copy.agent.sessionPanelFields.activeProject,
       value: activeProject?.filename || copy.common.notSpecified,
+      icon: "project",
       tone: "muted",
     });
 
     if (context?.container) {
+      const containerTone =
+        context.container.status === "running"
+          ? "success"
+          : context.container.status === "creating"
+            ? "accent"
+            : context.container.status === "error"
+              ? "danger"
+              : "muted";
       chips.push({
         key: "container",
         label: copy.agent.containerPrefix,
         value: containerStatusLabels[context.container.status],
-        tone: "neutral",
+        icon: "container",
+        tone: containerTone,
       });
     }
 
@@ -4065,7 +4081,8 @@ export default function AgentPanel({
 
         <div className="chat-stage-meta">
           {metaChips.map((chip) => (
-            <span key={chip.key} className={`meta-chip tone-${chip.tone}`}>
+            <span key={chip.key} className={`meta-chip tone-${chip.tone} meta-chip-${chip.icon}`} title={`${chip.label}: ${chip.value}`}>
+              <span className={`meta-chip-icon meta-chip-icon-${chip.icon}`} aria-hidden="true" />
               <span className="meta-chip-label">{chip.label}</span>
               <span className="meta-chip-value">{chip.value}</span>
             </span>
