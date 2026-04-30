@@ -8,7 +8,7 @@ const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
 const NARROW_CONTEXT_QUERY = "(max-width: 1100px)";
 const KEYBOARD_INSET_THRESHOLD = 80;
 const MAX_KEYBOARD_INSET_RATIO = 0.52;
-const KEYBOARD_STABLE_FRAME_COUNT = 4;
+const KEYBOARD_STABLE_FRAME_COUNT = 12;
 const THEME_STORAGE_KEY = "shotwright_theme";
 
 type ColorTheme = "light" | "dark";
