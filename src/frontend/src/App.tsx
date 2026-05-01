@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import AgentPanel from "./components/AgentPanel/AgentPanel";
 import AdminPanel from "./components/AdminPanel/AdminPanel";
@@ -8,14 +8,28 @@ const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
 const NARROW_CONTEXT_QUERY = "(max-width: 1100px)";
 const KEYBOARD_INSET_THRESHOLD = 80;
 const MAX_KEYBOARD_INSET_RATIO = 0.52;
+const IOS_MAX_KEYBOARD_INSET_RATIO = 0.49;
 const KEYBOARD_STABLE_FRAME_COUNT = 4;
+const KEYBOARD_SETTLE_FALLBACK_MS = 320;
+const IOS_KEYBOARD_CHIN_PADDING_PX = 24;
 const THEME_STORAGE_KEY = "shotwright_theme";
 
 type ColorTheme = "light" | "dark";
+type WorkbenchStatusItem = {
+  key: string;
+  label: string;
+  value: string;
+  tone?: "primary" | "accent" | "neutral" | "muted" | "danger" | "success";
+};
 type VisualKeyboardState = {
   keyboardInset: number;
   composerBottom: number;
   fixedOffsetY: number;
+  layoutHeight: number;
+  visualBottom: number;
+  rawInset: number;
+  source: string;
+  settling: boolean;
 };
 type KeyboardDiagnostic = {
   stableFrames: number;
@@ -23,9 +37,14 @@ type KeyboardDiagnostic = {
   keyboardInset: number;
   composerBottom: number;
   fixedOffsetY: number;
+  layoutHeight: number;
+  visualBottom: number;
+  rawInset: number;
   visualHeight: number;
   visualOffsetTop: number;
   innerHeight: number;
+  source: string;
+  settling: boolean;
   open: boolean;
 };
 
@@ -35,11 +54,37 @@ const EMPTY_KEYBOARD_DIAGNOSTIC: KeyboardDiagnostic = {
   keyboardInset: 0,
   composerBottom: 0,
   fixedOffsetY: 0,
+  layoutHeight: 0,
+  visualBottom: 0,
+  rawInset: 0,
   visualHeight: 0,
   visualOffsetTop: 0,
   innerHeight: 0,
+  source: "none",
+  settling: false,
   open: false,
 };
+
+const WORKBENCH_STATUS_EVENT = "shotwright:statusbar";
+
+function getWorkbenchStatusItems(detail: unknown): WorkbenchStatusItem[] {
+  if (!detail || typeof detail !== "object" || !("items" in detail)) {
+    return [];
+  }
+
+  const items = (detail as { items?: unknown }).items;
+  if (!Array.isArray(items)) {
+    return [];
+  }
+
+  return items
+    .filter((item): item is WorkbenchStatusItem => {
+      if (!item || typeof item !== "object") return false;
+      const candidate = item as Partial<WorkbenchStatusItem>;
+      return Boolean(candidate.key && candidate.label && candidate.value);
+    })
+    .slice(0, 5);
+}
 
 function mediaQueryMatches(query: string) {
   return typeof window !== "undefined" ? window.matchMedia(query).matches : false;
@@ -80,26 +125,49 @@ function isKeyboardTextTarget(element: Element | null) {
 
 function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardState {
   const visualViewport = window.visualViewport;
-  if (!visualViewport || !isKeyboardTextTarget(document.activeElement)) {
-    return { keyboardInset: 0, composerBottom: 0, fixedOffsetY: 0 };
-  }
-
-  const viewportHeight = visualViewport.height;
+  const viewportHeight = visualViewport?.height ?? window.innerHeight ?? 0;
+  const visualOffsetTop = Math.max(0, visualViewport?.offsetTop ?? 0);
   const rootHeight = document.documentElement.clientHeight || 0;
   const innerHeight = window.innerHeight || 0;
   const layoutHeight = Math.max(viewportHeight, layoutViewportHeight, rootHeight, innerHeight);
-  const visualBottom = Math.min(layoutHeight, Math.max(0, visualViewport.offsetTop) + viewportHeight);
-  const rawInset = Math.max(0, layoutHeight - visualBottom);
-  const maxInset = Math.round(layoutHeight * MAX_KEYBOARD_INSET_RATIO);
+  const visualBottom = Math.min(layoutHeight, visualOffsetTop + viewportHeight);
+  const bottomInset = Math.max(0, layoutHeight - visualBottom);
+
+  if (!visualViewport || !isKeyboardTextTarget(document.activeElement)) {
+    return {
+      keyboardInset: 0,
+      composerBottom: 0,
+      fixedOffsetY: 0,
+      layoutHeight,
+      visualBottom,
+      rawInset: bottomInset,
+      source: "none",
+      settling: false,
+    };
+  }
+
+  const useFixedOffset = isAppleTouchViewport();
+  const heightShrinkInset = Math.max(0, layoutHeight - viewportHeight);
+  const rawInset = useFixedOffset ? Math.max(bottomInset, visualOffsetTop, heightShrinkInset) : bottomInset;
+  const maxInsetBase = useFixedOffset ? visualBottom || layoutHeight : layoutHeight;
+  const maxInsetRatio = useFixedOffset ? IOS_MAX_KEYBOARD_INSET_RATIO : MAX_KEYBOARD_INSET_RATIO;
+  const maxInset = Math.round(maxInsetBase * maxInsetRatio);
   const keyboardInset = Math.min(rawInset, maxInset);
   const resolvedKeyboardInset = keyboardInset > KEYBOARD_INSET_THRESHOLD ? Math.round(keyboardInset) : 0;
-  const fixedOffsetY = resolvedKeyboardInset > 0 ? Math.round(visualBottom - layoutHeight) : 0;
-  const useFixedOffset = isAppleTouchViewport();
+  const fixedOffsetY =
+    useFixedOffset && resolvedKeyboardInset > 0
+      ? Math.max(0, Math.round(visualOffsetTop - resolvedKeyboardInset + IOS_KEYBOARD_CHIN_PADDING_PX))
+      : 0;
 
   return {
     keyboardInset: resolvedKeyboardInset,
     composerBottom: resolvedKeyboardInset > 0 && !useFixedOffset ? resolvedKeyboardInset : 0,
-    fixedOffsetY: useFixedOffset ? fixedOffsetY : 0,
+    fixedOffsetY,
+    layoutHeight: Math.round(layoutHeight),
+    visualBottom: Math.round(visualBottom),
+    rawInset: Math.round(rawInset),
+    source: useFixedOffset ? "ios-visual" : "bottom",
+    settling: false,
   };
 }
 
@@ -111,20 +179,26 @@ function getVisualKeyboardDiagnostic(state: VisualKeyboardState, stableFrames: n
     keyboardInset: state.keyboardInset,
     composerBottom: state.composerBottom,
     fixedOffsetY: state.fixedOffsetY,
+    layoutHeight: state.layoutHeight,
+    visualBottom: state.visualBottom,
+    rawInset: state.rawInset,
     visualHeight: Math.round(visualViewport?.height ?? window.innerHeight ?? 0),
     visualOffsetTop: Math.round(visualViewport?.offsetTop ?? 0),
     innerHeight: Math.round(window.innerHeight || document.documentElement.clientHeight || 0),
+    source: state.source,
+    settling: state.settling,
     open: state.keyboardInset > 0,
   };
 }
 
 function formatKeyboardDiagnostic(diagnostic: KeyboardDiagnostic) {
   return [
-    `KB ${diagnostic.open ? "open" : "idle"}`,
+    `KB ${diagnostic.open ? "open" : diagnostic.settling ? "settle" : "idle"}`,
     `${diagnostic.stableFrames}/${diagnostic.thresholdFrames}`,
-    `inset ${diagnostic.keyboardInset}`,
-    `off ${diagnostic.fixedOffsetY}`,
+    `k${diagnostic.keyboardInset}`,
+    `y${diagnostic.fixedOffsetY}`,
     `vv ${diagnostic.visualHeight}@${diagnostic.visualOffsetTop}`,
+    `b${diagnostic.visualBottom}`,
   ].join(" ");
 }
 
@@ -136,7 +210,8 @@ function WorkbenchApp() {
   const [isSessionSidebarCollapsed, setIsSessionSidebarCollapsed] = useState(() => mediaQueryMatches(MOBILE_DRAWER_QUERY));
   const [isContextSidebarCollapsed, setIsContextSidebarCollapsed] = useState(() => mediaQueryMatches(NARROW_CONTEXT_QUERY));
   const [colorTheme, setColorTheme] = useState<ColorTheme>(() => getInitialColorTheme());
-  const [keyboardDiagnostic, setKeyboardDiagnostic] = useState<KeyboardDiagnostic>(EMPTY_KEYBOARD_DIAGNOSTIC);
+  const [workbenchStatusItems, setWorkbenchStatusItems] = useState<WorkbenchStatusItem[]>([]);
+  const keyboardDiagnosticRef = useRef<HTMLSpanElement | null>(null);
   const isAdminSection = location.pathname.startsWith("/admin");
   const showWorkbenchControls = !isAdminSection;
 
@@ -152,25 +227,51 @@ function WorkbenchApp() {
   }, [colorTheme]);
 
   useEffect(() => {
+    const handleWorkbenchStatus = (event: Event) => {
+      setWorkbenchStatusItems(getWorkbenchStatusItems((event as CustomEvent).detail));
+    };
+
+    window.addEventListener(WORKBENCH_STATUS_EVENT, handleWorkbenchStatus);
+    return () => window.removeEventListener(WORKBENCH_STATUS_EVENT, handleWorkbenchStatus);
+  }, []);
+
+  useEffect(() => {
     const root = document.documentElement;
     let frameId = 0;
     let layoutViewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
     let layoutViewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
     let lastKeyboardSignature = "";
     let stableKeyboardFrames = 0;
+    let keyboardCandidateStartedAt = 0;
     root.classList.toggle("is-apple-touch-viewport", isAppleTouchViewport());
+
+    const updateKeyboardDiagnostic = (diagnostic: KeyboardDiagnostic) => {
+      const node = keyboardDiagnosticRef.current;
+      if (!node) return;
+
+      const nextText = formatKeyboardDiagnostic(diagnostic);
+      if (node.textContent !== nextText) {
+        node.textContent = nextText;
+      }
+
+      const nextTitle = JSON.stringify(diagnostic);
+      if (node.title !== nextTitle) {
+        node.title = nextTitle;
+      }
+    };
 
     const applyKeyboardState = (keyboardState: VisualKeyboardState) => {
       root.style.setProperty("--app-keyboard-inset-bottom", `${keyboardState.keyboardInset}px`);
       root.style.setProperty("--app-keyboard-composer-bottom", `${keyboardState.composerBottom}px`);
       root.style.setProperty("--app-keyboard-fixed-offset-y", `${keyboardState.fixedOffsetY}px`);
       root.classList.toggle("is-visual-keyboard-open", keyboardState.keyboardInset > 0);
-      setKeyboardDiagnostic(getVisualKeyboardDiagnostic(keyboardState, stableKeyboardFrames));
+      updateKeyboardDiagnostic(getVisualKeyboardDiagnostic(keyboardState, stableKeyboardFrames));
     };
 
     const resetKeyboardSettle = () => {
       lastKeyboardSignature = "";
       stableKeyboardFrames = 0;
+      keyboardCandidateStartedAt = 0;
     };
 
     const getKeyboardViewportSignature = () => {
@@ -199,16 +300,27 @@ function WorkbenchApp() {
         return;
       }
 
+      if (!keyboardCandidateStartedAt) {
+        keyboardCandidateStartedAt = performance.now();
+      }
+
       const keyboardSignature = getKeyboardViewportSignature();
       if (keyboardSignature === lastKeyboardSignature) {
         stableKeyboardFrames += 1;
       } else {
         lastKeyboardSignature = keyboardSignature;
         stableKeyboardFrames = 1;
+        keyboardCandidateStartedAt = performance.now();
       }
 
-      if (stableKeyboardFrames < KEYBOARD_STABLE_FRAME_COUNT) {
-        setKeyboardDiagnostic(getVisualKeyboardDiagnostic({ ...keyboardState, keyboardInset: 0, composerBottom: 0, fixedOffsetY: 0 }, stableKeyboardFrames));
+      const keyboardWaitedLongEnough = performance.now() - keyboardCandidateStartedAt >= KEYBOARD_SETTLE_FALLBACK_MS;
+      if (stableKeyboardFrames < KEYBOARD_STABLE_FRAME_COUNT && !keyboardWaitedLongEnough) {
+        updateKeyboardDiagnostic(
+          getVisualKeyboardDiagnostic(
+            { ...keyboardState, keyboardInset: 0, composerBottom: 0, fixedOffsetY: 0, settling: true },
+            stableKeyboardFrames,
+          ),
+        );
         frameId = window.requestAnimationFrame(runVisualViewportSync);
         return;
       }
@@ -400,16 +512,31 @@ function WorkbenchApp() {
         <div className="statusbar-group statusbar-group-left">
           <span className="statusbar-item statusbar-item-branch" title={copy.app.gitBranchTitle}>
             <span className="statusbar-icon statusbar-icon-branch" aria-hidden="true" />
-            <span>main*</span>
+            <span>Git main*</span>
           </span>
-          <span className="statusbar-item" title={copy.app.localWorkspace}>
+          <span className="statusbar-item statusbar-local-workspace" title={copy.app.localWorkspace}>
             <span className="statusbar-dot is-online" aria-hidden="true" />
             <span>{copy.app.localWorkspace}</span>
           </span>
+          {workbenchStatusItems.map((item) => (
+            <span
+              key={item.key}
+              className={`statusbar-item statusbar-dynamic-item tone-${item.tone || "neutral"}`}
+              title={`${item.label}: ${item.value}`}
+            >
+              <span className="statusbar-mini-label">{item.label}</span>
+              <span className="statusbar-value">{item.value}</span>
+            </span>
+          ))}
         </div>
         <div className="statusbar-group statusbar-group-right">
-          <span className="statusbar-item statusbar-item-subtle statusbar-keyboard-diagnostic" data-testid="keyboard-diagnostic" title={JSON.stringify(keyboardDiagnostic)}>
-            {formatKeyboardDiagnostic(keyboardDiagnostic)}
+          <span
+            ref={keyboardDiagnosticRef}
+            className="statusbar-item statusbar-item-subtle statusbar-keyboard-diagnostic"
+            data-testid="keyboard-diagnostic"
+            title={JSON.stringify(EMPTY_KEYBOARD_DIAGNOSTIC)}
+          >
+            {formatKeyboardDiagnostic(EMPTY_KEYBOARD_DIAGNOSTIC)}
           </span>
           <span className="statusbar-item statusbar-item-subtle">{copy.app.uiEndpoint}</span>
           <span className="statusbar-item statusbar-item-subtle">{copy.app.apiEndpoint}</span>

@@ -659,10 +659,30 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px 16px;
+  max-height: 84px;
   padding: 6px var(--page-pad) 8px;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(248, 249, 251, 0.86), rgba(255, 255, 255, 0.98));
+  overflow: hidden;
+  transition:
+    max-height 0.18s ease,
+    padding-top 0.18s ease,
+    padding-bottom 0.18s ease,
+    opacity 0.14s ease,
+    transform 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.chat-stage.is-meta-auto-hidden .chat-stage-meta,
+.chat-stage-meta.is-auto-hidden {
+  max-height: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  border-color: transparent !important;
+  opacity: 0 !important;
+  transform: translateY(-4px);
+  pointer-events: none;
 }
 
 .meta-chip {
@@ -878,6 +898,9 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
   scrollbar-width: none;
   -ms-overflow-style: none;
   padding: 10px clamp(14px, 2vw, 22px) 12px;
@@ -1054,32 +1077,34 @@
 }
 
 .session-loading-header {
-  align-items: flex-start;
-  gap: 16px;
+  align-items: center;
+  gap: 14px;
+  min-height: 54px;
 }
 
 .session-loading-heading {
-  gap: 8px;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
 }
 
 .session-loading-copy {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
+  min-width: min(360px, 52vw);
 }
 
-.session-loading-copy h1 {
-  margin: 0;
-  font-size: 1.2rem;
-  line-height: 1.3;
+.session-loading-app-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
 }
 
-.session-loading-copy p {
-  margin: 0;
-  max-width: 60ch;
-  color: var(--text-secondary);
-  font-size: 0.84rem;
-  line-height: 1.5;
+.session-loading-tool-button {
+  width: 34px;
+  min-height: 30px;
+  border-radius: 8px;
 }
 
 .session-loading-toolbar,
@@ -1108,10 +1133,30 @@
   width: 132px;
 }
 
-.session-loading-meta {
+.session-loading-statusbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 10px 14px;
+  min-height: 38px;
+  padding: 7px var(--page-pad);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(248, 249, 251, 0.92), rgba(255, 255, 255, 0.98));
+}
+
+.session-loading-status-chip {
+  width: 112px;
+  min-height: 18px;
+  border-radius: 999px;
+}
+
+.session-loading-status-chip.is-primary {
+  width: 148px;
+}
+
+.session-loading-status-chip.is-wide {
+  width: min(220px, 34vw);
 }
 
 .session-loading-body {
@@ -3981,6 +4026,40 @@
     margin-left: 0;
   }
 
+  .session-loading-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .session-loading-copy {
+    min-width: 0;
+    width: min(210px, 44vw);
+  }
+
+  .session-loading-statusbar {
+    gap: 8px;
+    min-height: 36px;
+    padding: 7px var(--page-pad);
+    overflow: hidden;
+  }
+
+  .session-loading-status-chip {
+    width: 25vw;
+    min-width: 76px;
+  }
+
+  .session-loading-status-chip.is-primary,
+  .session-loading-status-chip.is-wide {
+    width: 31vw;
+    min-width: 96px;
+  }
+
+  .session-loading-status-chip:nth-child(n + 4) {
+    display: none;
+  }
+
   .session-loading-execution-card {
     width: 100%;
     margin-left: 0;
@@ -4015,6 +4094,37 @@
     grid-template-rows: minmax(0, 1fr) 0 clamp(156px, 24vh, 188px);
   }
 
+  .chat-stage {
+    position: relative;
+  }
+
+  .chat-stage-meta {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 12;
+    max-height: none;
+    box-shadow: 0 10px 18px rgba(15, 23, 42, 0.08);
+    transform: translate3d(0, 0, 0);
+    will-change: transform, opacity;
+    transition:
+      opacity 0.14s ease,
+      transform 0.16s ease,
+      border-color 0.16s ease;
+  }
+
+  .chat-stage.is-meta-auto-hidden .chat-stage-meta,
+  .chat-stage-meta.is-auto-hidden {
+    max-height: none !important;
+    padding-top: 6px !important;
+    padding-bottom: 8px !important;
+    border-color: var(--border) !important;
+    opacity: 0 !important;
+    transform: translate3d(0, calc(-100% - 4px), 0);
+    pointer-events: none;
+  }
+
   .composer-resizer {
     display: none;
   }
@@ -4039,6 +4149,16 @@
   .chat-stage-header {
     grid-template-columns: 1fr;
     align-items: stretch;
+  }
+
+  .session-loading-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .session-loading-toolbar {
+    justify-content: flex-end;
+    flex-wrap: nowrap;
   }
 
   .chat-stage-actions {
@@ -4066,14 +4186,20 @@
   }
 
   html.is-visual-keyboard-open .statusbar {
-    display: none;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--app-keyboard-composer-bottom, 0px);
+    z-index: 90;
+    display: flex;
+    box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.14);
   }
 
   html.is-visual-keyboard-open .composer-shell {
     position: fixed;
     left: 0;
     right: 0;
-    bottom: var(--app-keyboard-composer-bottom, 0px);
+    bottom: calc(var(--app-keyboard-composer-bottom, 0px) + var(--app-statusbar-height, 24px));
     z-index: 70;
     min-height: clamp(148px, 30vh, 180px);
     max-height: min(220px, 42vh);
@@ -4082,14 +4208,31 @@
   }
 
   html.is-visual-keyboard-open.is-apple-touch-viewport .composer-shell {
-    bottom: 0;
-    transform: translate3d(0, var(--app-keyboard-fixed-offset-y, 0px), 0);
-    will-change: transform;
+    position: static;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    z-index: auto;
+    min-height: clamp(148px, 30vh, 180px);
+    max-height: min(220px, 42vh);
+  }
+
+  html.is-visual-keyboard-open.is-apple-touch-viewport .statusbar {
+    position: relative;
+    left: auto;
+    right: auto;
+    bottom: auto;
+    z-index: 90;
+  }
+
+  html.is-visual-keyboard-open.is-apple-touch-viewport .chat-stage-body {
+    grid-template-rows: minmax(0, 1fr) 0 clamp(148px, 30vh, 180px);
+    padding-bottom: 0;
   }
 
   html.is-visual-keyboard-open .chat-stage-body {
     grid-template-rows: minmax(0, 1fr) 0 0;
-    padding-bottom: clamp(148px, 30vh, 180px);
+    padding-bottom: calc(clamp(148px, 30vh, 180px) + var(--app-statusbar-height, 24px));
   }
 
   html.is-visual-keyboard-open .chat-stage-header,
@@ -4307,6 +4450,11 @@ html[data-theme="dark"] .chat-stage-header {
 }
 
 html[data-theme="dark"] .chat-stage-meta {
+  background: linear-gradient(180deg, #141922, #11161e);
+  border-color: var(--border);
+}
+
+html[data-theme="dark"] .session-loading-statusbar {
   background: linear-gradient(180deg, #141922, #11161e);
   border-color: var(--border);
 }

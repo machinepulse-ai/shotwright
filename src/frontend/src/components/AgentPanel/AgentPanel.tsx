@@ -8,6 +8,7 @@ import {
   KeyboardEvent,
   PointerEvent as ReactPointerEvent,
   ReactElement,
+  UIEvent,
   cloneElement,
   isValidElement,
   useEffect,
@@ -118,6 +119,10 @@ const SESSION_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_session_sidebar_width";
 const CONTEXT_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_context_sidebar_width";
 const RUNNING_SESSION_POLL_INTERVAL_MS = 1200;
 const STREAM_STALL_POLL_THRESHOLD_MS = 6000;
+const WORKBENCH_STATUS_EVENT = "shotwright:statusbar";
+const STAGE_META_REVEAL_DELAY_MS = 900;
+const STAGE_META_TRANSITION_MS = 220;
+const TRANSCRIPT_USER_SCROLL_INTENT_MS = 1400;
 
 type TimelineTone = MetaChip["tone"];
 
@@ -2488,12 +2493,21 @@ export default function AgentPanel({
   const [savingSessionName, setSavingSessionName] = useState(false);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const workbenchRef = useRef<HTMLDivElement | null>(null);
+  const chatStageRef = useRef<HTMLElement | null>(null);
+  const stageMetaRef = useRef<HTMLDivElement | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerPromptRef = useRef("");
   const composerHasTextRef = useRef(false);
+  const composerHasTextSyncTimerRef = useRef<number | null>(null);
   const composerResizeFrameRef = useRef<number | null>(null);
+  const stageMetaHiddenRef = useRef(false);
+  const stageMetaRevealTimerRef = useRef<number | null>(null);
+  const stageMetaLayoutFrameRef = useRef<number | null>(null);
+  const stageMetaLayoutTimerRef = useRef<number | null>(null);
+  const stageMetaAutoHideSuppressedUntilRef = useRef(0);
+  const lastTranscriptUserScrollIntentAtRef = useRef(0);
   const composerAttachmentInputRef = useRef<HTMLInputElement | null>(null);
   const composerCardRef = useRef<HTMLDivElement | null>(null);
   const composerFooterRef = useRef<HTMLDivElement | null>(null);
@@ -2794,6 +2808,83 @@ export default function AgentPanel({
     effectiveDraftReasoning !== (currentSession?.copilot_reasoning_effort ?? null)
   );
   const showStarterCards = Boolean(currentSession) && !isSessionRouteLoading && visibleMessages.length === 0;
+  const statusbarItems = useMemo(() => {
+    if (!currentSession) {
+      return [
+        {
+          key: "session",
+          label: copy.agent.sessionPanelFields.status,
+          value: copy.agent.noActiveSession,
+          tone: "muted" as const,
+        },
+      ];
+    }
+
+    const items: { key: string; label: string; value: string; tone: TimelineTone }[] = [
+      {
+        key: "status",
+        label: copy.agent.sessionPanelFields.status,
+        value: sessionStatusLabels[sessionStatus],
+        tone: sessionStatus === "error" ? ("danger" as const) : sessionStatus === "running" ? ("success" as const) : ("neutral" as const),
+      },
+      {
+        key: "model",
+        label: copy.agent.sessionSettingsFields.model,
+        value: currentModelDescriptor?.modelLabel || currentSession.copilot_model,
+        tone: "primary" as const,
+      },
+    ];
+
+    if (context?.container) {
+      items.push({
+        key: "container",
+        label: copy.agent.containerPrefix,
+        value: containerStatusLabels[context.container.status],
+        tone:
+          context.container.status === "running"
+            ? ("success" as const)
+            : context.container.status === "creating"
+              ? ("accent" as const)
+              : context.container.status === "error"
+                ? ("danger" as const)
+                : ("muted" as const),
+      });
+    }
+
+    if (currentSession.copilot_reasoning_effort) {
+      items.push({
+        key: "reasoning",
+        label: copy.agent.sessionSettingsFields.reasoning,
+        value: copy.common.reasoningEfforts[currentSession.copilot_reasoning_effort],
+        tone: "accent" as const,
+      });
+    }
+
+    items.push({
+      key: "project",
+      label: copy.agent.sessionPanelFields.activeProject,
+      value: activeProject?.filename ? basename(activeProject.filename, activeProject.filename) : copy.common.notSpecified,
+      tone: "muted" as const,
+    });
+
+    return items;
+  }, [
+    activeProject?.filename,
+    containerStatusLabels,
+    context?.container,
+    copy.agent.containerPrefix,
+    copy.agent.noActiveSession,
+    copy.agent.sessionPanelFields.activeProject,
+    copy.agent.sessionPanelFields.status,
+    copy.agent.sessionSettingsFields.model,
+    copy.agent.sessionSettingsFields.reasoning,
+    copy.common.notSpecified,
+    copy.common.reasoningEfforts,
+    currentModelDescriptor?.modelLabel,
+    currentSession,
+    sessionStatus,
+    sessionStatusLabels,
+  ]);
   const metaChips = useMemo((): MetaChip[] => {
     if (!currentSession) {
       return [
@@ -2896,6 +2987,101 @@ export default function AgentPanel({
     }
   };
 
+  const scrollTranscriptToBottom = () => {
+    const transcript = transcriptRef.current;
+    if (transcript) {
+      transcript.scrollTop = transcript.scrollHeight;
+      return;
+    }
+
+    messageEndRef.current?.scrollIntoView({ block: "end" });
+  };
+
+  const scheduleTranscriptFollowToBottom = (includeStageMetaTransition = false) => {
+    if (typeof window === "undefined") {
+      scrollTranscriptToBottom();
+      return;
+    }
+
+    if (stageMetaLayoutFrameRef.current !== null) {
+      window.cancelAnimationFrame(stageMetaLayoutFrameRef.current);
+    }
+    if (stageMetaLayoutTimerRef.current !== null) {
+      window.clearTimeout(stageMetaLayoutTimerRef.current);
+      stageMetaLayoutTimerRef.current = null;
+    }
+
+    const follow = () => {
+      if (!shouldFollowTranscriptRef.current) return;
+      scrollTranscriptToBottom();
+    };
+
+    stageMetaLayoutFrameRef.current = window.requestAnimationFrame(() => {
+      stageMetaLayoutFrameRef.current = null;
+      follow();
+    });
+
+    if (includeStageMetaTransition) {
+      stageMetaLayoutTimerRef.current = window.setTimeout(() => {
+        stageMetaLayoutTimerRef.current = null;
+        follow();
+      }, STAGE_META_TRANSITION_MS);
+    }
+  };
+
+  const setStageMetaAutoHidden = (hidden: boolean) => {
+    stageMetaHiddenRef.current = hidden;
+    chatStageRef.current?.classList.toggle("is-meta-auto-hidden", hidden);
+    stageMetaRef.current?.classList.toggle("is-auto-hidden", hidden);
+  };
+
+  const revealStageMeta = () => {
+    stageMetaRevealTimerRef.current = null;
+    if (!stageMetaHiddenRef.current) return;
+    const transcript = transcriptRef.current;
+    const shouldRestoreBottom = shouldFollowTranscriptRef.current || (transcript ? isScrolledNearBottom(transcript, 96) : false);
+    if (typeof performance !== "undefined") {
+      stageMetaAutoHideSuppressedUntilRef.current = performance.now() + 500;
+    }
+    setStageMetaAutoHidden(false);
+    if (shouldRestoreBottom) {
+      shouldFollowTranscriptRef.current = true;
+      scheduleTranscriptFollowToBottom(true);
+    }
+  };
+
+  const handleTranscriptScroll = (event: UIEvent<HTMLDivElement>) => {
+    const transcript = event.currentTarget;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const userScrollActive = now - lastTranscriptUserScrollIntentAtRef.current <= TRANSCRIPT_USER_SCROLL_INTENT_MS;
+    const isNearBottom = isScrolledNearBottom(transcript, 72);
+    if (userScrollActive) {
+      shouldFollowTranscriptRef.current = isNearBottom;
+    } else if (isNearBottom) {
+      shouldFollowTranscriptRef.current = true;
+    }
+
+    if (transcript.scrollHeight <= transcript.clientHeight + 12) return;
+    if (now < stageMetaAutoHideSuppressedUntilRef.current) return;
+    if (!userScrollActive) return;
+
+    if (!stageMetaHiddenRef.current) {
+      setStageMetaAutoHidden(true);
+      if (shouldFollowTranscriptRef.current) {
+        scheduleTranscriptFollowToBottom(true);
+      }
+    }
+
+    if (stageMetaRevealTimerRef.current !== null) {
+      window.clearTimeout(stageMetaRevealTimerRef.current);
+    }
+    stageMetaRevealTimerRef.current = window.setTimeout(revealStageMeta, STAGE_META_REVEAL_DELAY_MS);
+  };
+
+  const markTranscriptUserScrollIntent = () => {
+    lastTranscriptUserScrollIntentAtRef.current = typeof performance !== "undefined" ? performance.now() : Date.now();
+  };
+
   const clampComposerHeight = () => {
     const stageBody = chatStageBodyRef.current;
     if (!stageBody) return;
@@ -2905,6 +3091,23 @@ export default function AgentPanel({
       stageBody.clientHeight - MIN_TRANSCRIPT_HEIGHT - COMPOSER_SPLITTER_HEIGHT,
     );
     setComposerHeight((previous) => clamp(previous, composerMinHeight, maxComposerHeight));
+  };
+
+  const shouldUseStaticComposerTextarea = () => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia("(max-width: 820px)").matches || document.documentElement.classList.contains("is-visual-keyboard-open");
+  };
+
+  const resetComposerTextareaInlineSize = () => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) return;
+
+    if (textarea.style.height) {
+      textarea.style.height = "";
+    }
+    if (textarea.style.overflowY !== "auto") {
+      textarea.style.overflowY = "auto";
+    }
   };
 
   const resizeComposerTextarea = () => {
@@ -2926,6 +3129,15 @@ export default function AgentPanel({
   };
 
   const scheduleComposerTextareaResize = () => {
+    if (shouldUseStaticComposerTextarea()) {
+      if (typeof window !== "undefined" && composerResizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(composerResizeFrameRef.current);
+        composerResizeFrameRef.current = null;
+      }
+      resetComposerTextareaInlineSize();
+      return;
+    }
+
     if (typeof window === "undefined") {
       resizeComposerTextarea();
       return;
@@ -2941,6 +3153,11 @@ export default function AgentPanel({
     });
   };
 
+  const syncComposerHasTextState = () => {
+    composerHasTextSyncTimerRef.current = null;
+    setComposerHasTextState(composerHasTextRef.current);
+  };
+
   const updateComposerHasText = (value: string) => {
     const nextHasText = Boolean(value.trim());
     if (composerHasTextRef.current === nextHasText) {
@@ -2948,7 +3165,15 @@ export default function AgentPanel({
     }
 
     composerHasTextRef.current = nextHasText;
-    setComposerHasTextState(nextHasText);
+    if (typeof window === "undefined") {
+      setComposerHasTextState(nextHasText);
+      return;
+    }
+
+    if (composerHasTextSyncTimerRef.current !== null) {
+      window.clearTimeout(composerHasTextSyncTimerRef.current);
+    }
+    composerHasTextSyncTimerRef.current = window.setTimeout(syncComposerHasTextState, 80);
   };
 
   const setComposerPromptValue = (value: string) => {
@@ -3167,8 +3392,29 @@ export default function AgentPanel({
       if (typeof window !== "undefined" && composerResizeFrameRef.current !== null) {
         window.cancelAnimationFrame(composerResizeFrameRef.current);
       }
+      if (typeof window !== "undefined" && composerHasTextSyncTimerRef.current !== null) {
+        window.clearTimeout(composerHasTextSyncTimerRef.current);
+      }
+      if (typeof window !== "undefined" && stageMetaRevealTimerRef.current !== null) {
+        window.clearTimeout(stageMetaRevealTimerRef.current);
+      }
+      if (typeof window !== "undefined" && stageMetaLayoutFrameRef.current !== null) {
+        window.cancelAnimationFrame(stageMetaLayoutFrameRef.current);
+      }
+      if (typeof window !== "undefined" && stageMetaLayoutTimerRef.current !== null) {
+        window.clearTimeout(stageMetaLayoutTimerRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    window.dispatchEvent(new CustomEvent(WORKBENCH_STATUS_EVENT, { detail: { items: statusbarItems } }));
+    return () => {
+      window.dispatchEvent(new CustomEvent(WORKBENCH_STATUS_EVENT, { detail: { items: [] } }));
+    };
+  }, [statusbarItems]);
 
   useEffect(() => {
     if (hasRenderPreview) {
@@ -3229,29 +3475,41 @@ export default function AgentPanel({
 
     if (!shouldFollowTranscriptRef.current) return;
 
-    messageEndRef.current?.scrollIntoView({ block: "end" });
+    if (typeof performance !== "undefined") {
+      stageMetaAutoHideSuppressedUntilRef.current = performance.now() + 500;
+    }
+    scheduleTranscriptFollowToBottom();
   }, [currentSession?._id, lastVisibleMessageContent, transcriptEntries.length, visibleMessages.length, sortedEvents.length]);
 
   useEffect(() => {
-    const transcript = transcriptRef.current;
-    if (!transcript) return;
-
-    const handleTranscriptScroll = () => {
-      shouldFollowTranscriptRef.current = isScrolledNearBottom(transcript, 72);
-    };
-
     shouldFollowTranscriptRef.current = true;
-    handleTranscriptScroll();
-    transcript.addEventListener("scroll", handleTranscriptScroll);
+    setStageMetaAutoHidden(false);
+    if (typeof performance !== "undefined") {
+      stageMetaAutoHideSuppressedUntilRef.current = performance.now() + 500;
+    }
 
-    return () => transcript.removeEventListener("scroll", handleTranscriptScroll);
+    return () => {
+      if (stageMetaRevealTimerRef.current !== null) {
+        window.clearTimeout(stageMetaRevealTimerRef.current);
+        stageMetaRevealTimerRef.current = null;
+      }
+      if (stageMetaLayoutFrameRef.current !== null) {
+        window.cancelAnimationFrame(stageMetaLayoutFrameRef.current);
+        stageMetaLayoutFrameRef.current = null;
+      }
+      if (stageMetaLayoutTimerRef.current !== null) {
+        window.clearTimeout(stageMetaLayoutTimerRef.current);
+        stageMetaLayoutTimerRef.current = null;
+      }
+      setStageMetaAutoHidden(false);
+    };
   }, [currentSession?._id]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const frameId = window.requestAnimationFrame(() => {
-      resizeComposerTextarea();
+      scheduleComposerTextareaResize();
     });
 
     return () => window.cancelAnimationFrame(frameId);
@@ -3309,9 +3567,13 @@ export default function AgentPanel({
     clampComposerHeight();
 
     const handleResize = () => {
+      if (shouldUseStaticComposerTextarea()) {
+        resetComposerTextareaInlineSize();
+        return;
+      }
       clampComposerHeight();
       clampSidebarWidths();
-      resizeComposerTextarea();
+      scheduleComposerTextareaResize();
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
@@ -4222,24 +4484,24 @@ export default function AgentPanel({
     <>
       <header className="chat-stage-header session-loading-header" aria-busy="true">
         <div className="chat-stage-heading session-loading-heading">
-          <span className="eyebrow">{copy.agent.sessionLoadingEyebrow}</span>
-          <div className="session-loading-copy">
-            <h1>{copy.agent.sessionLoadingTitle}</h1>
-            <p>{copy.agent.sessionLoadingDescription}</p>
+          <span className="session-loading-app-icon skeleton-block" aria-hidden="true" />
+          <div className="session-loading-copy" aria-hidden="true">
+            <span className="session-loading-line width-md skeleton-block" />
+            <span className="session-loading-line width-lg skeleton-block" />
           </div>
         </div>
         <div className="session-loading-toolbar" aria-hidden="true">
-          <span className="session-loading-pill skeleton-block" />
-          <span className="session-loading-pill skeleton-block" />
-          <span className="session-loading-pill skeleton-block" />
+          <span className="session-loading-tool-button skeleton-block" />
+          <span className="session-loading-tool-button skeleton-block" />
+          <span className="session-loading-tool-button skeleton-block" />
         </div>
       </header>
 
-      <div className="chat-stage-meta session-loading-meta" aria-hidden="true">
-        <span className="session-loading-chip skeleton-block" />
-        <span className="session-loading-chip skeleton-block" />
-        <span className="session-loading-chip skeleton-block" />
-        <span className="session-loading-chip skeleton-block" />
+      <div className="session-loading-statusbar" aria-hidden="true">
+        <span className="session-loading-status-chip is-primary skeleton-block" />
+        <span className="session-loading-status-chip skeleton-block" />
+        <span className="session-loading-status-chip skeleton-block" />
+        <span className="session-loading-status-chip is-wide skeleton-block" />
       </div>
 
       <div className="chat-stage-body session-loading-body">
@@ -4547,10 +4809,10 @@ export default function AgentPanel({
         />
       ) : null}
 
-      <section className="chat-stage" data-testid="chat-stage">
+      <section className="chat-stage" data-testid="chat-stage" ref={chatStageRef}>
         {isSessionRouteLoading ? renderSessionLoadingSkeleton() : (
           <>
-        <div className="chat-stage-meta">
+        <div className="chat-stage-meta" ref={stageMetaRef}>
           {metaChips.map((chip) => (
             <span key={chip.key} className={`meta-chip tone-${chip.tone} meta-chip-${chip.icon}`} title={`${chip.label}: ${chip.value}`}>
               <span className={`meta-chip-icon meta-chip-icon-${chip.icon}`} aria-hidden="true" />
@@ -4561,7 +4823,13 @@ export default function AgentPanel({
         </div>
 
         <div className="chat-stage-body" ref={chatStageBodyRef} style={composerLayoutStyle}>
-          <div className="chat-transcript" ref={transcriptRef}>
+          <div
+            className="chat-transcript"
+            ref={transcriptRef}
+            onScroll={handleTranscriptScroll}
+            onTouchMove={markTranscriptUserScrollIntent}
+            onWheel={markTranscriptUserScrollIntent}
+          >
             {panelErrorMessage && <div className="notice-banner transcript-notice">{panelErrorMessage}</div>}
             {currentSession ? (
               transcriptEntries.length ? (

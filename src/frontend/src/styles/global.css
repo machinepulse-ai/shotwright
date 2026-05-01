@@ -11,6 +11,7 @@
   --app-keyboard-inset-bottom: 0px;
   --app-keyboard-composer-bottom: 0px;
   --app-keyboard-fixed-offset-y: 0px;
+  --app-statusbar-height: 24px;
   --workbench-bg: #f3f3f3;
   --titlebar-bg: #f3f3f3;
   --activitybar-bg: #2c2c2c;
@@ -84,10 +85,22 @@ html[data-theme="dark"] {
   }
 }
 
+@supports (height: 100svh) {
+  html.is-apple-touch-viewport:not(.is-visual-keyboard-open) {
+    --app-viewport-height: 100svh;
+  }
+}
+
 html,
 body,
 #root {
   height: var(--app-viewport-height);
+}
+
+html.is-visual-keyboard-open.is-apple-touch-viewport,
+html.is-visual-keyboard-open.is-apple-touch-viewport body,
+html.is-visual-keyboard-open.is-apple-touch-viewport #root {
+  height: calc(var(--app-viewport-height) + var(--app-keyboard-fixed-offset-y, 0px));
 }
 
 html {
@@ -116,6 +129,11 @@ a {
   flex-direction: column;
   background: var(--workbench-bg);
   overflow: hidden;
+}
+
+html.is-visual-keyboard-open.is-apple-touch-viewport .workbench {
+  height: calc(var(--app-viewport-height) + var(--app-keyboard-fixed-offset-y, 0px));
+  min-height: calc(var(--app-viewport-height) + var(--app-keyboard-fixed-offset-y, 0px));
 }
 
 .titlebar {
@@ -583,7 +601,7 @@ textarea {
 
 .statusbar {
   flex: none;
-  height: 24px;
+  height: var(--app-statusbar-height);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -679,7 +697,48 @@ textarea {
   color: rgba(255, 255, 255, 0.78);
 }
 
+.statusbar-dynamic-item {
+  max-width: 220px;
+}
+
+.statusbar-dynamic-item::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  flex: none;
+}
+
+.statusbar-dynamic-item.tone-success::before {
+  background: #7ee787;
+}
+
+.statusbar-dynamic-item.tone-danger::before {
+  background: #ff7b72;
+}
+
+.statusbar-dynamic-item.tone-accent::before,
+.statusbar-dynamic-item.tone-primary::before {
+  background: #a5d6ff;
+}
+
+.statusbar-dynamic-item.tone-muted::before {
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.statusbar-mini-label {
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.statusbar-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .statusbar-keyboard-diagnostic {
+  display: none;
   max-width: min(360px, 34vw);
   font-variant-numeric: tabular-nums;
 }
@@ -965,13 +1024,39 @@ html[data-theme="dark"] .statusbar {
     font-size: 0.78rem;
   }
 
+  .statusbar-group-left {
+    flex: 1 1 auto;
+    justify-content: flex-start;
+  }
+
+  .statusbar-local-workspace {
+    display: none;
+  }
+
   .statusbar-group-right {
     display: none;
   }
 
-  .statusbar-group-left {
-    width: 100%;
-    justify-content: space-between;
+  .statusbar-group-right .statusbar-item:not(.statusbar-keyboard-diagnostic) {
+    display: none;
+  }
+
+  .statusbar-keyboard-diagnostic {
+    max-width: calc(100vw - 70px);
+    padding: 0 6px;
+  }
+
+  .statusbar-dynamic-item {
+    max-width: 34vw;
+    padding-inline: 6px;
+  }
+
+  .statusbar-dynamic-item:nth-of-type(n + 6) {
+    display: none;
+  }
+
+  .statusbar-mini-label {
+    display: none;
   }
 }
 
