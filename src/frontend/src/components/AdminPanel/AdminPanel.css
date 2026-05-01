@@ -3,6 +3,8 @@
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   background: linear-gradient(180deg, #fbfbfc 0%, #f4f7fb 100%);
 }
 
@@ -441,6 +443,64 @@
   letter-spacing: 0.08em;
 }
 
+.admin-session-runtime-table th:nth-child(1) {
+  width: 27%;
+}
+
+.admin-session-runtime-table th:nth-child(2),
+.admin-session-runtime-table th:nth-child(3),
+.admin-session-runtime-table th:nth-child(4) {
+  width: 16%;
+}
+
+.admin-session-name-cell,
+.admin-runtime-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.32rem;
+}
+
+.admin-session-name-cell strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-session-name-cell .mono {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.admin-runtime-image {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-runtime-extra {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.admin-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.42rem;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 900px) {
   .admin-panel {
     padding: var(--shell-pad);
@@ -467,6 +527,278 @@
   }
 }
 
+@media (max-width: 720px) {
+  .admin-shell {
+    background: var(--editor-bg);
+  }
+
+  .admin-shell-login {
+    align-items: flex-start;
+    padding: 12px;
+  }
+
+  .admin-login {
+    width: 100%;
+    min-height: auto;
+    padding-top: 8px;
+  }
+
+  .login-card {
+    padding: 1rem;
+    gap: 0.85rem;
+  }
+
+  .login-card h2 {
+    font-size: 1.36rem;
+    line-height: 1.14;
+  }
+
+  .login-copy {
+    font-size: 0.84rem;
+    line-height: 1.45;
+  }
+
+  .admin-panel {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .admin-header {
+    gap: 0.7rem;
+  }
+
+  .admin-header h2 {
+    font-size: 1.38rem;
+    line-height: 1.12;
+    margin-top: 0.22rem;
+  }
+
+  .admin-header p {
+    margin-top: 0.42rem;
+    font-size: 0.84rem;
+    line-height: 1.45;
+  }
+
+  .admin-header .btn-danger {
+    width: 100%;
+    min-height: 38px;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .stat-card {
+    min-height: 82px;
+    padding: 10px;
+  }
+
+  .stat-value {
+    font-size: 1.45rem;
+  }
+
+  .stat-label {
+    font-size: 0.74rem;
+    line-height: 1.32;
+  }
+
+  .settings-action-bar {
+    top: 8px;
+    gap: 0.62rem;
+    padding: 0.72rem;
+  }
+
+  .settings-action-copy strong {
+    font-size: 0.92rem;
+  }
+
+  .settings-action-copy p {
+    font-size: 0.74rem;
+    line-height: 1.35;
+  }
+
+  .settings-action-bar .btn-primary,
+  .token-input .btn-primary {
+    width: 100%;
+    min-height: 40px;
+  }
+
+  .admin-section {
+    padding: 10px;
+  }
+
+  .panel-heading {
+    gap: 0.65rem;
+    margin-bottom: 0.55rem;
+  }
+
+  .panel-heading h3 {
+    font-size: 0.9rem;
+  }
+
+  .admin-section-copy,
+  .field-help {
+    font-size: 0.75rem;
+    line-height: 1.45;
+  }
+
+  .field-help {
+    margin-top: 0.55rem;
+  }
+
+  .provider-switch {
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+
+  .provider-option {
+    min-height: 40px;
+    padding: 0.58rem 0.7rem;
+    font-size: 0.85rem;
+  }
+
+  .admin-config-grid {
+    gap: 0.78rem;
+  }
+
+  .field-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.05em;
+  }
+
+  .checkbox-row {
+    align-items: flex-start;
+    line-height: 1.35;
+  }
+
+  .token-input {
+    gap: 0.55rem;
+  }
+
+  .credential-note {
+    width: 100%;
+  }
+
+  .agent-model-chip {
+    max-width: 100%;
+  }
+
+  .table-wrap {
+    overflow: visible;
+  }
+
+  .admin-table {
+    margin-top: 0;
+  }
+
+  .admin-table thead {
+    display: none;
+  }
+
+  .admin-table,
+  .admin-table tbody,
+  .admin-table tr,
+  .admin-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .admin-table tr {
+    margin-top: 0.55rem;
+    padding: 0.46rem 0.62rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--panel-bg-soft);
+  }
+
+  .admin-table tr:first-child {
+    margin-top: 0;
+  }
+
+  .admin-table td {
+    display: grid;
+    grid-template-columns: minmax(88px, 38%) minmax(0, 1fr);
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.42rem 0;
+    border-bottom: 1px solid rgba(24, 33, 44, 0.08);
+    overflow-wrap: anywhere;
+  }
+
+  .admin-table td::before {
+    content: attr(data-label);
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1.25;
+    text-transform: uppercase;
+  }
+
+  .admin-table td:last-child {
+    border-bottom: 0;
+  }
+
+  .admin-row-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-content: stretch;
+    gap: 0.42rem;
+  }
+
+  .admin-table td:last-child button {
+    width: 100%;
+    min-height: 36px;
+  }
+}
+
+@media (max-width: 420px) {
+  .admin-panel {
+    padding: 6px;
+    gap: 6px;
+  }
+
+  .admin-header h2 {
+    font-size: 1.22rem;
+  }
+
+  .stats-grid {
+    gap: 6px;
+  }
+
+  .stat-card {
+    min-height: 74px;
+    padding: 9px;
+  }
+
+  .stat-value {
+    font-size: 1.28rem;
+  }
+
+  .settings-action-bar {
+    top: 6px;
+    padding: 0.62rem;
+  }
+
+  .admin-section {
+    padding: 9px;
+  }
+
+  .admin-table td {
+    grid-template-columns: 1fr;
+    gap: 0.22rem;
+  }
+
+  .admin-row-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-table td::before {
+    font-size: 0.64rem;
+  }
+}
+
 html[data-theme="dark"] .admin-shell {
   background: linear-gradient(180deg, #111318 0%, #0f1117 100%);
 }
@@ -489,4 +821,8 @@ html[data-theme="dark"] .provider-option.active {
 html[data-theme="dark"] .admin-table th,
 html[data-theme="dark"] .admin-table td {
   border-bottom-color: var(--border);
+}
+
+html[data-theme="dark"] .admin-table tr {
+  background: var(--panel-bg-alt);
 }

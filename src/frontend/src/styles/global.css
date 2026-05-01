@@ -986,12 +986,9 @@ html[data-theme="dark"] .statusbar {
   .titlebar-nav,
   .titlebar-workbench-controls,
   .titlebar-language {
+    flex: none;
     min-height: 32px;
     padding: 0.16rem;
-  }
-
-  .titlebar-tab:not(.active) {
-    display: none;
   }
 
   .titlebar-tab {
@@ -1076,14 +1073,10 @@ html[data-theme="dark"] .statusbar {
     height: 22px;
   }
 
-  .titlebar-nav {
-    display: none;
-  }
-
   .titlebar-tab {
-    min-width: 46px;
-    padding-inline: 0.46rem;
-    font-size: 0.8rem;
+    min-width: 42px;
+    padding-inline: 0.34rem;
+    font-size: 0.76rem;
   }
 
   .titlebar-workbench-controls {
@@ -1096,8 +1089,10 @@ html[data-theme="dark"] .statusbar {
   }
 
   .titlebar-language select {
-    min-width: 84px;
-    max-width: 84px;
+    min-width: 64px;
+    max-width: 64px;
+    padding-left: 0.5rem;
+    padding-right: 1.25rem;
   }
 
   .titlebar-theme-toggle {

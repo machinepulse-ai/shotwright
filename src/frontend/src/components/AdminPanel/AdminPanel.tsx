@@ -125,6 +125,14 @@ function buildFallbackModelOption(settings: AdminSettings): CopilotModelOption {
   };
 }
 
+const containerStatusPriority: Record<Container["status"], number> = {
+  running: 0,
+  creating: 1,
+  error: 2,
+  stopped: 3,
+  removed: 4,
+};
+
 export default function AdminPanel() {
   const { copy, locale } = useI18n();
   const [authenticated, setAuthenticated] = useState(!!localStorage.getItem("shotwright_token"));
@@ -181,6 +189,41 @@ export default function AdminPanel() {
       : !runtimeSettings.copilot_workspace_root.trim() ||
         !runtimeSettings.default_copilot_model.trim() ||
         runtimeSettings.copilot_turn_timeout_seconds <= 0);
+  const sessionRuntimeRows = useMemo(() => {
+    const containersBySession = new Map<string, Container[]>();
+
+    containers.forEach((container) => {
+      const existing = containersBySession.get(container.session_id);
+      if (existing) {
+        existing.push(container);
+      } else {
+        containersBySession.set(container.session_id, [container]);
+      }
+    });
+
+    return sessions.map((session) => {
+      const linkedContainers = [...(containersBySession.get(session._id) ?? [])];
+      const directContainer = session.container_id
+        ? containers.find((container) => container._id === session.container_id)
+        : undefined;
+
+      if (directContainer && !linkedContainers.some((container) => container._id === directContainer._id)) {
+        linkedContainers.push(directContainer);
+      }
+
+      linkedContainers.sort((left, right) => {
+        const priorityDelta = containerStatusPriority[left.status] - containerStatusPriority[right.status];
+        if (priorityDelta !== 0) return priorityDelta;
+        return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+      });
+
+      return {
+        session,
+        primaryContainer: linkedContainers[0] ?? null,
+        extraContainerCount: Math.max(0, linkedContainers.length - 1),
+      };
+    });
+  }, [containers, sessions]);
 
   const resetFeedback = () => {
     setActionMessage("");
@@ -882,78 +925,77 @@ export default function AdminPanel() {
           <p className="field-help">{copy.admin.configHint}</p>
         </div>
 
-        <div className="admin-grid">
-          <div className="card admin-section">
+        <div className="card admin-section admin-session-runtime-section">
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">{copy.admin.sessionsEyebrow}</span>
-                <h3>{copy.admin.sessionsTitle}</h3>
+                <h3>{copy.admin.sessionRuntimeTitle}</h3>
+                <p className="admin-section-copy">{copy.admin.sessionRuntimeDescription}</p>
               </div>
               <span className="panel-count">{sessions.length}</span>
             </div>
             <div className="table-wrap">
-              <table className="admin-table">
+              <table className="admin-table admin-session-runtime-table">
                 <thead>
                   <tr>
                     <th>{copy.admin.columns.name}</th>
-                    <th>{copy.admin.columns.status}</th>
+                    <th>{copy.admin.columns.sessionStatus}</th>
+                    <th>{copy.admin.columns.runtime}</th>
+                    <th>{copy.admin.columns.dockerId}</th>
                     <th>{copy.admin.columns.created}</th>
                     <th>{copy.admin.columns.actions}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {sessions.map((s) => (
-                    <tr key={s._id}>
-                      <td>{s.name}</td>
-                      <td><span className={`status-badge status-${s.status}`}>{sessionStatusLabels[s.status]}</span></td>
-                      <td>{new Date(s.created_at).toLocaleString(locale)}</td>
-                      <td>
-                        <button className="btn-danger btn-sm" onClick={() => handleDeleteSession(s._id)}>
-                          {copy.common.deleteSession}
-                        </button>
+                  {sessionRuntimeRows.map(({ session, primaryContainer, extraContainerCount }) => (
+                    <tr key={session._id}>
+                      <td data-label={copy.admin.columns.name}>
+                        <div className="admin-session-name-cell">
+                          <strong>{session.name}</strong>
+                          <span className="mono">{session._id.slice(0, 8)}</span>
+                        </div>
+                      </td>
+                      <td data-label={copy.admin.columns.sessionStatus}>
+                        <span className={`status-badge status-${session.status}`}>{sessionStatusLabels[session.status]}</span>
+                      </td>
+                      <td data-label={copy.admin.columns.runtime}>
+                        {primaryContainer ? (
+                          <div className="admin-runtime-cell">
+                            <span className={`status-badge status-${primaryContainer.status}`}>
+                              {containerStatusLabels[primaryContainer.status]}
+                            </span>
+                            <span className="admin-runtime-image" title={primaryContainer.image}>{primaryContainer.image}</span>
+                            {extraContainerCount ? (
+                              <span className="admin-runtime-extra">
+                                {copy.admin.extraContainers.replace("{count}", String(extraContainerCount))}
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <span className="status-badge status-idle">{copy.admin.noContainer}</span>
+                        )}
+                      </td>
+                      <td className="mono" data-label={copy.admin.columns.dockerId}>
+                        {primaryContainer ? primaryContainer.docker_id.slice(0, 12) : "-"}
+                      </td>
+                      <td data-label={copy.admin.columns.created}>{new Date(session.created_at).toLocaleString(locale)}</td>
+                      <td data-label={copy.admin.columns.actions}>
+                        <div className="admin-row-actions">
+                          {primaryContainer ? (
+                            <button className="btn-danger btn-sm" onClick={() => handleRemoveContainer(primaryContainer._id)}>
+                              {copy.common.remove}
+                            </button>
+                          ) : null}
+                          <button className="btn-danger btn-sm" onClick={() => handleDeleteSession(session._id)}>
+                            {copy.common.deleteSession}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </div>
-
-          <div className="card admin-section">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">{copy.admin.runtimeEyebrow}</span>
-                <h3>{copy.admin.runtimeTitle}</h3>
-              </div>
-              <span className="panel-count">{containers.length}</span>
-            </div>
-            <div className="table-wrap">
-              <table className="admin-table">
-                <thead>
-                  <tr>
-                    <th>{copy.admin.columns.dockerId}</th>
-                    <th>{copy.admin.columns.session}</th>
-                    <th>{copy.admin.columns.status}</th>
-                    <th>{copy.admin.columns.actions}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {containers.map((c) => (
-                    <tr key={c._id}>
-                      <td className="mono">{c.docker_id.slice(0, 12)}</td>
-                      <td>{c.session_id.slice(0, 8)}...</td>
-                      <td><span className={`status-badge status-${c.status}`}>{containerStatusLabels[c.status]}</span></td>
-                      <td>
-                        <button className="btn-danger btn-sm" onClick={() => handleRemoveContainer(c._id)}>
-                          {copy.common.remove}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
         </div>
       </div>
     </div>

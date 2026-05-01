@@ -120,7 +120,7 @@ const CONTEXT_SIDEBAR_WIDTH_STORAGE_KEY = "shotwright_context_sidebar_width";
 const RUNNING_SESSION_POLL_INTERVAL_MS = 1200;
 const STREAM_STALL_POLL_THRESHOLD_MS = 6000;
 const WORKBENCH_STATUS_EVENT = "shotwright:statusbar";
-const STAGE_META_REVEAL_DELAY_MS = 900;
+const STAGE_META_REVEAL_DELAY_MS = 2000;
 const STAGE_META_TRANSITION_MS = 220;
 const TRANSCRIPT_USER_SCROLL_INTENT_MS = 1400;
 
@@ -210,6 +210,8 @@ type ChatResultCard = {
   key: string;
   title: string;
   mp4Name: string | null;
+  mp4Url: string | null;
+  streamUrl: string | null;
   videoSrc: string | null;
   videoFormat: "mp4" | "hls" | null;
   storyboardUrl: string | null;
@@ -2012,8 +2014,7 @@ function buildRenderUrl(sessionId: string, latestRenderPath: string | null | und
   return latestRenderPath ? `/api/streams/renders/${sessionId}` : null;
 }
 
-const CHAT_RESULT_LABEL_PATTERN =
-  /^(?:[-*+]\s*)?(?:\*\*)?\s*((?:新版|修正版|updated|revised|fixed)?\s*(?:MP4|Output|Render|Rendered MP4|视频|渲染视频|预览流|HLS|HLS stream|Preview stream|分镜图|Storyboard|Storyboard sheet|项目归档|工程归档|Archive|Project archive|归档))(?:\s*\*\*)?\s*[：:]\s*(.+?)\s*$/i;
+const CHAT_RESULT_ASSET_LINE_PATTERN = /^(?:[-*+]\s*)?(?:\*\*)?\s*([^:：]{1,80}?)(?:\s*\*\*)?\s*[：:]\s*(.+?)\s*$/i;
 
 function classifyChatResultAsset(label: string, value: string): ChatResultAssetKind | null {
   const normalizedLabel = label.trim().toLowerCase();
@@ -2035,6 +2036,22 @@ function classifyChatResultAsset(label: string, value: string): ChatResultAssetK
   return null;
 }
 
+function isLikelyChatResultAssetValue(kind: ChatResultAssetKind, value: string) {
+  const normalizedValue = value.trim().toLowerCase();
+
+  if (kind === "stream") {
+    return normalizedValue.includes(".m3u8") || normalizedValue.includes("/api/streams/");
+  }
+  if (kind === "storyboard") {
+    return /\.(jpe?g|png|webp|gif)(?:[?#].*)?$/i.test(value.trim());
+  }
+  if (kind === "archive") {
+    return normalizedValue.includes("/archive") || /\.(zip|7z|tar|tgz|gz)(?:[?#].*)?$/i.test(value.trim());
+  }
+
+  return /\.mp4(?:[?#].*)?$/i.test(value.trim()) || normalizedValue.includes("/api/streams/renders/");
+}
+
 function extractChatResultAssetValue(rawValue: string) {
   const linkMatch = /\[[^\]]*]\(([^)]+)\)/.exec(rawValue);
   const codeMatch = /`([^`]+)`/.exec(rawValue);
@@ -2052,20 +2069,30 @@ function parseChatResultAssets(content: string) {
   const markdownLines: string[] = [];
 
   for (const line of content.split(/\r?\n/)) {
-    const match = CHAT_RESULT_LABEL_PATTERN.exec(line.trim());
+    const match = CHAT_RESULT_ASSET_LINE_PATTERN.exec(line.trim());
     if (!match) {
       markdownLines.push(line);
       continue;
     }
 
-    const value = extractChatResultAssetValue(match[2]);
-    const kind = value ? classifyChatResultAsset(match[1], value) : null;
-    if (!kind) {
+    const label = match[1].trim();
+    if (
+      label.length > 36 ||
+      /[，,。；;]/.test(label) ||
+      (/^https?$/i.test(label) && match[2].trim().startsWith("//"))
+    ) {
       markdownLines.push(line);
       continue;
     }
 
-    assets.push({ kind, label: match[1].trim(), value });
+    const value = extractChatResultAssetValue(match[2]);
+    const kind = value ? classifyChatResultAsset(label, value) : null;
+    if (!kind || !isLikelyChatResultAssetValue(kind, value)) {
+      markdownLines.push(line);
+      continue;
+    }
+
+    assets.push({ kind, label, value });
   }
 
   return {
@@ -2101,6 +2128,18 @@ function findRenderOutputForValue(value: string | null | undefined, context: Age
   }) ?? null;
 }
 
+function findStoryboardForValue(value: string | null | undefined, context: AgentContext | null) {
+  if (!value || !context?.storyboards?.length) return null;
+
+  const targetName = basename(value, value).toLowerCase();
+  return context.storyboards.find((storyboard) => {
+    const candidates = [storyboard.filename, storyboard.shared_relative_path, storyboard.file_path].map((candidate) =>
+      basename(candidate, "").toLowerCase()
+    );
+    return candidates.includes(targetName);
+  }) ?? null;
+}
+
 function resolveChatResultRenderUrl(value: string | null | undefined, sessionId: string | null | undefined, context: AgentContext | null) {
   if (!value) return null;
   const trimmedValue = value.trim();
@@ -2124,6 +2163,17 @@ function resolveChatResultRenderUrl(value: string | null | undefined, sessionId:
   return null;
 }
 
+function resolveChatResultStoryboardUrl(value: string | null | undefined, context: AgentContext | null) {
+  if (!value) return null;
+
+  const storyboard = findStoryboardForValue(value, context);
+  if (storyboard) {
+    return buildUploadAssetUrl(storyboard.shared_relative_path);
+  }
+
+  return resolveUploadOrDirectUrl(value);
+}
+
 function buildChatResultCards(content: string, sessionId: string | null | undefined, context: AgentContext | null, copy: TranslationCopy) {
   const parsed = parseChatResultAssets(content);
   if (!parsed.assets.length) {
@@ -2137,20 +2187,22 @@ function buildChatResultCards(content: string, sessionId: string | null | undefi
   const mp4Name = latestByKind.mp4 ? basename(latestByKind.mp4.value, latestByKind.mp4.value) : null;
   const mp4Url = resolveChatResultRenderUrl(latestByKind.mp4?.value, sessionId, context);
   const streamUrl = latestByKind.stream ? resolveUploadOrDirectUrl(latestByKind.stream.value) : null;
-  const storyboardUrl = latestByKind.storyboard ? resolveUploadOrDirectUrl(latestByKind.storyboard.value) : null;
+  const storyboardUrl = latestByKind.storyboard ? resolveChatResultStoryboardUrl(latestByKind.storyboard.value, context) : null;
   const storyboardName = latestByKind.storyboard ? basename(latestByKind.storyboard.value, latestByKind.storyboard.value) : null;
   const archiveUrl = latestByKind.archive ? resolveUploadOrDirectUrl(latestByKind.archive.value) : null;
-  const videoSrc = mp4Url || streamUrl;
-  const videoFormat: ChatResultCard["videoFormat"] = mp4Url ? "mp4" : streamUrl ? "hls" : null;
-  const fallbackTitle = streamUrl ? copy.video.previewStream : storyboardName || (archiveUrl ? copy.video.archive : copy.video.resultTitle);
+  const videoSrc = streamUrl || mp4Url;
+  const videoFormat: ChatResultCard["videoFormat"] = streamUrl ? "hls" : mp4Url ? "mp4" : null;
+  const fallbackTitle = storyboardName || (archiveUrl ? copy.video.archive : copy.video.resultTitle);
 
   return {
     markdown: parsed.markdown,
     cards: [
       {
         key: `${mp4Name || storyboardName || archiveUrl || "result"}:${parsed.assets.length}`,
-        title: mp4Name || fallbackTitle,
+        title: mp4Name || (streamUrl ? copy.video.previewStream : fallbackTitle),
         mp4Name,
+        mp4Url,
+        streamUrl,
         videoSrc,
         videoFormat,
         storyboardUrl,
@@ -3829,7 +3881,8 @@ export default function AgentPanel({
       <div className="chat-result-cards" data-testid="chat-result-cards">
         {cards.map((card) => {
           const mediaTypes = [
-            card.videoFormat === "mp4" ? copy.video.sourceMp4 : card.videoFormat === "hls" ? copy.video.sourceHls : null,
+            card.mp4Url ? copy.video.sourceMp4 : null,
+            card.streamUrl ? copy.video.sourceHls : null,
             card.storyboardUrl ? copy.video.storyboard : null,
             card.archiveUrl ? copy.video.archive : null,
           ]
@@ -3875,9 +3928,14 @@ export default function AgentPanel({
                         </svg>
                       </summary>
                       <div className="chat-result-menu-popover">
-                        {card.videoSrc ? (
-                          <a href={card.videoSrc} target="_blank" rel="noreferrer" data-testid="chat-result-open-video">
-                            {copy.video.openPreviewSource}
+                        {card.streamUrl ? (
+                          <a href={card.streamUrl} target="_blank" rel="noreferrer" data-testid="chat-result-open-stream">
+                            {copy.video.openPreviewSource} ({copy.video.sourceHls})
+                          </a>
+                        ) : null}
+                        {card.mp4Url ? (
+                          <a href={card.mp4Url} target="_blank" rel="noreferrer" data-testid="chat-result-open-video">
+                            {copy.video.openPreviewSource} ({copy.video.sourceMp4})
                           </a>
                         ) : null}
                         {card.storyboardUrl ? (
