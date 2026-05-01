@@ -68,6 +68,9 @@ RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
 
 RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT psutil
 
+COPY src/backend/requirements-aigc.txt C:/workspace/src/backend/requirements-aigc.txt
+RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT -r C:/workspace/src/backend/requirements-aigc.txt
+
 # =============================================================================
 # Stage: after-effects-setup — prebuilt AE installer payload from GHCR
 # =============================================================================

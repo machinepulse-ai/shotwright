@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from copilot.tools import Tool, ToolInvocation, ToolResult
 
@@ -19,6 +23,17 @@ from app.services.session_streams import publish_context_refresh, publish_sessio
 from app.services.video_streaming import generate_hls
 
 _REFERENCE_ASSET_DIRECTORY = Path("assets") / "references"
+_PYTHON_TOOL_SCRIPT_DIRECTORY = Path(".shotwright-python")
+_PYTHON_TOOL_OUTPUT_LIMIT = 24_000
+_PYTHON_TOOL_FILE_LIST_LIMIT = 80
+_PYTHON_TOOL_SNAPSHOT_LIMIT = 5_000
+_SENSITIVE_ENV_NAMES = (
+    "GITHUB_TOKEN",
+    "SHOTWRIGHT_GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "SHOTWRIGHT_OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+)
 
 
 def _tool_success(payload: dict, session_log: str) -> ToolResult:
@@ -53,6 +68,73 @@ def _normalize_tool_payload_value(value: object) -> object:
 
 def _serialize_tool_payload(payload: dict) -> str:
     return json.dumps(_normalize_tool_payload_value(payload), ensure_ascii=False)
+
+
+def _truncate_text(value: str, limit: int = _PYTHON_TOOL_OUTPUT_LIMIT) -> str:
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    return f"{value[:limit]}\n... <truncated {omitted} chars>"
+
+
+def _redact_sensitive_text(value: str) -> str:
+    redacted = value
+    for env_name in _SENSITIVE_ENV_NAMES:
+        secret = os.environ.get(env_name)
+        if secret and len(secret) >= 6:
+            redacted = redacted.replace(secret, f"<redacted:{env_name}>")
+    return redacted
+
+
+def _path_is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _snapshot_workspace_files(root: Path, *, limit: int = _PYTHON_TOOL_SNAPSHOT_LIMIT) -> dict[str, tuple[int, int]]:
+    if not root.exists():
+        return {}
+
+    snapshot: dict[str, tuple[int, int]] = {}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            relative_path = path.relative_to(root).as_posix()
+            stat = path.stat()
+        except OSError:
+            continue
+        snapshot[relative_path] = (stat.st_size, stat.st_mtime_ns)
+        if len(snapshot) >= limit:
+            break
+    return snapshot
+
+
+def _diff_workspace_files(
+    before: dict[str, tuple[int, int]],
+    after: dict[str, tuple[int, int]],
+    *,
+    limit: int = _PYTHON_TOOL_FILE_LIST_LIMIT,
+) -> list[dict]:
+    changed: list[dict] = []
+    for relative_path, state in sorted(after.items()):
+        previous_state = before.get(relative_path)
+        if previous_state == state:
+            continue
+        size_bytes, _mtime_ns = state
+        changed.append(
+            {
+                "relative_path": relative_path,
+                "size_bytes": size_bytes,
+                "change_type": "created" if previous_state is None else "modified",
+            }
+        )
+        if len(changed) >= limit:
+            break
+    return changed
 
 
 def _sanitize_asset_file_name(value: str | None, fallback_stem: str, suffix: str) -> str:
@@ -558,6 +640,50 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 return False
         return bool(raw_value)
 
+    def _coerce_python_timeout_seconds(raw_value: object, default: int = 180) -> int:
+        if raw_value is None:
+            return default
+        try:
+            return min(900, max(1, int(raw_value)))
+        except (TypeError, ValueError):
+            return default
+
+    async def _resolve_python_workspace(args: dict, session_doc: dict) -> tuple[Path, dict | None, str | None, str | None]:
+        project = None
+        project_id = str(args.get("project_id") or session_doc.get("active_project_id") or "").strip() or None
+        if project_id:
+            project = await pm.get_project(app_session_id, project_id)
+            if not project:
+                raise ValueError(f"Project {project_id} not found.")
+
+        session_upload_dir = (pm.UPLOAD_DIR / app_session_id).resolve()
+        session_export_dir = (pm.EXPORT_DIR / app_session_id).resolve()
+        allowed_roots = [session_upload_dir, session_export_dir]
+        default_root = session_upload_dir / "_python"
+
+        project_root: Path | None = None
+        if project:
+            project_root = Path(project["workspace_dir"]).resolve()
+            allowed_roots.append(project_root)
+            default_root = project_root
+
+        raw_work_dir = str(args.get("work_dir") or "").strip()
+        if raw_work_dir:
+            requested_work_dir = Path(raw_work_dir)
+            if not requested_work_dir.is_absolute():
+                requested_work_dir = default_root / requested_work_dir
+            work_dir = requested_work_dir.resolve()
+        else:
+            work_dir = default_root.resolve()
+
+        if not any(_path_is_inside(work_dir, root) for root in allowed_roots):
+            allowed_text = ", ".join(str(root) for root in allowed_roots)
+            raise ValueError(f"work_dir must stay inside this session workspace. Allowed roots: {allowed_text}")
+
+        work_dir.mkdir(parents=True, exist_ok=True)
+        entry_aep_file = str(project.get("entry_aep_file") or project.get("filename") or "").strip() if project else ""
+        return work_dir, project, project_id, entry_aep_file or None
+
     async def _create_project_from_script(
         *,
         arguments: dict,
@@ -1049,6 +1175,99 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             args.get("description") or "Generated storyboard from the reference video",
         )
 
+    async def run_python_code(invocation: ToolInvocation) -> ToolResult:
+        args = invocation.arguments or {}
+        script_content = str(args.get("script_content") or "").strip()
+        if not script_content:
+            return _tool_failure("script_content is required.")
+
+        session_col = get_session_collection()
+        session_doc = await session_col.find_one({"_id": app_session_id})
+        if not session_doc:
+            return _tool_failure("Shotwright session not found.")
+
+        try:
+            work_dir, project, project_id, entry_aep_file = await _resolve_python_workspace(args, session_doc)
+        except ValueError as exc:
+            return _tool_failure(str(exc))
+
+        script_dir = work_dir / _PYTHON_TOOL_SCRIPT_DIRECTORY
+        script_dir.mkdir(parents=True, exist_ok=True)
+        script_path = script_dir / f"script-{uuid4().hex}.py"
+        script_path.write_text(script_content, encoding="utf-8")
+
+        timeout_seconds = _coerce_python_timeout_seconds(args.get("timeout_seconds"))
+        before_files = _snapshot_workspace_files(work_dir)
+        started_at = datetime.now(timezone.utc)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHONIOENCODING": "utf-8",
+                "SHOTWRIGHT_SESSION_ID": app_session_id,
+                "SHOTWRIGHT_WORK_DIR": str(work_dir),
+                "SHOTWRIGHT_UPLOAD_DIR": str(pm.UPLOAD_DIR),
+                "SHOTWRIGHT_EXPORT_DIR": str(pm.EXPORT_DIR),
+            }
+        )
+        if project and project_id:
+            env["SHOTWRIGHT_PROJECT_ID"] = project_id
+            env["SHOTWRIGHT_PROJECT_ROOT"] = str(Path(project["workspace_dir"]))
+            if entry_aep_file:
+                env["SHOTWRIGHT_PROJECT_FILE"] = str(Path(project["workspace_dir"]) / entry_aep_file)
+
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(work_dir),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+            )
+            timed_out = False
+            exit_code = completed.returncode
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            exit_code = -1
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or f"Python execution timed out after {timeout_seconds} seconds."
+
+        elapsed_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        after_files = _snapshot_workspace_files(work_dir)
+        changed_files = _diff_workspace_files(before_files, after_files)
+        if project and project_id:
+            await pm.refresh_project_files(app_session_id, project_id)
+
+        stdout = _truncate_text(_redact_sensitive_text(str(stdout)))
+        stderr = _truncate_text(_redact_sensitive_text(str(stderr)))
+        payload = {
+            "success": exit_code == 0 and not timed_out,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "timeout_seconds": timeout_seconds,
+            "elapsed_ms": elapsed_ms,
+            "python_executable": sys.executable,
+            "script_path": str(script_path),
+            "work_dir": str(work_dir),
+            "project_id": project_id,
+            "project_workspace_dir": project.get("workspace_dir") if project else None,
+            "stdout": stdout,
+            "stderr": stderr,
+            "created_or_modified_files": changed_files,
+            "created_or_modified_files_truncated": len(changed_files) >= _PYTHON_TOOL_FILE_LIST_LIMIT,
+        }
+        result_type = "success" if payload["success"] else "failure"
+        return ToolResult(
+            text_result_for_llm=_serialize_tool_payload(payload),
+            result_type=result_type,
+            error=(stderr or stdout) if result_type == "failure" else None,
+            session_log=args.get("description") or "Ran Python media processing code",
+        )
+
     async def run_after_effects_jsx(invocation: ToolInvocation) -> ToolResult:
         args = invocation.arguments or {}
         script_content = (args.get("script_content") or "").strip()
@@ -1432,6 +1651,46 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                         "description": "Short human-readable description of the storyboard generation step",
                     },
                 },
+            },
+            skip_permission=True,
+        ),
+        Tool(
+            name="run_python_code",
+            description=(
+                "Execute Python 3.13 code inside the Shotwright session workspace for CPU-only media analysis, "
+                "asset generation, audio/video preprocessing, data extraction, and AIGC helper workflows. "
+                "The runtime includes numpy, pillow, opencv-python, moviepy, librosa, soundfile, onnxruntime, "
+                "faster-whisper, openai-whisper, torch CPU, and insightface-compatible packages."
+            ),
+            handler=run_python_code,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier; defaults to the active project when one exists.",
+                    },
+                    "work_dir": {
+                        "type": "string",
+                        "description": (
+                            "Optional working directory. Relative paths resolve under the active project workspace "
+                            "or this session's _python workspace; absolute paths must stay inside the session uploads, exports, or project workspace."
+                        ),
+                    },
+                    "script_content": {
+                        "type": "string",
+                        "description": "Complete Python script source to run.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short human-readable description of the Python processing step.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional timeout in seconds, from 1 to 900. Defaults to 180.",
+                    },
+                },
+                "required": ["script_content"],
             },
             skip_permission=True,
         ),

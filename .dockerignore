@@ -12,6 +12,7 @@ node_modules/
 !validation-data/templates/validation_motion.aep
 !src/backend/pyproject.toml
 !src/backend/.python-version
+!src/backend/requirements-aigc.txt
 !src/backend/app/
 !src/backend/app/**
 !src/backend/codex-bridge/

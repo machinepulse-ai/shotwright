@@ -1,0 +1,17 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+numpy==2.4.4
+pillow==11.3.0
+opencv-python==4.13.0.92
+imageio==2.37.3
+imageio-ffmpeg==0.6.0
+scipy==1.17.1
+soundfile==0.13.1
+librosa==0.11.0
+moviepy==2.2.1
+onnx==1.21.0
+onnxruntime==1.25.1
+torch==2.11.0+cpu
+faster-whisper==1.2.1
+openai-whisper==20250625
+insightface==0.2.1

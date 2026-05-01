@@ -233,6 +233,126 @@ async def test_inspect_workspace_serializes_recent_image_attachment_datetimes(
 
 
 @pytest.mark.asyncio
+async def test_run_python_code_uses_active_project_workspace_and_reports_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / 'project'
+    project_root.mkdir(parents=True, exist_ok=True)
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'status': 'idle',
+            'active_project_id': 'project-1',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'scene.aep',
+        'workspace_dir': str(project_root),
+        'entry_aep_file': 'scene.aep',
+        'aep_files': [],
+    }
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_refresh_project_files(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+    monkeypatch.setattr(module.pm, 'refresh_project_files', fake_refresh_project_files)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['run_python_code'].handler(
+        SimpleNamespace(
+            arguments={
+                'script_content': (
+                    "from pathlib import Path\n"
+                    "import os\n"
+                    "Path('analysis.json').write_text('{\"ok\": true}', encoding='utf-8')\n"
+                    "print(os.environ['SHOTWRIGHT_PROJECT_ID'])\n"
+                ),
+                'timeout_seconds': 10,
+            }
+        )
+    )
+
+    assert result.result_type == 'success'
+    assert (project_root / 'analysis.json').read_text(encoding='utf-8') == '{"ok": true}'
+
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['project_id'] == 'project-1'
+    assert payload['work_dir'] == str(project_root.resolve())
+    assert payload['stdout'].strip() == 'project-1'
+    assert {'relative_path': 'analysis.json', 'size_bytes': 12, 'change_type': 'created'} in payload[
+        'created_or_modified_files'
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_python_code_times_out(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(module.pm, 'UPLOAD_DIR', tmp_path / 'uploads')
+    monkeypatch.setattr(module.pm, 'EXPORT_DIR', tmp_path / 'exports')
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'status': 'idle',
+            'active_project_id': None,
+        }
+    )
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['run_python_code'].handler(
+        SimpleNamespace(arguments={'script_content': 'import time; time.sleep(5)', 'timeout_seconds': 1})
+    )
+
+    assert result.result_type == 'failure'
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['timed_out'] is True
+    assert payload['exit_code'] == -1
+
+
+@pytest.mark.asyncio
+async def test_run_python_code_rejects_work_dir_outside_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(module.pm, 'UPLOAD_DIR', tmp_path / 'uploads')
+    monkeypatch.setattr(module.pm, 'EXPORT_DIR', tmp_path / 'exports')
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'status': 'idle',
+            'active_project_id': None,
+        }
+    )
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['run_python_code'].handler(
+        SimpleNamespace(
+            arguments={
+                'script_content': "print('nope')",
+                'work_dir': str(tmp_path / 'other-session'),
+            }
+        )
+    )
+
+    assert result.result_type == 'failure'
+    assert 'work_dir must stay inside this session workspace' in result.error
+
+
+@pytest.mark.asyncio
 async def test_generate_storyboard_tool_passes_crop_to_reference_media(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
