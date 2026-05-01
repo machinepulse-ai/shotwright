@@ -66,10 +66,15 @@ services:
       SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
       SHOTWRIGHT_SHOTWRIGHT_IMAGE: ${SHOTWRIGHT_SHOTWRIGHT_IMAGE:-shotwright:runtime}
       SHOTWRIGHT_CONTAINER_ISOLATION: ${SHOTWRIGHT_CONTAINER_ISOLATION:-process}
+      SHOTWRIGHT_PYTHON_TOOL_AUTO_SYNC_DEPENDENCIES: ${SHOTWRIGHT_PYTHON_TOOL_AUTO_SYNC_DEPENDENCIES:-true}
+      SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR: C:\data\python
+      SHOTWRIGHT_PYTHON_TOOL_REQUIREMENTS: C:\workspace\src\backend-config\requirements-aigc.txt
     volumes:
       - uploads:C:/data/uploads
       - exports:C:/data/exports
       - hls:C:/data/hls
+      - python-runtime:C:/data/python
+      - ./backend:C:/workspace/src/backend-config:ro
       # Mount host Docker named pipe so the backend can manage AE containers
       - type: npipe
         source: \\.\pipe\docker_engine
@@ -127,5 +132,9 @@ volumes:
       app.kubernetes.io/part-of: shotwright
   hls:
     name: shotwright_hls
+    labels:
+      app.kubernetes.io/part-of: shotwright
+  python-runtime:
+    name: shotwright_python_runtime
     labels:
       app.kubernetes.io/part-of: shotwright

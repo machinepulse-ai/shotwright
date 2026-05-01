@@ -66,11 +66,15 @@ services:
       SHOTWRIGHT_SKILLS_DOWNLOAD_BUFFER_SIZE: ${SHOTWRIGHT_SKILLS_DOWNLOAD_BUFFER_SIZE:-65536}
       SHOTWRIGHT_SKILLS_DOWNLOAD_BACKEND: ${SHOTWRIGHT_SKILLS_DOWNLOAD_BACKEND:-curl}
       SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS: ${SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS:-12}
+      SHOTWRIGHT_PYTHON_TOOL_AUTO_SYNC_DEPENDENCIES: ${SHOTWRIGHT_PYTHON_TOOL_AUTO_SYNC_DEPENDENCIES:-true}
+      SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR: C:\data\python
+      SHOTWRIGHT_PYTHON_TOOL_REQUIREMENTS: C:\workspace\src\backend-config\requirements-aigc.txt
       PYTHONPATH: C:/workspace/src/backend
     volumes:
       - ../scripts:C:/workspace/scripts
       - ../validation-data:C:/workspace/validation-data
       - ./backend/app:C:/workspace/src/backend/app
+      - ./backend:C:/workspace/src/backend-config:ro
       - ./frontend:C:/workspace/src/frontend
       - frontend-node-modules:C:/workspace/src/frontend/node_modules
       - ../.github:C:/workspace/.github
@@ -78,6 +82,7 @@ services:
       - uploads:C:/data/uploads
       - exports:C:/data/exports
       - hls:C:/data/hls
+      - python-runtime:C:/data/python
       - type: npipe
         source: \\.\pipe\docker_engine
         target: \\.\pipe\docker_engine
@@ -89,3 +94,5 @@ volumes:
   uploads:
   exports:
   hls:
+  python-runtime:
+    name: shotwright_python_runtime

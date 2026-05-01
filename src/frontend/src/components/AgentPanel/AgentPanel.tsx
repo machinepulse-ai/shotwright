@@ -2561,6 +2561,7 @@ export default function AgentPanel({
   const stageMetaAutoHideSuppressedUntilRef = useRef(0);
   const lastTranscriptUserScrollIntentAtRef = useRef(0);
   const composerAttachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const composerShellRef = useRef<HTMLDivElement | null>(null);
   const composerCardRef = useRef<HTMLDivElement | null>(null);
   const composerFooterRef = useRef<HTMLDivElement | null>(null);
   const composerAttachmentsRef = useRef<HTMLDivElement | null>(null);
@@ -3569,6 +3570,80 @@ export default function AgentPanel({
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+
+    const root = document.documentElement;
+    let frameId = 0;
+    const scheduledTimers: number[] = [];
+
+    const readPx = (value: string) => {
+      const parsed = Number.parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const syncMobileComposerHeight = () => {
+      frameId = 0;
+      const shell = composerShellRef.current;
+      const card = composerCardRef.current;
+      if (!shell || !card) return;
+
+      const shellStyle = window.getComputedStyle(shell);
+      const shellVerticalPadding = readPx(shellStyle.paddingTop) + readPx(shellStyle.paddingBottom);
+      const contentHeight = Math.max(card.scrollHeight, card.getBoundingClientRect().height);
+      const shellHeight = Math.max(shell.scrollHeight, shell.getBoundingClientRect().height);
+      const nextHeight = Math.ceil(Math.max(shellHeight, contentHeight + shellVerticalPadding));
+
+      if (nextHeight > 0) {
+        root.style.setProperty("--agent-mobile-composer-height", `${nextHeight}px`);
+      }
+    };
+
+    const scheduleSync = () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+      frameId = window.requestAnimationFrame(syncMobileComposerHeight);
+    };
+
+    const observer =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => {
+            scheduleSync();
+          })
+        : null;
+
+    [
+      composerShellRef.current,
+      composerCardRef.current,
+      composerFooterRef.current,
+      composerAttachmentsRef.current,
+      composerTextareaRef.current,
+    ].forEach((element) => {
+      if (element) {
+        observer?.observe(element);
+      }
+    });
+
+    scheduleSync();
+    [80, 240, 600].forEach((delay) => {
+      scheduledTimers.push(window.setTimeout(scheduleSync, delay));
+    });
+    window.addEventListener("resize", scheduleSync);
+    window.visualViewport?.addEventListener("resize", scheduleSync);
+
+    return () => {
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+      scheduledTimers.forEach((timerId) => window.clearTimeout(timerId));
+      observer?.disconnect();
+      window.removeEventListener("resize", scheduleSync);
+      window.visualViewport?.removeEventListener("resize", scheduleSync);
+      root.style.removeProperty("--agent-mobile-composer-height");
+    };
+  }, [composerHasText, currentSession?._id, draftModel, draftReasoning, isResponding, locale, pendingAttachments.length]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
     window.localStorage.setItem(COMPOSER_HEIGHT_STORAGE_KEY, String(composerHeight));
   }, [composerHeight]);
 
@@ -4193,10 +4268,17 @@ export default function AgentPanel({
     const pointerId = event.pointerId;
     const startHeight = composerHeight;
     const startY = event.clientY;
+    let finished = false;
 
-    handle.setPointerCapture(pointerId);
+    try {
+      handle.setPointerCapture(pointerId);
+    } catch {
+      return;
+    }
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
       const maxComposerHeight = Math.max(
         composerMinHeight,
         stageBody.clientHeight - MIN_TRANSCRIPT_HEIGHT - COMPOSER_SPLITTER_HEIGHT,
@@ -4204,16 +4286,22 @@ export default function AgentPanel({
       setComposerHeight(clamp(startHeight - (moveEvent.clientY - startY), composerMinHeight, maxComposerHeight));
     };
 
-    const handlePointerUp = () => {
+    const handlePointerEnd = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId || finished) return;
+      finished = true;
       if (handle.hasPointerCapture(pointerId)) {
         handle.releasePointerCapture(pointerId);
       }
       window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointerup", handlePointerEnd);
+      window.removeEventListener("pointercancel", handlePointerEnd);
+      handle.removeEventListener("lostpointercapture", handlePointerEnd);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointerup", handlePointerEnd);
+    window.addEventListener("pointercancel", handlePointerEnd);
+    handle.addEventListener("lostpointercapture", handlePointerEnd);
   };
 
   const handleSessionSidebarResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -4224,10 +4312,17 @@ export default function AgentPanel({
     const pointerId = event.pointerId;
     const startWidth = sessionSidebarWidth;
     const startX = event.clientX;
+    let finished = false;
 
-    handle.setPointerCapture(pointerId);
+    try {
+      handle.setPointerCapture(pointerId);
+    } catch {
+      return;
+    }
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
       const nextWidth = clamp(
         startWidth + (moveEvent.clientX - startX),
         MIN_SESSION_SIDEBAR_WIDTH,
@@ -4236,16 +4331,22 @@ export default function AgentPanel({
       setSessionSidebarWidth(nextWidth);
     };
 
-    const handlePointerUp = () => {
+    const handlePointerEnd = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId || finished) return;
+      finished = true;
       if (handle.hasPointerCapture(pointerId)) {
         handle.releasePointerCapture(pointerId);
       }
       window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointerup", handlePointerEnd);
+      window.removeEventListener("pointercancel", handlePointerEnd);
+      handle.removeEventListener("lostpointercapture", handlePointerEnd);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointerup", handlePointerEnd);
+    window.addEventListener("pointercancel", handlePointerEnd);
+    handle.addEventListener("lostpointercapture", handlePointerEnd);
   };
 
   const handleContextSidebarResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -4256,10 +4357,17 @@ export default function AgentPanel({
     const pointerId = event.pointerId;
     const startWidth = contextSidebarWidth;
     const startX = event.clientX;
+    let finished = false;
 
-    handle.setPointerCapture(pointerId);
+    try {
+      handle.setPointerCapture(pointerId);
+    } catch {
+      return;
+    }
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
       const nextWidth = clamp(
         startWidth - (moveEvent.clientX - startX),
         MIN_CONTEXT_SIDEBAR_WIDTH,
@@ -4268,16 +4376,22 @@ export default function AgentPanel({
       setContextSidebarWidth(nextWidth);
     };
 
-    const handlePointerUp = () => {
+    const handlePointerEnd = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId || finished) return;
+      finished = true;
       if (handle.hasPointerCapture(pointerId)) {
         handle.releasePointerCapture(pointerId);
       }
       window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointerup", handlePointerEnd);
+      window.removeEventListener("pointercancel", handlePointerEnd);
+      handle.removeEventListener("lostpointercapture", handlePointerEnd);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointerup", handlePointerEnd);
+    window.addEventListener("pointercancel", handlePointerEnd);
+    handle.addEventListener("lostpointercapture", handlePointerEnd);
   };
 
   const composerLayoutStyle = useMemo(
@@ -5045,7 +5159,7 @@ export default function AgentPanel({
             onPointerDown={handleComposerResizeStart}
           />
 
-          <div className="composer-shell">
+          <div className="composer-shell" ref={composerShellRef}>
             {composerAttachmentError ? <div className="inline-alert composer-alert">{composerAttachmentError}</div> : null}
             {sessionSettingsErrorMessage ? <div className="inline-alert composer-alert">{sessionSettingsErrorMessage}</div> : null}
 
@@ -5139,7 +5253,6 @@ export default function AgentPanel({
                   {composerSessionSettings}
                 </div>
                 <div className="composer-actions">
-                  <span className="composer-shortcut">{copy.common.ctrlEnterHint}</span>
                   {isResponding ? (
                     <button
                       className="btn-danger send-button"

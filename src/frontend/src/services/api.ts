@@ -365,6 +365,7 @@ export function openAgentSessionStream(
 
 // --- Admin ---
 export const adminLogin = (password: string) => api.post("/admin/login", { password });
+export const logoffCurrentAccount = () => api.get("/logoff", { timeout: 8000, validateStatus: () => true });
 export const getAdminCopilotModelOptions = (signal?: AbortSignal) =>
   api.get("/admin/copilot-model-options", { signal });
 export const getAdminSettings = () => api.get("/admin/settings");

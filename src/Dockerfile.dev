@@ -55,7 +55,6 @@ COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/bac
 RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT uv; \
     & python C:/workspace/scripts/install/install_pyproject_dependencies.py C:/workspace/src/backend/pyproject.toml --index-url $env:PIP_INDEX_URL
 COPY src/backend/requirements-aigc.txt C:/workspace/src/backend/requirements-aigc.txt
-RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT -r C:/workspace/src/backend/requirements-aigc.txt
 COPY src/backend/codex-bridge/package.json src/backend/codex-bridge/package-lock.json C:/workspace/src/backend/codex-bridge/
 RUN Set-Location C:/workspace/src/backend/codex-bridge; \
     & 'C:/Program Files/nodejs/npm.cmd' ci --omit=dev --no-progress --fetch-retries 5 --fetch-timeout 120000
@@ -73,5 +72,9 @@ COPY src/frontend/webpack.config.js C:/workspace/src/frontend/webpack.config.js
 COPY src/frontend/tsconfig.json C:/workspace/src/frontend/tsconfig.json
 
 EXPOSE 3000 8000
+
+ENV SHOTWRIGHT_PYTHON_TOOL_AUTO_SYNC_DEPENDENCIES=true \
+    SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR=C:/data/python \
+    SHOTWRIGHT_PYTHON_TOOL_REQUIREMENTS=C:/workspace/src/backend/requirements-aigc.txt
 
 CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/workspace/src/scripts/start-dev-container.ps1"]

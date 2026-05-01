@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     export_dir: str = "C:\\data\\exports"
     hls_dir: str = "C:\\data\\hls"
 
+    # --- Python agent tool runtime ---
+    python_tool_auto_sync_dependencies: bool = False
+    python_tool_runtime_dir: str = "C:\\data\\python"
+    python_tool_venv_dir: str = ""
+    python_tool_requirements: str = ""
+    python_tool_pip_cache_dir: str = ""
+    python_tool_system_site_packages: bool = True
+    python_tool_dependency_sync_timeout_seconds: int = 1800
+
     # --- Future: Redis ---
     # redis_uri: str = "redis://redis:6379/0"
 

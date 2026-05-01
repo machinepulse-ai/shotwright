@@ -32,6 +32,15 @@
   padding: 1.8rem;
 }
 
+.admin-login-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.admin-login-actions button {
+  min-height: 38px;
+}
+
 .login-card h2 {
   font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable Display", sans-serif;
   font-size: 1.8rem;
@@ -76,6 +85,14 @@
 .admin-header p {
   margin-top: 0.55rem;
   color: var(--text-secondary);
+}
+
+.admin-header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: none;
 }
 
 .stats-grid {
@@ -582,6 +599,25 @@
   .admin-header .btn-danger {
     width: 100%;
     min-height: 38px;
+  }
+
+  .admin-header-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .admin-header-actions button {
+    width: 100%;
+    min-height: 38px;
+  }
+
+  .admin-login-actions {
+    width: 100%;
+  }
+
+  .admin-login-actions button {
+    width: 100%;
   }
 
   .stats-grid {

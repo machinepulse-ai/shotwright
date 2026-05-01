@@ -12,6 +12,7 @@
   --app-keyboard-composer-bottom: 0px;
   --app-keyboard-fixed-offset-y: 0px;
   --app-statusbar-height: 24px;
+  --agent-mobile-composer-height: clamp(156px, 24vh, 188px);
   --workbench-bg: #f3f3f3;
   --titlebar-bg: #f3f3f3;
   --activitybar-bg: #2c2c2c;
@@ -106,6 +107,8 @@ html.is-visual-keyboard-open.is-apple-touch-viewport #root {
 html {
   background: var(--workbench-bg);
   touch-action: pan-x pan-y;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {

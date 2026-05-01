@@ -8,9 +8,10 @@ const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
 const NARROW_CONTEXT_QUERY = "(max-width: 1100px)";
 const KEYBOARD_INSET_THRESHOLD = 80;
 const MAX_KEYBOARD_INSET_RATIO = 0.52;
-const IOS_MAX_KEYBOARD_INSET_RATIO = 0.49;
+const IOS_MAX_KEYBOARD_INSET_RATIO = 0.64;
 const KEYBOARD_STABLE_FRAME_COUNT = 4;
 const KEYBOARD_SETTLE_FALLBACK_MS = 320;
+const KEYBOARD_FOCUS_PROBE_DELAYS_MS = [0, 80, 160, 260, 420, 650, 900, 1200];
 const IOS_KEYBOARD_CHIN_PADDING_PX = 24;
 const THEME_STORAGE_KEY = "shotwright_theme";
 
@@ -47,6 +48,9 @@ type KeyboardDiagnostic = {
   settling: boolean;
   open: boolean;
 };
+
+let fixedViewportProbeElement: HTMLDivElement | null = null;
+let safeAreaProbeElement: HTMLDivElement | null = null;
 
 const EMPTY_KEYBOARD_DIAGNOSTIC: KeyboardDiagnostic = {
   stableFrames: 0,
@@ -111,6 +115,21 @@ function isAppleTouchViewport() {
   return /iphone|ipad|ipod/.test(userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
+function isIosSafariViewport() {
+  if (typeof navigator === "undefined" || !isAppleTouchViewport()) return false;
+
+  const userAgent = navigator.userAgent.toLowerCase();
+  if (
+    /micromessenger|crios|fxios|edgios|qqbrowser|ucbrowser|baidubrowser|dingtalk|weibo|alipay|fbav|instagram/.test(
+      userAgent,
+    )
+  ) {
+    return false;
+  }
+
+  return /version\/[\d.]+.*mobile\/.*safari/.test(userAgent) || (/safari/.test(userAgent) && !/chrome|chromium/.test(userAgent));
+}
+
 function isKeyboardTextTarget(element: Element | null) {
   if (!(element instanceof HTMLElement)) return false;
   if (element.isContentEditable) return true;
@@ -121,6 +140,76 @@ function isKeyboardTextTarget(element: Element | null) {
 
   const inputType = ((element as HTMLInputElement).type || "text").toLowerCase();
   return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(inputType);
+}
+
+function getSafeAreaInsetBottom() {
+  if (typeof document === "undefined" || typeof window === "undefined" || !document.body) {
+    return 0;
+  }
+
+  if (!safeAreaProbeElement) {
+    safeAreaProbeElement = document.createElement("div");
+    safeAreaProbeElement.setAttribute("aria-hidden", "true");
+    safeAreaProbeElement.style.cssText = [
+      "position:fixed",
+      "left:0",
+      "bottom:0",
+      "width:0",
+      "height:0",
+      "padding-bottom:env(safe-area-inset-bottom)",
+      "border:0",
+      "visibility:hidden",
+      "pointer-events:none",
+      "contain:strict",
+      "z-index:-1",
+    ].join(";");
+  }
+
+  if (!safeAreaProbeElement.isConnected) {
+    document.body.appendChild(safeAreaProbeElement);
+  }
+
+  const parsed = Number.parseFloat(window.getComputedStyle(safeAreaProbeElement).paddingBottom);
+  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
+}
+
+function getFixedViewportOverlap(visualViewport: VisualViewport | undefined) {
+  if (typeof document === "undefined" || typeof window === "undefined" || !visualViewport || !document.body) {
+    return 0;
+  }
+
+  if (!fixedViewportProbeElement) {
+    fixedViewportProbeElement = document.createElement("div");
+    fixedViewportProbeElement.setAttribute("aria-hidden", "true");
+    fixedViewportProbeElement.style.cssText = [
+      "position:fixed",
+      "left:0",
+      "bottom:0",
+      "width:0",
+      "height:0",
+      "padding:0",
+      "border:0",
+      "visibility:hidden",
+      "pointer-events:none",
+      "contain:strict",
+      "z-index:-1",
+    ].join(";");
+  }
+
+  if (!fixedViewportProbeElement.isConnected) {
+    document.body.appendChild(fixedViewportProbeElement);
+  }
+
+  const viewportHeight = visualViewport.height || window.innerHeight || document.documentElement.clientHeight || 0;
+  if (viewportHeight <= 0) return 0;
+
+  const visualOffsetTop = Math.max(0, visualViewport.offsetTop || 0);
+  const rootTop = document.documentElement.getBoundingClientRect().top;
+  const probeBottom = fixedViewportProbeElement.getBoundingClientRect().bottom;
+  const rectUsesVisualOrigin = visualOffsetTop <= 1 || Math.abs(rootTop + visualOffsetTop) <= 2;
+  const visibleBottom = rectUsesVisualOrigin ? viewportHeight : visualOffsetTop + viewportHeight;
+
+  return Math.max(0, Math.round(probeBottom - visibleBottom));
 }
 
 function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardState {
@@ -149,11 +238,22 @@ function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardSta
   const useFixedOffset = isAppleTouchViewport();
   const heightShrinkInset = Math.max(0, layoutHeight - viewportHeight);
   const rawInset = useFixedOffset ? Math.max(bottomInset, visualOffsetTop, heightShrinkInset) : bottomInset;
-  const maxInsetBase = useFixedOffset ? visualBottom || layoutHeight : layoutHeight;
+  const maxInsetBase = layoutHeight;
   const maxInsetRatio = useFixedOffset ? IOS_MAX_KEYBOARD_INSET_RATIO : MAX_KEYBOARD_INSET_RATIO;
   const maxInset = Math.round(maxInsetBase * maxInsetRatio);
   const keyboardInset = Math.min(rawInset, maxInset);
   const resolvedKeyboardInset = keyboardInset > KEYBOARD_INSET_THRESHOLD ? Math.round(keyboardInset) : 0;
+  const fixedViewportOverlap = resolvedKeyboardInset > 0 ? getFixedViewportOverlap(visualViewport) : 0;
+  const rawComposerBottom =
+    resolvedKeyboardInset > 0
+      ? fixedViewportOverlap > 1
+        ? Math.min(fixedViewportOverlap, resolvedKeyboardInset)
+        : useFixedOffset
+          ? 0
+          : resolvedKeyboardInset
+      : 0;
+  const safariSafeAreaAdjustment = useFixedOffset && resolvedKeyboardInset > 0 && isIosSafariViewport() ? getSafeAreaInsetBottom() : 0;
+  const composerBottom = Math.max(0, rawComposerBottom - safariSafeAreaAdjustment);
   const fixedOffsetY =
     useFixedOffset && resolvedKeyboardInset > 0
       ? Math.max(0, Math.round(visualOffsetTop - resolvedKeyboardInset + IOS_KEYBOARD_CHIN_PADDING_PX))
@@ -161,7 +261,7 @@ function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardSta
 
   return {
     keyboardInset: resolvedKeyboardInset,
-    composerBottom: resolvedKeyboardInset > 0 && !useFixedOffset ? resolvedKeyboardInset : 0,
+    composerBottom,
     fixedOffsetY,
     layoutHeight: Math.round(layoutHeight),
     visualBottom: Math.round(visualBottom),
@@ -243,6 +343,7 @@ function WorkbenchApp() {
     let lastKeyboardSignature = "";
     let stableKeyboardFrames = 0;
     let keyboardCandidateStartedAt = 0;
+    let keyboardFocusProbeTimers: number[] = [];
     root.classList.toggle("is-apple-touch-viewport", isAppleTouchViewport());
 
     const updateKeyboardDiagnostic = (diagnostic: KeyboardDiagnostic) => {
@@ -335,9 +436,41 @@ function WorkbenchApp() {
       frameId = window.requestAnimationFrame(runVisualViewportSync);
     };
 
+    const clearKeyboardFocusProbes = () => {
+      keyboardFocusProbeTimers.forEach((timerId) => window.clearTimeout(timerId));
+      keyboardFocusProbeTimers = [];
+    };
+
+    const scheduleKeyboardFocusProbes = () => {
+      clearKeyboardFocusProbes();
+      KEYBOARD_FOCUS_PROBE_DELAYS_MS.forEach((delay) => {
+        if (delay <= 0) {
+          syncVisualViewport();
+          return;
+        }
+
+        keyboardFocusProbeTimers.push(window.setTimeout(syncVisualViewport, delay));
+      });
+    };
+
+    const handlePotentialKeyboardFocus = (event: Event) => {
+      if (!isKeyboardTextTarget(event.target as Element | null)) return;
+      resetKeyboardSettle();
+      scheduleKeyboardFocusProbes();
+    };
+
+    const handleKeyboardFocusOut = () => {
+      clearKeyboardFocusProbes();
+      resetKeyboardSettle();
+      syncVisualViewport();
+      keyboardFocusProbeTimers.push(window.setTimeout(syncVisualViewport, 120));
+    };
+
     syncVisualViewport();
-    window.addEventListener("focusin", syncVisualViewport);
-    window.addEventListener("focusout", syncVisualViewport);
+    window.addEventListener("focusin", handlePotentialKeyboardFocus);
+    window.addEventListener("focusout", handleKeyboardFocusOut);
+    window.addEventListener("pointerup", handlePotentialKeyboardFocus, true);
+    window.addEventListener("touchend", handlePotentialKeyboardFocus, true);
     window.addEventListener("resize", syncVisualViewport);
     window.addEventListener("orientationchange", syncVisualViewport);
     window.visualViewport?.addEventListener("resize", syncVisualViewport);
@@ -345,8 +478,11 @@ function WorkbenchApp() {
 
     return () => {
       window.cancelAnimationFrame(frameId);
-      window.removeEventListener("focusin", syncVisualViewport);
-      window.removeEventListener("focusout", syncVisualViewport);
+      clearKeyboardFocusProbes();
+      window.removeEventListener("focusin", handlePotentialKeyboardFocus);
+      window.removeEventListener("focusout", handleKeyboardFocusOut);
+      window.removeEventListener("pointerup", handlePotentialKeyboardFocus, true);
+      window.removeEventListener("touchend", handlePotentialKeyboardFocus, true);
       window.removeEventListener("resize", syncVisualViewport);
       window.removeEventListener("orientationchange", syncVisualViewport);
       window.visualViewport?.removeEventListener("resize", syncVisualViewport);
@@ -411,7 +547,7 @@ function WorkbenchApp() {
   };
 
   return (
-    <div className="workbench">
+    <div className={`workbench ${isAdminSection ? "is-admin-section" : "is-chat-section"}`}>
       <header className="titlebar">
         <div className="titlebar-left">
           <div className="titlebar-brand-mark" aria-hidden="true">

@@ -5,6 +5,7 @@ import {
   getAdminDashboard,
   getAdminSettings,
   isRequestAbortError,
+  logoffCurrentAccount,
   updateGithubToken,
   updateOpenAIKey,
   updateAdminSettings,
@@ -151,6 +152,7 @@ export default function AdminPanel() {
   const [savingToken, setSavingToken] = useState(false);
   const [savingOpenAIKey, setSavingOpenAIKey] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [loggingOffCurrentAccount, setLoggingOffCurrentAccount] = useState(false);
   const [actionMessage, setActionMessage] = useState("");
   const [actionError, setActionError] = useState("");
   const sessionStatusLabels = copy.status.session;
@@ -406,6 +408,25 @@ export default function AdminPanel() {
     setAuthenticated(false);
   };
 
+  const handleLogoffCurrentAccount = async () => {
+    resetFeedback();
+    setLoggingOffCurrentAccount(true);
+    try {
+      await logoffCurrentAccount();
+    } catch {
+      // The endpoint is provided by the upstream proxy in some deployments.
+      // Local admin logout should still complete when the proxy route is absent.
+    } finally {
+      localStorage.removeItem("shotwright_token");
+      if (typeof window !== "undefined") {
+        window.location.reload();
+        return;
+      }
+      setLoggingOffCurrentAccount(false);
+      setAuthenticated(false);
+    }
+  };
+
   if (!authenticated) {
     return (
       <div className="admin-shell admin-shell-login">
@@ -414,6 +435,15 @@ export default function AdminPanel() {
             <span className="eyebrow">{copy.admin.loginEyebrow}</span>
             <h2>{copy.admin.loginTitle}</h2>
             <p className="login-copy">{copy.admin.loginCopy}</p>
+            <div className="admin-login-actions">
+              <button
+                className="btn-danger"
+                onClick={() => void handleLogoffCurrentAccount()}
+                disabled={loggingOffCurrentAccount}
+              >
+                {loggingOffCurrentAccount ? copy.common.working : copy.admin.logoffCurrentAccount}
+              </button>
+            </div>
             <input
               type="text"
               className="secret-input"
@@ -446,9 +476,18 @@ export default function AdminPanel() {
             <h2>{copy.admin.headerTitle}</h2>
             <p>{copy.admin.headerCopy}</p>
           </div>
-          <button className="btn-danger" onClick={logout}>
-            {copy.common.logout}
-          </button>
+          <div className="admin-header-actions">
+            <button className="ghost-button" onClick={logout}>
+              {copy.admin.localLogout}
+            </button>
+            <button
+              className="btn-danger"
+              onClick={() => void handleLogoffCurrentAccount()}
+              disabled={loggingOffCurrentAccount}
+            >
+              {loggingOffCurrentAccount ? copy.common.working : copy.admin.logoffCurrentAccount}
+            </button>
+          </div>
         </div>
 
         {dashboard && (

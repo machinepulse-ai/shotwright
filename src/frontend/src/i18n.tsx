@@ -354,6 +354,8 @@ const catalogs = {
       headerEyebrow: "管理控制台",
       headerTitle: "运行面板",
       headerCopy: "监控会话、凭证和容器占用，保持 Shotwright 运行面干净可控。",
+      localLogout: "退出管理",
+      logoffCurrentAccount: "登出当前账号",
       stats: {
         totalSessions: "会话总数",
         activeSessions: "活跃会话",
@@ -831,6 +833,8 @@ const catalogs = {
       headerEyebrow: "Admin console",
       headerTitle: "Operator dashboard",
       headerCopy: "Monitor sessions, credentials, and runtime usage so the Shotwright control plane stays clean and predictable.",
+      localLogout: "Exit admin",
+      logoffCurrentAccount: "Log off current account",
       stats: {
         totalSessions: "Total Sessions",
         activeSessions: "Active Sessions",

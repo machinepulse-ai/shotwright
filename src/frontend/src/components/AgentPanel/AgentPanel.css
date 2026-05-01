@@ -79,7 +79,10 @@
 .composer-resizer {
   position: relative;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   background: transparent;
+  z-index: 8;
 }
 
 .pane-resizer {
@@ -172,13 +175,24 @@
   list-style: none;
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 8px;
+  width: 100%;
   min-width: 0;
   padding: 0;
 }
 
-.session-item {
+.session-list > li {
+  display: flex;
   width: 100%;
+  min-width: 0;
+}
+
+.session-item {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: none;
   display: grid;
   grid-template-rows: auto auto;
   align-content: space-between;
@@ -228,8 +242,11 @@
   width: 100%;
   min-width: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto;
   align-content: space-between;
+  justify-content: stretch;
+  justify-items: stretch;
   gap: 5px;
   padding: 0;
   border: 0;
@@ -257,20 +274,26 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
+  justify-items: stretch;
   gap: 0.5rem;
+  width: 100%;
   min-height: 0;
   padding-right: 30px;
 }
 
 .session-title-group {
   align-items: flex-start;
+  justify-content: flex-start;
   gap: 0;
+  width: 100%;
   min-width: 0;
 }
 
 .session-title-copy {
   flex-direction: column;
+  align-items: flex-start;
   gap: 3px;
+  width: 100%;
   min-width: 0;
 }
 
@@ -2217,6 +2240,36 @@
   transform: translate(-50%, -50%);
 }
 
+@media (any-pointer: coarse) and (min-width: 821px) {
+  .pane-resizer {
+    flex: 0 0 32px;
+    width: 32px;
+    min-width: 32px;
+    margin-left: -10px;
+    margin-right: -10px;
+    z-index: 18;
+  }
+
+  .pane-resizer::before {
+    width: 4px;
+    height: 112px;
+  }
+
+  .composer-resizer {
+    align-self: stretch;
+    min-height: 32px;
+    height: 32px;
+    margin-top: -9px;
+    margin-bottom: -9px;
+    z-index: 18;
+  }
+
+  .composer-resizer::before {
+    width: 108px;
+    height: 4px;
+  }
+}
+
 .composer-status {
   display: inline-flex;
   align-items: center;
@@ -2484,12 +2537,6 @@
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.composer-shortcut {
-  color: var(--text-muted);
-  font-size: 0.64rem;
-  white-space: nowrap;
 }
 
 .composer-suggestion {
@@ -4115,7 +4162,7 @@
   }
 
   .chat-stage-body {
-    grid-template-rows: minmax(0, 1fr) 0 clamp(156px, 24vh, 188px);
+    grid-template-rows: minmax(0, 1fr) 0 auto;
   }
 
   .chat-stage {
@@ -4157,12 +4204,39 @@
     height: auto;
     min-height: clamp(156px, 24vh, 188px);
     max-height: none;
-    padding: 8px var(--page-pad) calc(10px + env(safe-area-inset-bottom, 0px));
+    padding: 8px var(--page-pad) 8px;
   }
 
   .composer-card {
     min-height: 0;
     height: 100%;
+  }
+
+  html:not(.is-visual-keyboard-open) .workbench.is-chat-section .statusbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 90;
+    display: flex;
+  }
+
+  html:not(.is-visual-keyboard-open) .agent-workbench .composer-shell {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--app-statusbar-height, 24px);
+    z-index: 70;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -12px 28px rgba(15, 23, 42, 0.1);
+  }
+
+  html:not(.is-visual-keyboard-open) .agent-workbench .chat-stage-body {
+    grid-template-rows: minmax(0, 1fr) 0 0;
+    padding-bottom: calc(var(--agent-mobile-composer-height, clamp(156px, 24vh, 188px)) + var(--app-statusbar-height, 24px));
   }
 
   .project-item {
@@ -4195,7 +4269,10 @@
   }
 
   .composer-textarea {
+    flex: 0 0 76px;
+    height: 76px;
     min-height: 76px;
+    max-height: 76px;
     font-size: 16px;
     overflow-y: auto;
   }
@@ -4225,38 +4302,40 @@
     right: 0;
     bottom: calc(var(--app-keyboard-composer-bottom, 0px) + var(--app-statusbar-height, 24px));
     z-index: 70;
-    min-height: clamp(148px, 30vh, 180px);
-    max-height: min(220px, 42vh);
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
     border-top: 1px solid var(--border);
     box-shadow: 0 -12px 28px rgba(15, 23, 42, 0.1);
   }
 
   html.is-visual-keyboard-open.is-apple-touch-viewport .composer-shell {
-    position: static;
-    left: auto;
-    right: auto;
-    bottom: auto;
-    z-index: auto;
-    min-height: clamp(148px, 30vh, 180px);
-    max-height: min(220px, 42vh);
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--app-keyboard-composer-bottom, 0px) + var(--app-statusbar-height, 24px));
+    z-index: 70;
+    min-height: 0;
+    max-height: none;
+    overflow: visible;
   }
 
   html.is-visual-keyboard-open.is-apple-touch-viewport .statusbar {
-    position: relative;
-    left: auto;
-    right: auto;
-    bottom: auto;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--app-keyboard-composer-bottom, 0px);
     z-index: 90;
   }
 
   html.is-visual-keyboard-open.is-apple-touch-viewport .chat-stage-body {
-    grid-template-rows: minmax(0, 1fr) 0 clamp(148px, 30vh, 180px);
-    padding-bottom: 0;
+    grid-template-rows: minmax(0, 1fr) 0 0;
+    padding-bottom: calc(var(--agent-mobile-composer-height, clamp(148px, 30vh, 180px)) + var(--app-statusbar-height, 24px));
   }
 
   html.is-visual-keyboard-open .chat-stage-body {
     grid-template-rows: minmax(0, 1fr) 0 0;
-    padding-bottom: calc(clamp(148px, 30vh, 180px) + var(--app-statusbar-height, 24px));
+    padding-bottom: calc(var(--agent-mobile-composer-height, clamp(148px, 30vh, 180px)) + var(--app-statusbar-height, 24px));
   }
 
   html.is-visual-keyboard-open .chat-stage-header,
@@ -4268,11 +4347,13 @@
 @media (max-width: 720px) {
   .composer-footer {
     display: grid;
-    grid-template-columns: 34px minmax(0, 1fr) auto;
-    grid-template-areas: "attach settings actions";
+    grid-template-columns: 38px minmax(0, 1fr) 42px;
+    grid-template-areas:
+      "settings settings settings"
+      "attach . actions";
     align-items: center;
-    gap: 8px;
-    padding: 6px 12px 8px;
+    gap: 4px 8px;
+    padding: 4px 10px 5px;
   }
 
   .composer-footer-main {
@@ -4281,11 +4362,13 @@
 
   .composer-session-settings {
     grid-area: settings;
-    width: auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 32px;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
     min-width: 0;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
+    overflow: visible;
   }
 
   .composer-session-settings::-webkit-scrollbar {
@@ -4293,14 +4376,15 @@
   }
 
   .composer-session-settings .settings-field-model {
-    flex: 1 1 92px;
+    min-width: 0;
   }
 
   .composer-session-settings .settings-field-reasoning {
-    flex: 1 1 96px;
+    min-width: 0;
   }
 
   .composer-session-settings .settings-select {
+    min-height: 32px;
     min-width: 0;
     max-width: none;
     width: 100%;
@@ -4312,8 +4396,14 @@
 
   .composer-attach-button {
     grid-area: attach;
-    width: 34px;
-    height: 34px;
+    width: 38px;
+    height: 32px;
+    border-radius: 10px;
+  }
+
+  .composer-settings-save {
+    width: 32px;
+    height: 32px;
     border-radius: 10px;
   }
 
@@ -4324,14 +4414,10 @@
     gap: 0;
   }
 
-  .composer-shortcut {
-    display: none;
-  }
-
   .send-button {
-    width: 38px;
-    min-width: 38px;
-    height: 34px;
+    width: 42px;
+    min-width: 42px;
+    height: 32px;
     padding: 0;
     border-radius: 10px;
   }

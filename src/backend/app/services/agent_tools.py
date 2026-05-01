@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from copilot.tools import Tool, ToolInvocation, ToolResult
 
+from app.config import settings
 from app.database import get_message_collection, get_session_collection
 from app.services import container_manager as cm
 from app.services import nexrender as nr
@@ -27,6 +31,9 @@ _PYTHON_TOOL_SCRIPT_DIRECTORY = Path(".shotwright-python")
 _PYTHON_TOOL_OUTPUT_LIMIT = 24_000
 _PYTHON_TOOL_FILE_LIST_LIMIT = 80
 _PYTHON_TOOL_SNAPSHOT_LIMIT = 5_000
+_PYTHON_TOOL_ENV_STATE_FILENAME = ".shotwright-python-runtime.json"
+_PYTHON_TOOL_DEFAULT_REQUIREMENTS_NAME = "requirements-aigc.txt"
+_PYTHON_TOOL_ENV_LOCK = threading.Lock()
 _SENSITIVE_ENV_NAMES = (
     "GITHUB_TOKEN",
     "SHOTWRIGHT_GITHUB_TOKEN",
@@ -135,6 +142,226 @@ def _diff_workspace_files(
         if len(changed) >= limit:
             break
     return changed
+
+
+def _split_configured_paths(value: str) -> list[Path]:
+    paths: list[Path] = []
+    for chunk in re.split(r"[;\r\n]+", value):
+        normalized = chunk.strip().strip('"').strip("'")
+        if normalized:
+            paths.append(Path(normalized))
+    return paths
+
+
+def _python_tool_runtime_root() -> Path:
+    return Path(settings.python_tool_runtime_dir or "C:\\data\\python").resolve()
+
+
+def _python_tool_venv_dir() -> Path:
+    configured = str(settings.python_tool_venv_dir or "").strip()
+    return Path(configured).resolve() if configured else (_python_tool_runtime_root() / "aigc-venv").resolve()
+
+
+def _python_tool_pip_cache_dir() -> Path:
+    configured = str(settings.python_tool_pip_cache_dir or "").strip()
+    return Path(configured).resolve() if configured else (_python_tool_runtime_root() / "pip-cache").resolve()
+
+
+def _python_tool_state_path(venv_dir: Path) -> Path:
+    return venv_dir / _PYTHON_TOOL_ENV_STATE_FILENAME
+
+
+def _python_tool_venv_python(venv_dir: Path) -> Path:
+    if os.name == "nt":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+def _resolve_python_tool_requirements_paths() -> list[Path]:
+    configured = str(settings.python_tool_requirements or "").strip()
+    if configured:
+        return [path.resolve() for path in _split_configured_paths(configured)]
+
+    runtime_requirements = _python_tool_runtime_root() / _PYTHON_TOOL_DEFAULT_REQUIREMENTS_NAME
+    if runtime_requirements.exists():
+        return [runtime_requirements.resolve()]
+
+    return []
+
+
+def _hash_python_tool_requirements(requirements_paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    digest.update(sys.version.encode("utf-8", errors="replace"))
+    digest.update(str(bool(settings.python_tool_system_site_packages)).encode("ascii"))
+    for requirements_path in requirements_paths:
+        digest.update(str(requirements_path).encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        digest.update(requirements_path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _read_python_tool_state(state_path: Path) -> dict:
+    try:
+        return json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_python_tool_state(state_path: Path, state: dict) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(_normalize_tool_payload_value(state), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _run_python_runtime_command(
+    command: list[str],
+    *,
+    timeout_seconds: int,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_seconds,
+        env=env,
+    )
+
+
+def _build_python_tool_runtime_env_patch(runtime: dict) -> dict[str, str]:
+    venv_dir = str(runtime.get("venv_dir") or "").strip()
+    if not venv_dir:
+        return {}
+
+    scripts_dir = Path(venv_dir) / ("Scripts" if os.name == "nt" else "bin")
+    path_value = os.environ.get("PATH") or ""
+    return {
+        "VIRTUAL_ENV": venv_dir,
+        "PATH": f"{scripts_dir}{os.pathsep}{path_value}" if path_value else str(scripts_dir),
+        "SHOTWRIGHT_PYTHON_RUNTIME_DIR": str(runtime.get("runtime_dir") or ""),
+        "SHOTWRIGHT_PYTHON_VENV_DIR": venv_dir,
+        "SHOTWRIGHT_PYTHON_REQUIREMENTS": os.pathsep.join(str(path) for path in runtime.get("requirements_paths") or []),
+    }
+
+
+def _sync_python_tool_runtime() -> tuple[Path, dict, dict[str, str], str | None]:
+    runtime = {
+        "enabled": bool(settings.python_tool_auto_sync_dependencies),
+        "runtime_dir": str(_python_tool_runtime_root()),
+        "venv_dir": None,
+        "pip_cache_dir": None,
+        "requirements_paths": [],
+        "requirements_fingerprint": None,
+        "synced": False,
+        "sync_elapsed_ms": 0,
+        "using_system_site_packages": bool(settings.python_tool_system_site_packages),
+    }
+
+    if not settings.python_tool_auto_sync_dependencies:
+        return Path(sys.executable), runtime, {}, None
+
+    requirements_paths = _resolve_python_tool_requirements_paths()
+    missing_paths = [str(path) for path in requirements_paths if not path.is_file()]
+    if not requirements_paths:
+        runtime["enabled"] = False
+        return Path(sys.executable), runtime, {}, None
+    if missing_paths:
+        return Path(sys.executable), runtime, {}, f"Python requirements file not found: {', '.join(missing_paths)}"
+
+    venv_dir = _python_tool_venv_dir()
+    venv_python = _python_tool_venv_python(venv_dir)
+    pip_cache_dir = _python_tool_pip_cache_dir()
+    state_path = _python_tool_state_path(venv_dir)
+    fingerprint = _hash_python_tool_requirements(requirements_paths)
+    runtime.update(
+        {
+            "venv_dir": str(venv_dir),
+            "pip_cache_dir": str(pip_cache_dir),
+            "requirements_paths": [str(path) for path in requirements_paths],
+            "requirements_fingerprint": fingerprint,
+        }
+    )
+
+    started_at = datetime.now(timezone.utc)
+    try:
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        pip_cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return Path(sys.executable), runtime, {}, f"Could not prepare Python runtime directories: {exc}"
+
+    sync_timeout_seconds = max(30, int(settings.python_tool_dependency_sync_timeout_seconds or 1800))
+    if not venv_python.exists():
+        venv_command = [sys.executable, "-m", "venv"]
+        if settings.python_tool_system_site_packages:
+            venv_command.append("--system-site-packages")
+        venv_command.append(str(venv_dir))
+        try:
+            completed = _run_python_runtime_command(venv_command, timeout_seconds=sync_timeout_seconds)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return Path(sys.executable), runtime, {}, f"Could not create Python tool venv: {exc}"
+        if completed.returncode != 0:
+            output = _truncate_text(_redact_sensitive_text((completed.stderr or completed.stdout or "").strip()), 4000)
+            return Path(sys.executable), runtime, {}, f"Could not create Python tool venv: {output}"
+
+    state = _read_python_tool_state(state_path)
+    if state.get("requirements_fingerprint") != fingerprint:
+        pip_env = os.environ.copy()
+        pip_env.update(
+            {
+                "PYTHONIOENCODING": "utf-8",
+                "PIP_CACHE_DIR": str(pip_cache_dir),
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            }
+        )
+        pip_timeout = str(os.environ.get("PIP_DEFAULT_TIMEOUT") or "120")
+        pip_command = [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--progress-bar",
+            "off",
+            "--retries",
+            "10",
+            "--timeout",
+            pip_timeout,
+        ]
+        for requirements_path in requirements_paths:
+            pip_command.extend(["-r", str(requirements_path)])
+
+        try:
+            completed = _run_python_runtime_command(pip_command, timeout_seconds=sync_timeout_seconds, env=pip_env)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return venv_python, runtime, _build_python_tool_runtime_env_patch(runtime), f"Could not sync Python packages: {exc}"
+        if completed.returncode != 0:
+            output = _truncate_text(_redact_sensitive_text((completed.stderr or completed.stdout or "").strip()), 4000)
+            return venv_python, runtime, _build_python_tool_runtime_env_patch(runtime), f"Could not sync Python packages: {output}"
+
+        runtime["synced"] = True
+        _write_python_tool_state(
+            state_path,
+            {
+                "requirements_fingerprint": fingerprint,
+                "requirements_paths": [str(path) for path in requirements_paths],
+                "python_executable": str(venv_python),
+                "synced_at": datetime.now(timezone.utc),
+            },
+        )
+
+    runtime["sync_elapsed_ms"] = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+    return venv_python, runtime, _build_python_tool_runtime_env_patch(runtime), None
+
+
+async def _ensure_python_tool_runtime() -> tuple[Path, dict, dict[str, str], str | None]:
+    return await asyncio.to_thread(_ensure_python_tool_runtime_sync)
+
+
+def _ensure_python_tool_runtime_sync() -> tuple[Path, dict, dict[str, str], str | None]:
+    with _PYTHON_TOOL_ENV_LOCK:
+        return _sync_python_tool_runtime()
 
 
 def _sanitize_asset_file_name(value: str | None, fallback_stem: str, suffix: str) -> str:
@@ -1199,6 +1426,29 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         timeout_seconds = _coerce_python_timeout_seconds(args.get("timeout_seconds"))
         before_files = _snapshot_workspace_files(work_dir)
         started_at = datetime.now(timezone.utc)
+        python_executable, dependency_runtime, dependency_env, dependency_error = await _ensure_python_tool_runtime()
+        if dependency_error:
+            payload = {
+                "success": False,
+                "exit_code": None,
+                "timed_out": False,
+                "timeout_seconds": timeout_seconds,
+                "elapsed_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000),
+                "python_executable": str(python_executable),
+                "script_path": str(script_path),
+                "work_dir": str(work_dir),
+                "project_id": project_id,
+                "project_workspace_dir": project.get("workspace_dir") if project else None,
+                "python_dependency_runtime": dependency_runtime,
+                "error": dependency_error,
+            }
+            return ToolResult(
+                text_result_for_llm=_serialize_tool_payload(payload),
+                result_type="failure",
+                error=dependency_error,
+                session_log=args.get("description") or "Prepared Python media processing dependencies",
+            )
+
         env = os.environ.copy()
         env.update(
             {
@@ -1209,6 +1459,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 "SHOTWRIGHT_EXPORT_DIR": str(pm.EXPORT_DIR),
             }
         )
+        env.update(dependency_env)
         if project and project_id:
             env["SHOTWRIGHT_PROJECT_ID"] = project_id
             env["SHOTWRIGHT_PROJECT_ROOT"] = str(Path(project["workspace_dir"]))
@@ -1217,7 +1468,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
 
         try:
             completed = subprocess.run(
-                [sys.executable, str(script_path)],
+                [str(python_executable), str(script_path)],
                 cwd=str(work_dir),
                 env=env,
                 capture_output=True,
@@ -1250,7 +1501,8 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "timed_out": timed_out,
             "timeout_seconds": timeout_seconds,
             "elapsed_ms": elapsed_ms,
-            "python_executable": sys.executable,
+            "python_executable": str(python_executable),
+            "python_dependency_runtime": dependency_runtime,
             "script_path": str(script_path),
             "work_dir": str(work_dir),
             "project_id": project_id,
@@ -1660,7 +1912,9 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 "Execute Python 3.13 code inside the Shotwright session workspace for CPU-only media analysis, "
                 "asset generation, audio/video preprocessing, data extraction, and AIGC helper workflows. "
                 "The runtime includes numpy, pillow, opencv-python, moviepy, librosa, soundfile, onnxruntime, "
-                "faster-whisper, openai-whisper, torch CPU, and insightface-compatible packages."
+                "faster-whisper, openai-whisper, torch CPU, and insightface-compatible packages. "
+                "Shotwright can sync these packages from the configured runtime requirements file into a persistent venv "
+                "before execution, so dependency updates do not require rebuilding the Docker image."
             ),
             handler=run_python_code,
             parameters={

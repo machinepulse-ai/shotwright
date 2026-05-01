@@ -68,9 +68,6 @@ RUN if (-not [string]::IsNullOrWhiteSpace($env:PIP_INDEX_URL)) { \
 
 RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT psutil
 
-COPY src/backend/requirements-aigc.txt C:/workspace/src/backend/requirements-aigc.txt
-RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT -r C:/workspace/src/backend/requirements-aigc.txt
-
 # =============================================================================
 # Stage: after-effects-setup — prebuilt AE installer payload from GHCR
 # =============================================================================
@@ -124,6 +121,7 @@ COPY scripts/install/ensure_pwsh_compat.ps1 C:/workspace/scripts/install/ensure_
 COPY scripts/install/install_pyproject_dependencies.py C:/workspace/scripts/install/install_pyproject_dependencies.py
 COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
 COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
+COPY src/backend/requirements-aigc.txt C:/workspace/src/backend/requirements-aigc.txt
 RUN & python C:/workspace/scripts/install/install_pyproject_dependencies.py C:/workspace/src/backend/pyproject.toml --index-url $env:PIP_INDEX_URL
 COPY src/backend/codex-bridge/package.json src/backend/codex-bridge/package-lock.json C:/workspace/src/backend/codex-bridge/
 RUN Set-Location C:/workspace/src/backend/codex-bridge; \
@@ -132,6 +130,10 @@ COPY scripts/ C:/workspace/scripts/
 COPY src/backend/app/ C:/workspace/src/backend/app/
 COPY src/backend/codex-bridge/ C:/workspace/src/backend/codex-bridge/
 WORKDIR C:/workspace/src/backend
+
+ENV SHOTWRIGHT_PYTHON_TOOL_AUTO_SYNC_DEPENDENCIES=true \
+      SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR=C:/data/python \
+      SHOTWRIGHT_PYTHON_TOOL_REQUIREMENTS=C:/workspace/src/backend/requirements-aigc.txt
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

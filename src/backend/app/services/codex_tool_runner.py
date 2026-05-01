@@ -27,6 +27,16 @@ from app.services.agent_tools import build_shotwright_tools
 _TOOL_RUNNER_TYPE = "shotwright_tool_result"
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+
+
 def _serialize_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -167,6 +177,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="Run Shotwright tools from the Codex bridge.")
     parser.add_argument("--session-id", required=True, help="Shotwright app session id.")
     parser.add_argument("--tool", help="Tool name to execute.")

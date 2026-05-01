@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +10,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.services import agent_tools as module
+
+
+async def fake_python_runtime():
+    return Path(sys.executable), {'enabled': False}, {}, None
 
 
 class FakeAsyncCursor:
@@ -268,6 +274,7 @@ async def test_run_python_code_uses_active_project_workspace_and_reports_outputs
     monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
     monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
     monkeypatch.setattr(module.pm, 'refresh_project_files', fake_refresh_project_files)
+    monkeypatch.setattr(module, '_ensure_python_tool_runtime', fake_python_runtime)
 
     tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
     result = await tools['run_python_code'].handler(
@@ -309,6 +316,7 @@ async def test_run_python_code_times_out(monkeypatch: pytest.MonkeyPatch, tmp_pa
     )
 
     monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module, '_ensure_python_tool_runtime', fake_python_runtime)
 
     tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
     result = await tools['run_python_code'].handler(
@@ -337,6 +345,7 @@ async def test_run_python_code_rejects_work_dir_outside_session(
     )
 
     monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module, '_ensure_python_tool_runtime', fake_python_runtime)
 
     tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
     result = await tools['run_python_code'].handler(
@@ -350,6 +359,62 @@ async def test_run_python_code_rejects_work_dir_outside_session(
 
     assert result.result_type == 'failure'
     assert 'work_dir must stay inside this session workspace' in result.error
+
+
+@pytest.mark.asyncio
+async def test_python_tool_runtime_syncs_requirements_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / 'python-runtime'
+    venv_dir = runtime_dir / 'aigc-venv'
+    requirements_path = tmp_path / 'requirements-aigc.txt'
+    requirements_path.write_text('requests==2.32.0\n', encoding='utf-8')
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:3] == [sys.executable, '-m', 'venv']:
+            python_path = venv_dir / ('Scripts' if module.os.name == 'nt' else 'bin') / (
+                'python.exe' if module.os.name == 'nt' else 'python'
+            )
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.write_text('', encoding='utf-8')
+        return subprocess.CompletedProcess(command, 0, '', '')
+
+    monkeypatch.setattr(module.settings, 'python_tool_auto_sync_dependencies', True)
+    monkeypatch.setattr(module.settings, 'python_tool_runtime_dir', str(runtime_dir))
+    monkeypatch.setattr(module.settings, 'python_tool_venv_dir', str(venv_dir))
+    monkeypatch.setattr(module.settings, 'python_tool_requirements', str(requirements_path))
+    monkeypatch.setattr(module.settings, 'python_tool_pip_cache_dir', '')
+    monkeypatch.setattr(module.settings, 'python_tool_system_site_packages', True)
+    monkeypatch.setattr(module.settings, 'python_tool_dependency_sync_timeout_seconds', 60)
+    monkeypatch.setattr(module, '_run_python_runtime_command', fake_run)
+
+    python_path, runtime, env_patch, error = await module._ensure_python_tool_runtime()
+
+    assert error is None
+    assert python_path == venv_dir / ('Scripts' if module.os.name == 'nt' else 'bin') / (
+        'python.exe' if module.os.name == 'nt' else 'python'
+    )
+    assert runtime['synced'] is True
+    assert env_patch['VIRTUAL_ENV'] == str(venv_dir)
+    assert any(command[:3] == [sys.executable, '-m', 'venv'] for command in calls)
+    assert any('-r' in command and str(requirements_path) in command for command in calls)
+
+    calls.clear()
+    _python_path, second_runtime, _env_patch, second_error = await module._ensure_python_tool_runtime()
+
+    assert second_error is None
+    assert second_runtime['synced'] is False
+    assert calls == []
+
+    requirements_path.write_text('requests==2.32.1\n', encoding='utf-8')
+    _python_path, third_runtime, _env_patch, third_error = await module._ensure_python_tool_runtime()
+
+    assert third_error is None
+    assert third_runtime['synced'] is True
+    assert any('-r' in command and str(requirements_path) in command for command in calls)
 
 
 @pytest.mark.asyncio
