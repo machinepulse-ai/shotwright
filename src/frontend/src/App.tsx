@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrowserRouter, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import AgentPanel from "./components/AgentPanel/AgentPanel";
 import AdminPanel from "./components/AdminPanel/AdminPanel";
+import FirstRunGuide from "./components/FirstRunGuide/FirstRunGuide";
 import { useI18n } from "./i18n";
 
 const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
@@ -13,6 +14,8 @@ const KEYBOARD_STABLE_FRAME_COUNT = 4;
 const KEYBOARD_SETTLE_FALLBACK_MS = 320;
 const KEYBOARD_FOCUS_PROBE_DELAYS_MS = [0, 80, 160, 260, 420, 650, 900, 1200];
 const IOS_KEYBOARD_CHIN_PADDING_PX = 24;
+const IOS_IPHONE_SAFE_AREA_FALLBACK_PX = 34;
+const IOS_IPAD_SAFE_AREA_FALLBACK_PX = 20;
 const THEME_STORAGE_KEY = "shotwright_theme";
 
 type ColorTheme = "light" | "dark";
@@ -29,6 +32,8 @@ type VisualKeyboardState = {
   layoutHeight: number;
   visualBottom: number;
   rawInset: number;
+  rawComposerBottom: number;
+  safeAreaAdjustment: number;
   source: string;
   settling: boolean;
 };
@@ -41,6 +46,8 @@ type KeyboardDiagnostic = {
   layoutHeight: number;
   visualBottom: number;
   rawInset: number;
+  rawComposerBottom: number;
+  safeAreaAdjustment: number;
   visualHeight: number;
   visualOffsetTop: number;
   innerHeight: number;
@@ -51,6 +58,7 @@ type KeyboardDiagnostic = {
 
 let fixedViewportProbeElement: HTMLDivElement | null = null;
 let safeAreaProbeElement: HTMLDivElement | null = null;
+let lastSafeAreaInsetBottom = 0;
 
 const EMPTY_KEYBOARD_DIAGNOSTIC: KeyboardDiagnostic = {
   stableFrames: 0,
@@ -61,6 +69,8 @@ const EMPTY_KEYBOARD_DIAGNOSTIC: KeyboardDiagnostic = {
   layoutHeight: 0,
   visualBottom: 0,
   rawInset: 0,
+  rawComposerBottom: 0,
+  safeAreaAdjustment: 0,
   visualHeight: 0,
   visualOffsetTop: 0,
   innerHeight: 0,
@@ -170,7 +180,32 @@ function getSafeAreaInsetBottom() {
   }
 
   const parsed = Number.parseFloat(window.getComputedStyle(safeAreaProbeElement).paddingBottom);
-  return Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
+  const nextInset = Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : 0;
+  if (nextInset > 0) {
+    lastSafeAreaInsetBottom = nextInset;
+  }
+
+  return nextInset || lastSafeAreaInsetBottom;
+}
+
+function getIosSafeAreaFallbackInsetBottom() {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return 0;
+
+  const userAgent = navigator.userAgent.toLowerCase();
+  const longSide = Math.max(window.screen?.width ?? 0, window.screen?.height ?? 0);
+  if (/iphone/.test(userAgent)) {
+    return longSide >= 812 ? IOS_IPHONE_SAFE_AREA_FALLBACK_PX : 0;
+  }
+  if (/ipad/.test(userAgent)) {
+    return IOS_IPAD_SAFE_AREA_FALLBACK_PX;
+  }
+  return 0;
+}
+
+function getSafariKeyboardSafeAreaAdjustment() {
+  if (!isIosSafariViewport()) return 0;
+
+  return getSafeAreaInsetBottom() || getIosSafeAreaFallbackInsetBottom();
 }
 
 function getFixedViewportOverlap(visualViewport: VisualViewport | undefined) {
@@ -230,6 +265,8 @@ function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardSta
       layoutHeight,
       visualBottom,
       rawInset: bottomInset,
+      rawComposerBottom: 0,
+      safeAreaAdjustment: 0,
       source: "none",
       settling: false,
     };
@@ -252,7 +289,7 @@ function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardSta
           ? 0
           : resolvedKeyboardInset
       : 0;
-  const safariSafeAreaAdjustment = useFixedOffset && resolvedKeyboardInset > 0 && isIosSafariViewport() ? getSafeAreaInsetBottom() : 0;
+  const safariSafeAreaAdjustment = useFixedOffset && resolvedKeyboardInset > 0 ? getSafariKeyboardSafeAreaAdjustment() : 0;
   const composerBottom = Math.max(0, rawComposerBottom - safariSafeAreaAdjustment);
   const fixedOffsetY =
     useFixedOffset && resolvedKeyboardInset > 0
@@ -266,6 +303,8 @@ function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardSta
     layoutHeight: Math.round(layoutHeight),
     visualBottom: Math.round(visualBottom),
     rawInset: Math.round(rawInset),
+    rawComposerBottom,
+    safeAreaAdjustment: safariSafeAreaAdjustment,
     source: useFixedOffset ? "ios-visual" : "bottom",
     settling: false,
   };
@@ -282,6 +321,8 @@ function getVisualKeyboardDiagnostic(state: VisualKeyboardState, stableFrames: n
     layoutHeight: state.layoutHeight,
     visualBottom: state.visualBottom,
     rawInset: state.rawInset,
+    rawComposerBottom: state.rawComposerBottom,
+    safeAreaAdjustment: state.safeAreaAdjustment,
     visualHeight: Math.round(visualViewport?.height ?? window.innerHeight ?? 0),
     visualOffsetTop: Math.round(visualViewport?.offsetTop ?? 0),
     innerHeight: Math.round(window.innerHeight || document.documentElement.clientHeight || 0),
@@ -296,6 +337,8 @@ function formatKeyboardDiagnostic(diagnostic: KeyboardDiagnostic) {
     `KB ${diagnostic.open ? "open" : diagnostic.settling ? "settle" : "idle"}`,
     `${diagnostic.stableFrames}/${diagnostic.thresholdFrames}`,
     `k${diagnostic.keyboardInset}`,
+    `c${diagnostic.composerBottom}`,
+    `s${diagnostic.safeAreaAdjustment}`,
     `y${diagnostic.fixedOffsetY}`,
     `vv ${diagnostic.visualHeight}@${diagnostic.visualOffsetTop}`,
     `b${diagnostic.visualBottom}`,
@@ -546,12 +589,30 @@ function WorkbenchApp() {
     setColorTheme((currentTheme) => (currentTheme === "dark" ? "light" : "dark"));
   };
 
+  const handleGuideStepChange = useCallback(
+    (stepKey: keyof typeof copy.app.firstRunGuide.steps) => {
+      if (stepKey === "newChat") {
+        setIsSessionSidebarCollapsed(false);
+        if (isMobileDrawerLayout) {
+          setIsContextSidebarCollapsed(true);
+        }
+        return;
+      }
+
+      if (isMobileDrawerLayout && ["composer", "attachments", "agentSettings", "details", "theme"].includes(stepKey)) {
+        setIsSessionSidebarCollapsed(true);
+        setIsContextSidebarCollapsed(true);
+      }
+    },
+    [copy.app.firstRunGuide.steps, isMobileDrawerLayout],
+  );
+
   return (
     <div className={`workbench ${isAdminSection ? "is-admin-section" : "is-chat-section"}`}>
       <header className="titlebar">
         <div className="titlebar-left">
           <div className="titlebar-brand-mark" aria-hidden="true">
-            <img className="titlebar-brand-icon" src="/sw-icon.svg" alt="" />
+            <img className="titlebar-brand-icon" src={__SHOTWRIGHT_SW_ICON_URL__} alt="" />
           </div>
           <span className="titlebar-product">{copy.app.product}</span>
           <nav className="titlebar-nav" aria-label={copy.app.primaryNavLabel}>
@@ -643,6 +704,8 @@ function WorkbenchApp() {
           </Routes>
         </main>
       </div>
+
+      <FirstRunGuide copy={copy.app.firstRunGuide} enabled={!isAdminSection} onStepChange={handleGuideStepChange} />
 
       <footer className="statusbar" aria-label={copy.app.statusbarLabel}>
         <div className="statusbar-group statusbar-group-left">

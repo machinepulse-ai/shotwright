@@ -2240,6 +2240,16 @@ const MARKDOWN_LANGUAGE_LABELS: Record<string, { "zh-CN": string; "en-US": strin
   yml: { "zh-CN": "YAML", "en-US": "YAML" },
 };
 
+const COLLAPSIBLE_MARKDOWN_FIELD_PATTERN = /^(?:[-*+]\s*)?(.{1,96}?)[：:]\s*([\s\S]+)$/;
+const COLLAPSIBLE_MARKDOWN_FIELD_LABEL_PATTERN =
+  /(?:script|jsx|code|content|argument|input|output|result|payload|stdout|stderr|日志|脚本|内容|参数|输入|输出|结果)/i;
+const TARGETED_FIELD_COLLAPSE_CHAR_LIMIT = 800;
+const TARGETED_FIELD_COLLAPSE_LINE_LIMIT = 12;
+const GENERIC_FIELD_COLLAPSE_CHAR_LIMIT = 1800;
+const GENERIC_FIELD_COLLAPSE_LINE_LIMIT = 24;
+const CODE_BLOCK_COLLAPSE_CHAR_LIMIT = 2400;
+const CODE_BLOCK_COLLAPSE_LINE_LIMIT = 28;
+
 type MarkdownCodeRendererProps = {
   inline?: boolean;
   className?: string;
@@ -2261,7 +2271,67 @@ function flattenMarkdownText(node: ReactNode): string {
     return node.map((child) => flattenMarkdownText(child)).join("");
   }
 
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return flattenMarkdownText(node.props.children);
+  }
+
   return "";
+}
+
+function getTextLineCount(value: string) {
+  return value ? value.split(/\r?\n/).length : 0;
+}
+
+function normalizeCollapsibleFieldLabel(label: string) {
+  return label
+    .replace(/\*\*/g, "")
+    .replace(/[`"'“”‘’]+/g, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function shouldCollapseMarkdownField(label: string, value: string) {
+  const normalizedLabel = normalizeCollapsibleFieldLabel(label);
+  const text = value.trim();
+  if (!normalizedLabel || !text) return false;
+
+  const lineCount = getTextLineCount(text);
+  const targetedField = COLLAPSIBLE_MARKDOWN_FIELD_LABEL_PATTERN.test(normalizedLabel);
+  if (targetedField) {
+    return text.length >= TARGETED_FIELD_COLLAPSE_CHAR_LIMIT || lineCount >= TARGETED_FIELD_COLLAPSE_LINE_LIMIT;
+  }
+
+  return text.length >= GENERIC_FIELD_COLLAPSE_CHAR_LIMIT || lineCount >= GENERIC_FIELD_COLLAPSE_LINE_LIMIT;
+}
+
+function parseCollapsibleMarkdownField(children: ReactNode) {
+  const text = flattenMarkdownText(children).trim();
+  const match = COLLAPSIBLE_MARKDOWN_FIELD_PATTERN.exec(text);
+  if (!match) return null;
+
+  const label = normalizeCollapsibleFieldLabel(match[1] ?? "");
+  const value = (match[2] ?? "").trim();
+  if (!shouldCollapseMarkdownField(label, value)) return null;
+
+  return { label, value };
+}
+
+function formatCollapsedTextStats(value: string, locale: Locale) {
+  const lineCount = getTextLineCount(value);
+  const charCount = value.length;
+  if (locale === "zh-CN") {
+    return `${lineCount} 行 · ${charCount.toLocaleString("zh-CN")} 字符`;
+  }
+  return `${lineCount} lines · ${charCount.toLocaleString("en-US")} chars`;
+}
+
+function getCollapsedTextPreview(value: string) {
+  return value
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? "";
 }
 
 function parseMarkdownLanguage(className?: string) {
@@ -2299,6 +2369,8 @@ function MarkdownCodeBlock({
   const codeText = flattenMarkdownText(children).replace(/\n$/, "");
   const lineCount = codeText ? codeText.split(/\r?\n/).length : 0;
   const isInline = inline ?? !language;
+  const shouldCollapse = !isInline && (codeText.length >= CODE_BLOCK_COLLAPSE_CHAR_LIMIT || lineCount >= CODE_BLOCK_COLLAPSE_LINE_LIMIT);
+  const codeLanguageLabel = formatMarkdownLanguageLabel(language, locale);
 
   useEffect(() => {
     if (!copied) {
@@ -2326,10 +2398,10 @@ function MarkdownCodeBlock({
     }
   };
 
-  return (
+  const codeBlock = (
     <div className="markdown-code-block">
       <div className="markdown-code-header">
-        <span className="markdown-code-language">{formatMarkdownLanguageLabel(language, locale)}</span>
+        <span className="markdown-code-language">{codeLanguageLabel}</span>
         <button
           type="button"
           className={`markdown-code-copy${copied ? " is-copied" : ""}`}
@@ -2369,6 +2441,42 @@ function MarkdownCodeBlock({
       </div>
     </div>
   );
+
+  if (!shouldCollapse) {
+    return codeBlock;
+  }
+
+  return (
+    <details className="markdown-collapsible markdown-collapsible-code">
+      <summary className="markdown-collapsible-summary">
+        <span className="markdown-collapsible-chevron" aria-hidden="true" />
+        <span className="markdown-collapsible-summary-copy">
+          <span className="markdown-collapsible-label">{codeLanguageLabel}</span>
+          <span className="markdown-collapsible-meta">{formatCollapsedTextStats(codeText, locale)}</span>
+          <span className="markdown-collapsible-preview">{getCollapsedTextPreview(codeText)}</span>
+        </span>
+      </summary>
+      <div className="markdown-collapsible-body">{codeBlock}</div>
+    </details>
+  );
+}
+
+function CollapsibleMarkdownField({ label, value, locale }: { label: string; value: string; locale: Locale }) {
+  return (
+    <details className="markdown-collapsible markdown-collapsible-field">
+      <summary className="markdown-collapsible-summary">
+        <span className="markdown-collapsible-chevron" aria-hidden="true" />
+        <span className="markdown-collapsible-summary-copy">
+          <span className="markdown-collapsible-label">{label}</span>
+          <span className="markdown-collapsible-meta">{formatCollapsedTextStats(value, locale)}</span>
+          <span className="markdown-collapsible-preview">{getCollapsedTextPreview(value)}</span>
+        </span>
+      </summary>
+      <div className="markdown-collapsible-body">
+        <pre className="markdown-collapsible-pre">{value}</pre>
+      </div>
+    </details>
+  );
 }
 
 function buildMarkdownComponents(locale: Locale, copy: TranslationCopy): Components {
@@ -2394,6 +2502,26 @@ function buildMarkdownComponents(locale: Locale, copy: TranslationCopy): Compone
         copiedLabel={copy.common.copied}
       />
     ),
+    p: ({ node: _node, children, ...props }) => {
+      const collapsibleField = parseCollapsibleMarkdownField(children);
+      if (collapsibleField) {
+        return <CollapsibleMarkdownField {...collapsibleField} locale={locale} />;
+      }
+
+      return <p {...props}>{children}</p>;
+    },
+    li: ({ node: _node, className, children, ...props }) => {
+      const collapsibleField = parseCollapsibleMarkdownField(children);
+      if (collapsibleField) {
+        return (
+          <li {...props} className={["markdown-list-collapsible", className].filter(Boolean).join(" ")}>
+            <CollapsibleMarkdownField {...collapsibleField} locale={locale} />
+          </li>
+        );
+      }
+
+      return <li {...props} className={className}>{children}</li>;
+    },
     pre: ({ children }) => {
       const childArray = Children.toArray(children);
       if (childArray.length === 1 && isValidElement<MarkdownCodeRendererProps>(childArray[0])) {
@@ -4836,7 +4964,7 @@ export default function AgentPanel({
               <span>{copy.agent.sidebarTitle}</span>
               <span>{sessions.length}</span>
             </div>
-            <button className="ghost-button sidebar-new-button" onClick={handleNewSession}>
+            <button className="ghost-button sidebar-new-button" data-testid="sidebar-new-chat" onClick={handleNewSession}>
               {copy.common.newChat}
             </button>
             {sessionsErrorMessage && <div className="sidebar-alert">{sessionsErrorMessage}</div>}
@@ -5226,6 +5354,7 @@ export default function AgentPanel({
                 id="agent-prompt"
                 rows={3}
                 className="composer-textarea"
+                data-testid="composer-prompt-input"
                 placeholder={currentSession ? copy.agent.textareaActive : copy.agent.textareaInactive}
                 defaultValue={composerPromptRef.current}
                 disabled={!currentSession}
@@ -5256,6 +5385,7 @@ export default function AgentPanel({
                   {isResponding ? (
                     <button
                       className="btn-danger send-button"
+                      data-testid="composer-send"
                       onClick={() => void handleStopGeneration()}
                       disabled={!currentSession || stoppingGeneration}
                     >
@@ -5267,6 +5397,7 @@ export default function AgentPanel({
                   ) : (
                     <button
                       className="btn-primary send-button"
+                      data-testid="composer-send"
                       onClick={handleSend}
                       disabled={!currentSession || sending || uploadingReferenceVideo || uploadingProject || (!composerHasText && !pendingAttachments.length)}
                     >

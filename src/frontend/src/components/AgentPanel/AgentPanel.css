@@ -2148,6 +2148,120 @@
   color: inherit !important;
 }
 
+.markdown-collapsible {
+  margin: 0.48rem 0;
+  overflow: hidden;
+  border: 1px solid var(--markdown-border-soft);
+  border-radius: 10px;
+  background: var(--markdown-surface);
+  box-shadow: var(--markdown-shadow-soft);
+}
+
+.markdown-collapsible-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 0.56rem 0.7rem;
+  list-style: none;
+  cursor: pointer;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(245, 248, 252, 0.96));
+}
+
+.markdown-collapsible-summary::-webkit-details-marker {
+  display: none;
+}
+
+.markdown-collapsible-chevron {
+  width: 8px;
+  height: 8px;
+  margin-top: 0.32rem;
+  border-right: 1.5px solid var(--text-secondary);
+  border-bottom: 1.5px solid var(--text-secondary);
+  transform: rotate(-45deg);
+  transition: transform 0.16s ease;
+}
+
+.markdown-collapsible[open] .markdown-collapsible-chevron {
+  transform: rotate(45deg);
+}
+
+.markdown-collapsible-summary-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, auto) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.markdown-collapsible-label {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown-collapsible-meta {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 120, 212, 0.12);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.markdown-collapsible-preview {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markdown-collapsible-body {
+  max-height: min(52vh, 520px);
+  overflow: auto;
+  border-top: 1px solid rgba(31, 35, 40, 0.08);
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.markdown-collapsible-code .markdown-code-block {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.markdown-collapsible-pre {
+  margin: 0;
+  padding: 0.86rem 0.95rem;
+  color: var(--text);
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.markdown-list-collapsible {
+  list-style: none;
+  margin-left: -1.1rem;
+}
+
 .markdown-content blockquote {
   padding: 0.72rem 0.82rem;
   border-left: 4px solid rgba(0, 120, 212, 0.26);
@@ -4907,6 +5021,29 @@ html[data-theme="dark"] .markdown-content blockquote,
 html[data-theme="dark"] .markdown-inline-code {
   background: var(--panel-bg-soft);
   border-color: var(--border);
+  color: var(--text);
+}
+
+html[data-theme="dark"] .markdown-collapsible {
+  border-color: var(--border);
+  background: var(--panel-bg);
+}
+
+html[data-theme="dark"] .markdown-collapsible-summary {
+  background: var(--panel-bg-soft);
+}
+
+html[data-theme="dark"] .markdown-collapsible-body {
+  border-top-color: var(--border);
+  background: var(--surface-inset);
+}
+
+html[data-theme="dark"] .markdown-collapsible-meta {
+  border-color: rgba(74, 163, 255, 0.28);
+  background: rgba(74, 163, 255, 0.12);
+}
+
+html[data-theme="dark"] .markdown-collapsible-pre {
   color: var(--text);
 }
 

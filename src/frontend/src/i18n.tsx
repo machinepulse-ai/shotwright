@@ -31,6 +31,44 @@ const catalogs = {
       localWorkspace: "本地工作区",
       uiEndpoint: "UI :3000",
       apiEndpoint: "API :8000",
+      firstRunGuide: {
+        landmarkLabel: "首次使用引导",
+        progress: "{current}/{total}",
+        skip: "跳过",
+        previous: "上一步",
+        next: "下一步",
+        finish: "完成",
+        steps: {
+          sessions: {
+            title: "会话入口",
+            body: "这里可以展开或收起会话列表。每个 AE 项目会保存在独立会话里，方便继续查看消息、素材和产物。",
+          },
+          newChat: {
+            title: "新建会话",
+            body: "用新聊天开始一次制作任务。创建会话后，可以上传 AEP、参考视频或直接输入制作需求。",
+          },
+          composer: {
+            title: "输入制作需求",
+            body: "在这里描述你要的 AE 效果、修改目标或检查任务。Agent 会把执行步骤、结果和预览回写到同一条时间线。",
+          },
+          attachments: {
+            title: "添加素材",
+            body: "这个按钮用于上传图片、参考视频或 AEP Zip。也可以直接粘贴或拖入素材。",
+          },
+          agentSettings: {
+            title: "选择 Agent 配置",
+            body: "这里可以调整模型和推理强度。复杂剪辑、特效和排错任务建议使用更强推理。",
+          },
+          details: {
+            title: "查看详情侧栏",
+            body: "详情侧栏汇总当前会话、容器、AEP、渲染产物和预览入口，适合检查执行状态。",
+          },
+          theme: {
+            title: "切换显示模式",
+            body: "这里可以在浅色和深色模式之间切换。偏好会保存在本机，下次进入自动沿用。",
+          },
+        },
+      },
     },
     common: {
       notStarted: "未开始",
@@ -510,6 +548,44 @@ const catalogs = {
       localWorkspace: "Local workspace",
       uiEndpoint: "UI :3000",
       apiEndpoint: "API :8000",
+      firstRunGuide: {
+        landmarkLabel: "First-use guide",
+        progress: "{current}/{total}",
+        skip: "Skip",
+        previous: "Previous",
+        next: "Next",
+        finish: "Done",
+        steps: {
+          sessions: {
+            title: "Session entry",
+            body: "Use this control to show or hide the session list. Each AE project stays in its own session with messages, assets, and outputs.",
+          },
+          newChat: {
+            title: "Start a session",
+            body: "Create a new chat for each production task. After that, upload an AEP, attach a reference video, or type the brief directly.",
+          },
+          composer: {
+            title: "Type the production brief",
+            body: "Describe the AE effect, edit, or inspection task here. The agent writes its steps, results, and previews back into the same timeline.",
+          },
+          attachments: {
+            title: "Attach source material",
+            body: "Use this button to upload images, reference videos, or an AEP Zip. You can also paste or drop files into the composer.",
+          },
+          agentSettings: {
+            title: "Choose agent settings",
+            body: "Tune the model and reasoning level here. More complex editing, effects, and debugging tasks usually benefit from stronger reasoning.",
+          },
+          details: {
+            title: "Open the details panel",
+            body: "The details panel summarizes the session, runtime, AEP, rendered outputs, and preview links so you can check progress quickly.",
+          },
+          theme: {
+            title: "Switch display mode",
+            body: "Toggle between light and dark mode. Your preference is saved locally and restored the next time you open Shotwright.",
+          },
+        },
+      },
     },
     common: {
       notStarted: "Not started",
