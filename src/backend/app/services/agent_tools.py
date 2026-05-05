@@ -18,15 +18,18 @@ from uuid import uuid4
 from copilot.tools import Tool, ToolInvocation, ToolResult
 
 from app.config import settings
-from app.database import get_message_collection, get_session_collection
+from app.database import get_admin_collection, get_message_collection, get_session_collection
 from app.services import container_manager as cm
 from app.services import nexrender as nr
 from app.services import project_manager as pm
 from app.services import reference_media as rm
+from app.services import tts as tts_media
+from app.services.codex_config import resolve_openai_api_key
 from app.services.session_streams import publish_context_refresh, publish_session_updated
 from app.services.video_streaming import generate_hls
 
 _REFERENCE_ASSET_DIRECTORY = Path("assets") / "references"
+_AUDIO_ASSET_DIRECTORY = Path("assets") / "audio"
 _PYTHON_TOOL_SCRIPT_DIRECTORY = Path(".shotwright-python")
 _PYTHON_TOOL_OUTPUT_LIMIT = 24_000
 _PYTHON_TOOL_FILE_LIST_LIMIT = 80
@@ -39,6 +42,12 @@ _SENSITIVE_ENV_NAMES = (
     "SHOTWRIGHT_GITHUB_TOKEN",
     "OPENAI_API_KEY",
     "SHOTWRIGHT_OPENAI_API_KEY",
+    "SHOTWRIGHT_TTS_OPENAI_API_KEY",
+    "SHOTWRIGHT_TTS_AZURE_SPEECH_KEY",
+    "SHOTWRIGHT_TTS_ELEVENLABS_API_KEY",
+    "AZURE_SPEECH_KEY",
+    "SPEECH_KEY",
+    "ELEVENLABS_API_KEY",
     "ANTHROPIC_API_KEY",
 )
 
@@ -394,6 +403,11 @@ def _should_reuse_generated_project_workspace(project: dict | None) -> bool:
 
     aep_files = [str(path).strip() for path in (project.get("aep_files") or []) if str(path).strip()]
     return not aep_files and Path(workspace_dir).exists()
+
+
+def _tts_provider_needs_python_runtime(raw_provider: object) -> bool:
+    provider = str(raw_provider or settings.tts_provider or "").strip().lower().replace("-", "_")
+    return provider in {"edge", "edge_tts", "microsoft_edge"}
 
 
 def _build_safe_after_effects_demo_script() -> str:
@@ -1061,6 +1075,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "render_outputs": nr.list_render_outputs(app_session_id, limit=8),
             "reference_videos": rm.list_reference_videos(app_session_id, limit=8),
             "storyboards": rm.list_storyboards(app_session_id, limit=8),
+            "tts_audio": tts_media.list_tts_audio(app_session_id, limit=8),
         }
         return _tool_success(payload, "Loaded Shotwright workspace state")
 
@@ -1400,6 +1415,111 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         return _tool_success(
             payload,
             args.get("description") or "Generated storyboard from the reference video",
+        )
+
+    async def generate_tts_audio(invocation: ToolInvocation) -> ToolResult:
+        args = invocation.arguments or {}
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return _tool_failure("text is required.")
+
+        session_col = get_session_collection()
+        session_doc = await session_col.find_one({"_id": app_session_id})
+        if not session_doc:
+            return _tool_failure("Shotwright session not found.")
+
+        project = None
+        project_id = str(args.get("project_id") or session_doc.get("active_project_id") or "").strip()
+        copy_to_project = _coerce_bool(args.get("copy_to_project"), bool(project_id))
+        if copy_to_project and project_id:
+            project = await pm.get_project(app_session_id, project_id)
+            if not project:
+                return _tool_failure(f"Project {project_id} not found.")
+
+        python_executable: Path | None = None
+        dependency_runtime: dict | None = None
+        dependency_env: dict[str, str] = {}
+        if _tts_provider_needs_python_runtime(args.get("provider")):
+            python_executable, dependency_runtime, dependency_env, dependency_error = await _ensure_python_tool_runtime()
+            if dependency_error:
+                payload = {
+                    "success": False,
+                    "python_executable": str(python_executable),
+                    "python_dependency_runtime": dependency_runtime,
+                    "error": dependency_error,
+                }
+                return ToolResult(
+                    text_result_for_llm=_serialize_tool_payload(payload),
+                    result_type="failure",
+                    error=dependency_error,
+                    session_log=args.get("description") or "Prepared TTS Python provider runtime",
+                )
+
+        admin_doc = await get_admin_collection().find_one({"_id": "settings"}) or {}
+        try:
+            payload = await asyncio.to_thread(
+                tts_media.generate_tts_audio,
+                app_session_id,
+                text=text,
+                provider=args.get("provider"),
+                voice=str(args.get("voice") or ""),
+                model=str(args.get("model") or ""),
+                language=str(args.get("language") or ""),
+                audio_format=str(args.get("format") or args.get("audio_format") or ""),
+                output_name=args.get("output_name"),
+                instructions=str(args.get("instructions") or ""),
+                speed=float(args["speed"]) if args.get("speed") is not None else None,
+                rate=str(args.get("rate") or ""),
+                pitch=str(args.get("pitch") or ""),
+                volume=str(args.get("volume") or ""),
+                base_url=str(args.get("base_url") or ""),
+                openai_api_key=resolve_openai_api_key(admin_doc),
+                python_executable=python_executable,
+                python_env=dependency_env,
+                timeout_seconds=_coerce_python_timeout_seconds(args.get("timeout_seconds"), default=180),
+            )
+        except (tts_media.TTSProviderError, FileNotFoundError, TypeError, ValueError, subprocess.TimeoutExpired) as exc:
+            return _tool_failure(str(exc).strip() or exc.__class__.__name__)
+
+        if project:
+            staged_audio = _copy_asset_into_project(
+                project,
+                Path(payload["file_path"]),
+                display_name=payload.get("filename"),
+                asset_name=args.get("asset_name") or payload.get("filename"),
+                target_directory=_AUDIO_ASSET_DIRECTORY,
+            )
+            refreshed_project = await pm.refresh_project_files(app_session_id, project_id) or project
+            payload.update(
+                {
+                    "project_id": project_id,
+                    "project_workspace_dir": project.get("workspace_dir"),
+                    "project_audio_path": staged_audio["project_asset_path"],
+                    "project_relative_path": staged_audio["project_relative_path"],
+                    "project": {
+                        "_id": refreshed_project["_id"],
+                        "filename": refreshed_project["filename"],
+                        "workspace_dir": refreshed_project["workspace_dir"],
+                        "entry_aep_file": refreshed_project.get("entry_aep_file"),
+                        "aep_files": refreshed_project.get("aep_files", []),
+                        "compositions": refreshed_project.get("compositions", []),
+                        "composition_catalog_updated_at": refreshed_project.get("composition_catalog_updated_at"),
+                    },
+                }
+            )
+            await publish_context_refresh(
+                app_session_id,
+                "tts_audio.staged",
+                project_id=project_id,
+                tts_audio_path=payload["shared_relative_path"],
+                project_audio_path=staged_audio["project_relative_path"],
+            )
+        if dependency_runtime is not None:
+            payload["python_dependency_runtime"] = dependency_runtime
+
+        return _tool_success(
+            payload,
+            args.get("description") or "Generated TTS narration audio",
         )
 
     async def run_python_code(invocation: ToolInvocation) -> ToolResult:
@@ -1903,6 +2023,96 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                         "description": "Short human-readable description of the storyboard generation step",
                     },
                 },
+            },
+            skip_permission=True,
+        ),
+        Tool(
+            name="generate_tts_audio",
+            description=(
+                "Generate session-scoped narration or voiceover audio from text for later After Effects import. "
+                "Prefer Edge TTS by default. Providers include edge, auto, OpenAI-compatible speech APIs, Azure Speech, ElevenLabs, and Windows SAPI; "
+                "credentials are read from admin/environment settings and are never passed in tool arguments. "
+                "When copy_to_project is true or an active project exists, the generated audio is staged under assets/audio "
+                "and can be imported in JSX with ImportOptions(new File(project_audio_path))."
+            ),
+            handler=generate_tts_audio,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Narration text to synthesize.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "TTS provider: edge is preferred; also supports auto, openai/openai_compatible, azure, elevenlabs, or windows_sapi.",
+                    },
+                    "voice": {
+                        "type": "string",
+                        "description": "Provider-specific voice name or voice id.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Provider-specific TTS model name when supported.",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional language hint such as zh-CN or en-US.",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output audio format: mp3, wav, aac, opus, flac, or pcm. Defaults to mp3.",
+                    },
+                    "output_name": {
+                        "type": "string",
+                        "description": "Optional output file name.",
+                    },
+                    "asset_name": {
+                        "type": "string",
+                        "description": "Optional file name when copying the audio into the active project assets/audio folder.",
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier; defaults to the active project when copy_to_project is enabled.",
+                    },
+                    "copy_to_project": {
+                        "type": "boolean",
+                        "description": "When true, copy the generated audio into the project workspace for AE import. Defaults to true when a project is active.",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "Optional provider-specific style or delivery instructions.",
+                    },
+                    "speed": {
+                        "type": "number",
+                        "description": "Optional OpenAI-compatible speed value when supported.",
+                    },
+                    "rate": {
+                        "type": "string",
+                        "description": "Optional provider-specific rate, e.g. +8% for Edge TTS or 2 for Windows SAPI.",
+                    },
+                    "pitch": {
+                        "type": "string",
+                        "description": "Optional Edge TTS pitch value, e.g. +5Hz.",
+                    },
+                    "volume": {
+                        "type": "string",
+                        "description": "Optional Edge TTS volume value, e.g. +0%.",
+                    },
+                    "base_url": {
+                        "type": "string",
+                        "description": "Optional OpenAI-compatible API base URL; API keys still come from admin/environment settings.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short human-readable description of the TTS generation step.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional provider timeout in seconds, from 1 to 900. Defaults to 180.",
+                    },
+                },
+                "required": ["text"],
             },
             skip_permission=True,
         ),

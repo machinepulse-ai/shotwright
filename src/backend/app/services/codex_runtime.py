@@ -222,7 +222,7 @@ class ShotwrightCodexRuntimeManager:
             )
         )
         invocations: list[dict[str, str]] = []
-        seen_paths: set[str] = set()
+        seen_skill_names: set[str] = set()
         for directory in self._resolve_skill_directories(runtime_settings):
             try:
                 entries = sorted(
@@ -240,13 +240,13 @@ class ShotwrightCodexRuntimeManager:
                 exact_match = skill_name.lower() in content_lower or (
                     bool(normalized_name) and normalized_name in normalized_content
                 )
-                ae_skill_match = after_effects_skill_requested and normalized_name.startswith("after effects")
+                ae_skill_match = after_effects_skill_requested and normalized_name == "after effects scripting guide"
                 if not exact_match and not ae_skill_match:
                     continue
-                resolved_path = os.path.normcase(os.path.abspath(skill_path))
-                if resolved_path in seen_paths:
+                canonical_name = normalized_name or skill_name.lower()
+                if canonical_name in seen_skill_names:
                     continue
-                seen_paths.add(resolved_path)
+                seen_skill_names.add(canonical_name)
                 invocations.append(
                     {
                         "name": skill_name,
@@ -463,7 +463,9 @@ class ShotwrightCodexRuntimeManager:
                 "- For a blank project, prefer create_empty_after_effects_project instead of handwritten boilerplate JSX.",
                 "- For user-supplied inline images, prefer inspect_workspace, then stage_reference_images or create_reference_composition instead of shell file copying.",
                 "- For user-supplied reference videos, prefer inspect_workspace, then generate_storyboard_from_reference_video before creating the AEP composition.",
+                "- For narration, voiceover, or spoken guide tracks, use generate_tts_audio first, then import the returned project_audio_path into After Effects and align the audio layer with the composition timing.",
                 "- Use run_python_code for CPU-only media analysis, synthetic asset generation, audio/video preprocessing, Whisper-style speech analysis, ONNX/InsightFace helpers, and data-driven AE inputs before writing complex JSX.",
+                "- In After Effects JSX, create captions, subtitles, title cards, and dense CJK text with comp.layers.addBoxText(); never assign TextDocument.boxText because it is read-only, and center rendered bounds with sourceRectAtTime().",
                 "- Once a session already has an active project, treat it as the default target for follow-up edits and renders.",
                 "- Use run_after_effects_jsx only for creative edits that are not already covered by the higher-level Shotwright tools.",
                 "- If run_after_effects_jsx fails after a project was created, fix the JSX and retry against the same project_id; do not create a replacement workspace unless the project tool reports that the workspace is unrecoverable.",

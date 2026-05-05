@@ -552,15 +552,18 @@
 }
 
 .session-rename-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-height: 54px;
 }
 
 .session-item .session-title-input {
-  width: 100%;
+  flex: 1 0 min(132px, 100%);
+  width: auto;
   min-width: 0;
   padding: 0.45rem 0.55rem;
   font-size: 0.8rem;
@@ -568,13 +571,33 @@
 
 .session-rename-actions {
   display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
   gap: 4px;
+  margin-left: auto;
 }
 
 .session-rename-action {
   width: 28px;
   height: 28px;
   border-radius: 8px;
+  flex: none;
+  padding: 0;
+}
+
+.session-rename-action-confirm {
+  color: var(--success);
+}
+
+.session-rename-action-cancel {
+  color: var(--danger);
+}
+
+.session-rename-icon {
+  width: 17px;
+  height: 17px;
+  display: block;
+  filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.55));
 }
 
 .sidebar-empty {
@@ -2453,6 +2476,104 @@
   margin-bottom: 4px;
 }
 
+.composer-upload-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(9, 105, 218, 0.18);
+  background: rgba(221, 244, 255, 0.92);
+  color: #0969da;
+  font-size: 0.76rem;
+}
+
+.composer-upload-notice.state-success {
+  border-color: rgba(26, 127, 55, 0.18);
+  background: rgba(221, 255, 228, 0.9);
+  color: #1a7f37;
+}
+
+.composer-upload-notice-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.composer-upload-notice-icon svg,
+.composer-upload-notice-dismiss svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.composer-upload-notice-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+
+.composer-upload-notice-copy strong,
+.composer-upload-notice-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-upload-notice-copy span {
+  color: var(--text-secondary);
+}
+
+.composer-upload-notice-copy .composer-upload-notice-progress-label {
+  color: currentColor;
+}
+
+.composer-upload-notice-progress {
+  display: block;
+  flex: 1 0 calc(100% - 28px);
+  height: 5px;
+  margin-left: 28px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(9, 105, 218, 0.16);
+}
+
+.composer-upload-notice-progress-bar {
+  display: block;
+  width: var(--upload-progress, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: currentColor;
+  transition: width 0.16s ease;
+}
+
+.composer-upload-notice-dismiss {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: currentColor;
+  box-shadow: none;
+}
+
+.composer-upload-notice-dismiss:hover {
+  background: rgba(31, 35, 40, 0.08);
+}
+
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -2624,6 +2745,9 @@
 
 .composer-tool-button,
 .composer-settings-save {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 32px;
   height: 32px;
   padding: 0;
@@ -2634,9 +2758,42 @@
   box-shadow: none;
 }
 
+.composer-attach-button {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.composer-attach-button.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .composer-tool-button:hover:not(:disabled),
 .composer-settings-save:hover:not(:disabled) {
   background: rgba(235, 240, 245, 0.96);
+}
+
+.composer-tool-button.is-disabled:hover {
+  background: rgba(246, 248, 250, 0.96);
+}
+
+.composer-attachment-input {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  opacity: 0;
+  cursor: inherit;
+  font-size: 0;
+}
+
+.composer-attachment-input::-webkit-file-upload-button {
+  cursor: inherit;
 }
 
 .composer-tool-button svg,
@@ -3469,6 +3626,7 @@
 .reference-media-gallery-chip {
   flex: 0 0 168px;
   min-width: 0;
+  max-width: 100%;
   padding: 8px;
   border-radius: 12px;
   border: 1px solid rgba(31, 35, 40, 0.08);
@@ -3479,6 +3637,7 @@
   text-align: left;
   color: inherit;
   box-shadow: none;
+  overflow: hidden;
 }
 
 .reference-media-gallery-chip:hover,
@@ -3495,17 +3654,25 @@
 }
 
 .reference-media-gallery-chip-label {
+  min-width: 0;
   font-size: 0.69rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reference-media-gallery-chip-action {
+  min-width: 0;
   font-size: 0.7rem;
   font-weight: 600;
   color: var(--primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reference-media-gallery-thumb {
@@ -3527,7 +3694,7 @@
   color: var(--text);
   white-space: normal;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  word-break: break-all;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -3752,6 +3919,8 @@
   font-size: 0.81rem;
   font-weight: 600;
   overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
 }
 
 .project-meta,
@@ -4207,6 +4376,39 @@
     --session-sidebar-base-width: min(340px, 75vw);
   }
 
+  .session-item.is-editing {
+    min-height: 66px;
+    align-content: center;
+  }
+
+  .session-item.is-editing .session-rename-form {
+    position: relative;
+    display: block;
+    min-height: 42px;
+    padding-right: 80px;
+  }
+
+  .session-item.is-editing .session-title-input {
+    width: 100%;
+    height: 42px;
+    min-height: 42px;
+    padding-right: 10px;
+    font-size: 16px;
+  }
+
+  .session-item.is-editing .session-rename-actions {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    width: auto;
+    transform: translateY(-50%);
+  }
+
+  .session-item.is-editing .session-rename-action {
+    width: 34px;
+    height: 32px;
+  }
+
   .session-loading-toolbar {
     margin-left: 0;
   }
@@ -4398,6 +4600,16 @@
   .agent-workbench.has-session-sidebar::before,
   .agent-workbench.has-context-sidebar::before {
     display: block;
+    z-index: 100;
+  }
+
+  .drawer-dismiss-layer {
+    z-index: 101;
+  }
+
+  .secondary-sidebar,
+  .context-sidebar {
+    z-index: 102;
   }
 
   html.is-visual-keyboard-open .statusbar {
@@ -4723,6 +4935,22 @@ html[data-theme="dark"] .composer-shell {
   background: linear-gradient(180deg, rgba(22, 27, 35, 0.96), rgba(17, 21, 28, 0.98));
 }
 
+html[data-theme="dark"] .composer-upload-notice {
+  background: rgba(10, 33, 54, 0.96);
+  border-color: rgba(74, 163, 255, 0.28);
+  color: #7ab7ff;
+}
+
+html[data-theme="dark"] .composer-upload-notice.state-success {
+  background: rgba(22, 54, 35, 0.96);
+  border-color: rgba(126, 231, 135, 0.28);
+  color: #7ee787;
+}
+
+html[data-theme="dark"] .composer-upload-notice-copy span {
+  color: var(--text-secondary);
+}
+
 html[data-theme="dark"] .composer-card,
 html[data-theme="dark"] .context-panel,
 html[data-theme="dark"] .session-loading-bubble,
@@ -4800,6 +5028,10 @@ html[data-theme="dark"] .session-item-menu-popover button:hover:not(:disabled) {
 
 html[data-theme="dark"] .session-item-menu-popover button.danger {
   color: var(--danger);
+}
+
+html[data-theme="dark"] .session-rename-icon {
+  filter: none;
 }
 
 html[data-theme="dark"] .role-user .chat-message-body,

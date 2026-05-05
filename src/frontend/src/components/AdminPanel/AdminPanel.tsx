@@ -22,6 +22,7 @@ import {
   getAgentModelDescriptor,
   getSessionModelToneClass,
 } from "../../utils/agentModel";
+import { renderBrandText } from "../../utils/brand";
 import "./AdminPanel.css";
 
 const defaultAdminSettings: AdminSettings = {
@@ -474,7 +475,7 @@ export default function AdminPanel() {
           <div>
             <span className="eyebrow">{copy.admin.headerEyebrow}</span>
             <h2>{copy.admin.headerTitle}</h2>
-            <p>{copy.admin.headerCopy}</p>
+            <p>{renderBrandText(copy.admin.headerCopy)}</p>
           </div>
           <div className="admin-header-actions">
             <button className="ghost-button" onClick={logout}>
@@ -602,7 +603,7 @@ export default function AdminPanel() {
                 {openAIKeySet ? copy.status.token.set : copy.status.token.notSet}
               </span>
             </div>
-            <p className="field-help">{copy.admin.openAIKeyHelp}</p>
+            <p className="field-help">{renderBrandText(copy.admin.openAIKeyHelp)}</p>
             {openAIKeySet && <p className="credential-note">{copy.admin.openAIKeySavedNotice}</p>}
             <div className="token-input">
               <input

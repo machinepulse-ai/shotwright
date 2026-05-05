@@ -4,6 +4,7 @@ import AgentPanel from "./components/AgentPanel/AgentPanel";
 import AdminPanel from "./components/AdminPanel/AdminPanel";
 import FirstRunGuide from "./components/FirstRunGuide/FirstRunGuide";
 import { useI18n } from "./i18n";
+import { renderBrandText } from "./utils/brand";
 
 const MOBILE_DRAWER_QUERY = "(max-width: 820px)";
 const NARROW_CONTEXT_QUERY = "(max-width: 1100px)";
@@ -152,6 +153,13 @@ function isKeyboardTextTarget(element: Element | null) {
   return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(inputType);
 }
 
+function shouldUseComposerKeyboardAvoidance(element: Element | null) {
+  if (!isKeyboardTextTarget(element)) return false;
+  if (!(element instanceof HTMLElement)) return false;
+
+  return Boolean(element.closest(".composer-card")) && !Boolean(element.closest(".session-rename-form"));
+}
+
 function getSafeAreaInsetBottom() {
   if (typeof document === "undefined" || typeof window === "undefined" || !document.body) {
     return 0;
@@ -257,7 +265,7 @@ function getVisualKeyboardState(layoutViewportHeight: number): VisualKeyboardSta
   const visualBottom = Math.min(layoutHeight, visualOffsetTop + viewportHeight);
   const bottomInset = Math.max(0, layoutHeight - visualBottom);
 
-  if (!visualViewport || !isKeyboardTextTarget(document.activeElement)) {
+  if (!visualViewport || !shouldUseComposerKeyboardAvoidance(document.activeElement)) {
     return {
       keyboardInset: 0,
       composerBottom: 0,
@@ -432,7 +440,7 @@ function WorkbenchApp() {
       frameId = 0;
       const currentWidth = window.innerWidth || document.documentElement.clientWidth || layoutViewportWidth;
       const currentHeight = window.innerHeight || document.documentElement.clientHeight || layoutViewportHeight;
-      if (!isKeyboardTextTarget(document.activeElement) || currentWidth !== layoutViewportWidth) {
+      if (!shouldUseComposerKeyboardAvoidance(document.activeElement) || currentWidth !== layoutViewportWidth) {
         layoutViewportHeight = currentHeight;
         layoutViewportWidth = currentWidth;
       }
@@ -497,7 +505,7 @@ function WorkbenchApp() {
     };
 
     const handlePotentialKeyboardFocus = (event: Event) => {
-      if (!isKeyboardTextTarget(event.target as Element | null)) return;
+      if (!shouldUseComposerKeyboardAvoidance(event.target as Element | null)) return;
       resetKeyboardSettle();
       scheduleKeyboardFocusProbes();
     };
@@ -614,7 +622,9 @@ function WorkbenchApp() {
           <div className="titlebar-brand-mark" aria-hidden="true">
             <img className="titlebar-brand-icon" src={__SHOTWRIGHT_SW_ICON_URL__} alt="" />
           </div>
-          <span className="titlebar-product">{copy.app.product}</span>
+          <span className="titlebar-product notranslate" translate="no">
+            {copy.app.product}
+          </span>
           <nav className="titlebar-nav" aria-label={copy.app.primaryNavLabel}>
             <NavLink to="/" className={() => `titlebar-tab${!isAdminSection ? " active" : ""}`}>
               {copy.app.chat}
@@ -624,7 +634,7 @@ function WorkbenchApp() {
             </NavLink>
           </nav>
         </div>
-        <div className="titlebar-center">{copy.app.workspace}</div>
+        <div className="titlebar-center">{renderBrandText(copy.app.workspace)}</div>
         <div className="titlebar-right">
           {showWorkbenchControls ? (
             <div className="titlebar-workbench-controls" aria-label={copy.app.layoutControlsLabel}>

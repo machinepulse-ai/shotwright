@@ -1,9 +1,10 @@
-import axios, { InternalAxiosRequestConfig } from "axios";
+import axios, { AxiosProgressEvent, InternalAxiosRequestConfig } from "axios";
 
 import {
   ChatImageAttachment,
   ChatMessage,
   ChatMessageDeletedEvent,
+  ReferenceVideoInfo,
   Session,
   SessionContextRefreshEvent,
   SessionEvent,
@@ -15,6 +16,7 @@ const api = axios.create({
 });
 
 const CHAT_TURN_TIMEOUT_MS = 0;
+const MEDIA_UPLOAD_TIMEOUT_MS = 0;
 const STREAM_RECONNECT_DELAY_MS = 1000;
 const STREAM_RECONNECT_DELAY_MAX_MS = 5000;
 
@@ -23,7 +25,18 @@ function resolveDirectApiOrigin() {
     return "";
   }
 
-  return __SHOTWRIGHT_DIRECT_API_ORIGIN__.trim();
+  const directOrigin = __SHOTWRIGHT_DIRECT_API_ORIGIN__.trim();
+  if (!directOrigin || typeof window === "undefined") {
+    return directOrigin;
+  }
+
+  const pageHostname = window.location.hostname.toLowerCase();
+  const isLocalhostPage = pageHostname === "localhost" || pageHostname === "127.0.0.1" || pageHostname === "::1";
+  if (!isLocalhostPage) {
+    return "";
+  }
+
+  return directOrigin;
 }
 
 function getStoredAdminToken() {
@@ -85,12 +98,113 @@ export const listProjects = (sessionId: string) => api.get(`/projects/${sessionI
 export const uploadProject = (sessionId: string, file: File) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post(`/agent/sessions/${sessionId}/uploads`, form);
+  return api.post(`/agent/sessions/${sessionId}/uploads`, form, { timeout: MEDIA_UPLOAD_TIMEOUT_MS });
 };
 export const uploadReferenceVideo = (sessionId: string, file: File) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post(`/agent/sessions/${sessionId}/reference-videos`, form);
+  return api.post(`/agent/sessions/${sessionId}/reference-videos`, form, { timeout: MEDIA_UPLOAD_TIMEOUT_MS });
+};
+export type ReferenceVideoUploadStatus = {
+  complete: boolean;
+  upload_id: string;
+  received_chunks: number[];
+  received_chunk_count: number;
+  received_bytes: number;
+  total_chunks: number;
+  total_size: number;
+  reference_video?: ReferenceVideoInfo | null;
+};
+export const getReferenceVideoUploadStatus = (
+  sessionId: string,
+  payload: {
+    uploadId: string;
+    totalChunks: number;
+    totalSize: number;
+  },
+) =>
+  api.get<ReferenceVideoUploadStatus>(
+    `/agent/sessions/${sessionId}/reference-videos/uploads/${encodeURIComponent(payload.uploadId)}`,
+    {
+      params: {
+        total_chunks: payload.totalChunks,
+        total_size: payload.totalSize,
+      },
+      timeout: MEDIA_UPLOAD_TIMEOUT_MS,
+    },
+  );
+export const uploadReferenceVideoChunk = (
+  sessionId: string,
+  chunk: Blob,
+  payload: {
+    uploadId: string;
+    chunkIndex: number;
+    totalChunks: number;
+    totalSize: number;
+    mimeType: string;
+    displayName?: string | null;
+  },
+  onUploadProgress?: (event: AxiosProgressEvent) => void,
+) => {
+  const form = new FormData();
+  form.append("file", chunk, payload.displayName || "reference-video");
+  form.append("upload_id", payload.uploadId);
+  form.append("chunk_index", String(payload.chunkIndex));
+  form.append("total_chunks", String(payload.totalChunks));
+  form.append("total_size", String(payload.totalSize));
+  form.append("mime_type", payload.mimeType);
+  form.append("display_name", payload.displayName || "");
+  return api.post<ReferenceVideoUploadStatus>(`/agent/sessions/${sessionId}/reference-videos/chunks`, form, {
+    timeout: MEDIA_UPLOAD_TIMEOUT_MS,
+    onUploadProgress,
+  });
+};
+export const completeReferenceVideoUpload = (
+  sessionId: string,
+  payload: {
+    uploadId: string;
+    totalChunks: number;
+    totalSize: number;
+    mimeType: string;
+    displayName?: string | null;
+  },
+) => {
+  const form = new FormData();
+  form.append("total_chunks", String(payload.totalChunks));
+  form.append("total_size", String(payload.totalSize));
+  form.append("mime_type", payload.mimeType);
+  form.append("display_name", payload.displayName || "");
+  return api.post<ReferenceVideoInfo>(
+    `/agent/sessions/${sessionId}/reference-videos/uploads/${encodeURIComponent(payload.uploadId)}/complete`,
+    form,
+    { timeout: MEDIA_UPLOAD_TIMEOUT_MS },
+  );
+};
+export const uploadImageAttachmentChunk = (
+  sessionId: string,
+  chunk: Blob,
+  payload: {
+    uploadId: string;
+    chunkIndex: number;
+    totalChunks: number;
+    totalSize: number;
+    mimeType: string;
+    displayName?: string | null;
+    width?: number | null;
+    height?: number | null;
+  },
+) => {
+  const form = new FormData();
+  form.append("file", chunk, payload.displayName || "image");
+  form.append("upload_id", payload.uploadId);
+  form.append("chunk_index", String(payload.chunkIndex));
+  form.append("total_chunks", String(payload.totalChunks));
+  form.append("total_size", String(payload.totalSize));
+  form.append("mime_type", payload.mimeType);
+  form.append("display_name", payload.displayName || "");
+  if (payload.width) form.append("width", String(payload.width));
+  if (payload.height) form.append("height", String(payload.height));
+  return api.post(`/agent/sessions/${sessionId}/image-attachments/chunks`, form, { timeout: MEDIA_UPLOAD_TIMEOUT_MS });
 };
 export const exportProject = (sessionId: string, projectId: string) =>
   api.get(`/projects/${sessionId}/${projectId}/archive`, { responseType: "blob" });

@@ -3,7 +3,7 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.database import get_event_collection, get_message_collection, get_project_collection, get_session_collection
@@ -16,6 +16,7 @@ from app.services.agent_tools import list_session_image_attachments
 from app.services.agent_runtime import runtime_manager
 from app.services.session_streams import session_stream_broker
 from app.services import container_manager as cm
+from app.services import image_attachments as ia
 from app.services import nexrender as nr
 from app.services import project_manager as pm
 from app.services import reference_media as rm
@@ -111,6 +112,43 @@ async def upload_session_project(session_id: str, file: UploadFile):
     return project
 
 
+@router.post("/sessions/{session_id}/image-attachments/chunks")
+async def upload_session_image_attachment_chunk(
+    session_id: str,
+    file: UploadFile,
+    upload_id: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    total_size: int = Form(...),
+    mime_type: str = Form(...),
+    display_name: str = Form(""),
+    width: int | None = Form(None),
+    height: int | None = Form(None),
+):
+    session = await get_session_collection().find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    payload = await file.read()
+    try:
+        return ia.store_image_attachment_chunk(
+            session_id,
+            upload_id=upload_id,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            total_size=total_size,
+            payload=payload,
+            file_name=display_name or file.filename,
+            mime_type=mime_type,
+            width=width,
+            height=height,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 413 if "64 MB" in message else 400
+        raise HTTPException(status_code, message) from exc
+
+
 @router.post("/sessions/{session_id}/reference-videos", response_model=ReferenceVideoInfo)
 async def upload_reference_video(session_id: str, file: UploadFile):
     session = await get_session_collection().find_one({"_id": session_id})
@@ -122,6 +160,93 @@ async def upload_reference_video(session_id: str, file: UploadFile):
     payload = await file.read()
     try:
         return rm.upload_reference_video(session_id, payload, file.filename)
+    except rm.ReferenceMediaUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 413 if "500 MB" in message else 400
+        raise HTTPException(status_code, message) from exc
+
+
+@router.get("/sessions/{session_id}/reference-videos/uploads/{upload_id}")
+async def get_reference_video_upload_status(
+    session_id: str,
+    upload_id: str,
+    total_chunks: int,
+    total_size: int,
+):
+    session = await get_session_collection().find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    try:
+        return rm.get_reference_video_upload_status(
+            session_id,
+            upload_id=upload_id,
+            total_chunks=total_chunks,
+            total_size=total_size,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 413 if "500 MB" in message else 400
+        raise HTTPException(status_code, message) from exc
+
+
+@router.post("/sessions/{session_id}/reference-videos/chunks")
+async def upload_reference_video_chunk(
+    session_id: str,
+    file: UploadFile = File(...),
+    upload_id: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    total_size: int = Form(...),
+    mime_type: str = Form("video/mp4"),
+    display_name: str = Form(""),
+):
+    session = await get_session_collection().find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    payload = await file.read()
+    try:
+        return rm.store_reference_video_chunk(
+            session_id,
+            upload_id=upload_id,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            total_size=total_size,
+            payload=payload,
+            filename=display_name or file.filename,
+            mime_type=mime_type,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 413 if "500 MB" in message else 400
+        raise HTTPException(status_code, message) from exc
+
+
+@router.post("/sessions/{session_id}/reference-videos/uploads/{upload_id}/complete", response_model=ReferenceVideoInfo)
+async def complete_reference_video_upload(
+    session_id: str,
+    upload_id: str,
+    total_chunks: int = Form(...),
+    total_size: int = Form(...),
+    mime_type: str = Form("video/mp4"),
+    display_name: str = Form(""),
+):
+    session = await get_session_collection().find_one({"_id": session_id})
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    try:
+        return rm.complete_reference_video_chunk_upload(
+            session_id,
+            upload_id=upload_id,
+            total_chunks=total_chunks,
+            total_size=total_size,
+            filename=display_name or None,
+            mime_type=mime_type,
+        )
     except rm.ReferenceMediaUnavailableError as exc:
         raise HTTPException(503, str(exc)) from exc
     except ValueError as exc:

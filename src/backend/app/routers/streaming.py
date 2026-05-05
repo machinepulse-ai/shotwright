@@ -56,6 +56,28 @@ async def get_render_output_mp4(session_id: str, render_output_id: str):
     return FileResponse(file_path, media_type="video/mp4", filename=file_path.name)
 
 
+@router.get("/renders/{session_id}/{render_output_id}/thumbnail")
+async def get_render_output_thumbnail(session_id: str, render_output_id: str):
+    render_output = nr.get_render_output(session_id, render_output_id)
+    if not render_output:
+        raise HTTPException(404, "Render output not found")
+
+    raw_thumbnail_path = str(render_output.get("thumbnail_path") or "").strip()
+    if not raw_thumbnail_path:
+        raise HTTPException(404, "Render thumbnail not found")
+
+    thumbnail_path = Path(raw_thumbnail_path).resolve()
+    try:
+        thumbnail_path.relative_to(EXPORT_DIR.resolve())
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid thumbnail path") from exc
+
+    if not thumbnail_path.exists() or thumbnail_path.suffix.lower() not in {".jpg", ".jpeg"}:
+        raise HTTPException(404, "Render thumbnail not found")
+
+    return FileResponse(thumbnail_path, media_type="image/jpeg", filename=thumbnail_path.name)
+
+
 @router.get("/{stream_id}/{filename}")
 async def get_hls_file(stream_id: str, filename: str):
     """Serve m3u8 playlist or .ts segments."""

@@ -7,7 +7,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, model_validator
 
-_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
+_MAX_INLINE_IMAGE_BYTES = 64 * 1024 * 1024
+_MAX_INLINE_IMAGE_DATA_URL_CHARS = ((_MAX_INLINE_IMAGE_BYTES + 2) // 3) * 4 + 256
 _ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 
@@ -19,10 +20,13 @@ class MessageRole(str, Enum):
 class ChatImageAttachment(BaseModel):
     type: str = Field(default="image")
     mime_type: str
-    data_url: str = Field(min_length=32, max_length=9_000_000)
+    data_url: str | None = Field(default=None, min_length=32, max_length=_MAX_INLINE_IMAGE_DATA_URL_CHARS)
     display_name: str | None = Field(default=None, max_length=120)
-    width: int | None = Field(default=None, ge=1, le=16_384)
-    height: int | None = Field(default=None, ge=1, le=16_384)
+    file_path: str | None = Field(default=None, max_length=4096)
+    shared_relative_path: str | None = Field(default=None, max_length=4096)
+    workspace_relative_path: str | None = Field(default=None, max_length=4096)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
     size_bytes: int | None = Field(default=None, ge=1, le=_MAX_INLINE_IMAGE_BYTES)
 
     @model_validator(mode="after")
@@ -34,7 +38,14 @@ class ChatImageAttachment(BaseModel):
         if mime_type not in _ALLOWED_IMAGE_MIME_TYPES:
             raise ValueError("Unsupported image MIME type")
 
-        data_url = self.data_url.strip()
+        data_url = self.data_url.strip() if self.data_url else ""
+        if not data_url:
+            if not (self.file_path or self.shared_relative_path or self.workspace_relative_path):
+                raise ValueError("Image attachment requires data URL or uploaded file reference")
+            self.type = "image"
+            self.mime_type = mime_type
+            return self
+
         prefix = f"data:{mime_type};base64,"
         if not data_url.startswith(prefix):
             raise ValueError("Image attachment data URL must match the declared MIME type")
@@ -47,7 +58,7 @@ class ChatImageAttachment(BaseModel):
 
         payload_size = len(decoded_payload)
         if payload_size > _MAX_INLINE_IMAGE_BYTES:
-            raise ValueError("Image attachment exceeds the 6 MB inline upload limit")
+            raise ValueError("Image attachment exceeds the 64 MB inline upload limit")
 
         self.type = "image"
         self.mime_type = mime_type

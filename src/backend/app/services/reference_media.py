@@ -7,6 +7,7 @@ import json
 import math
 import mimetypes
 import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,14 +19,18 @@ from app.services.session_streams import publish_context_refresh
 UPLOAD_DIR = Path(settings.upload_dir)
 EXPORT_DIR = Path(settings.export_dir)
 REFERENCE_VIDEOS_DIR = Path("_reference-videos")
+REFERENCE_VIDEO_CHUNKS_DIR = Path("_reference-video-chunks")
 STORYBOARDS_DIR = Path("_storyboards")
 METADATA_SUFFIX = ".meta.json"
 MAX_REFERENCE_VIDEO_BYTES = 500 * 1024 * 1024
+MAX_REFERENCE_VIDEO_CHUNK_BYTES = 8 * 1024 * 1024
+MAX_REFERENCE_VIDEO_CHUNKS = 512
 MIN_REFERENCE_VIDEO_DURATION_SECONDS = 1.0
 MAX_REFERENCE_VIDEO_DURATION_SECONDS = 60.0
 DEFAULT_STORYBOARD_INTERVAL_SECONDS = 1.0
 DEFAULT_STORYBOARD_COLUMNS = 4
 DEFAULT_STORYBOARD_WIDTH = 320
+_UPLOAD_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{6,96}$")
 
 
 class ReferenceMediaUnavailableError(RuntimeError):
@@ -100,11 +105,124 @@ def _write_metadata(asset_path: Path, metadata: dict) -> None:
     _metadata_path(asset_path).write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _read_metadata(metadata_path: Path) -> dict | None:
     try:
         return json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _validate_reference_video_upload_request(upload_id: str, total_chunks: int, total_size: int) -> None:
+    if not _UPLOAD_ID_RE.match(upload_id):
+        raise ValueError("Invalid reference video upload id.")
+    if total_size < 1 or total_size > MAX_REFERENCE_VIDEO_BYTES:
+        raise ValueError("Reference video exceeds the 500 MB upload limit.")
+    if total_chunks < 1 or total_chunks > MAX_REFERENCE_VIDEO_CHUNKS:
+        raise ValueError("Invalid reference video chunk count.")
+
+
+def _reference_video_chunk_root(session_id: str) -> Path:
+    return _session_dir(session_id) / REFERENCE_VIDEO_CHUNKS_DIR
+
+
+def _reference_video_chunk_dir(session_id: str, upload_id: str) -> Path:
+    return _reference_video_chunk_root(session_id) / upload_id
+
+
+def _reference_video_upload_manifest_path(session_id: str, upload_id: str) -> Path:
+    return _reference_video_chunk_dir(session_id, upload_id) / "upload.json"
+
+
+def _reference_video_upload_complete_marker_path(session_id: str, upload_id: str) -> Path:
+    return _reference_video_chunk_root(session_id) / f"{upload_id}.complete.json"
+
+
+def _reference_video_chunk_path(chunk_dir: Path, chunk_index: int) -> Path:
+    return chunk_dir / f"{chunk_index:05d}.part"
+
+
+def _load_completed_reference_video_upload(session_id: str, upload_id: str) -> dict | None:
+    marker = _read_json(_reference_video_upload_complete_marker_path(session_id, upload_id))
+    if not marker:
+        return None
+    metadata = marker.get("reference_video")
+    if not isinstance(metadata, dict):
+        return None
+    file_path = Path(str(metadata.get("file_path") or ""))
+    if not file_path.exists():
+        return None
+    return _resolve_video_metadata_from_path(session_id, file_path, metadata)
+
+
+def _load_reference_video_upload_manifest(
+    session_id: str,
+    upload_id: str,
+    *,
+    total_chunks: int,
+    total_size: int,
+) -> dict:
+    manifest_path = _reference_video_upload_manifest_path(session_id, upload_id)
+    manifest = _read_json(manifest_path) or {}
+    manifest_total_chunks = _parse_positive_int(manifest.get("total_chunks"))
+    manifest_total_size = _parse_positive_int(manifest.get("total_size"))
+    if manifest_total_chunks is not None and manifest_total_chunks != total_chunks:
+        raise ValueError("Reference video upload chunk count changed; start a new upload.")
+    if manifest_total_size is not None and manifest_total_size != total_size:
+        raise ValueError("Reference video upload size changed; start a new upload.")
+    return manifest
+
+
+def _write_reference_video_upload_manifest(
+    session_id: str,
+    upload_id: str,
+    *,
+    total_chunks: int,
+    total_size: int,
+    filename: str | None,
+    mime_type: str | None,
+) -> None:
+    manifest_path = _reference_video_upload_manifest_path(session_id, upload_id)
+    existing = _load_reference_video_upload_manifest(
+        session_id,
+        upload_id,
+        total_chunks=total_chunks,
+        total_size=total_size,
+    )
+    payload = {
+        **existing,
+        "upload_id": upload_id,
+        "total_chunks": total_chunks,
+        "total_size": total_size,
+        "filename": Path(filename or existing.get("filename") or "reference-video.mp4").name,
+        "mime_type": (mime_type or existing.get("mime_type") or "video/mp4").strip() or "video/mp4",
+        "updated_at": _utcnow().isoformat(),
+    }
+    payload.setdefault("created_at", payload["updated_at"])
+    _write_json(manifest_path, payload)
+
+
+def _received_reference_video_chunks(chunk_dir: Path, total_chunks: int) -> tuple[list[int], int]:
+    received_chunks: list[int] = []
+    received_bytes = 0
+    for chunk_index in range(total_chunks):
+        chunk_path = _reference_video_chunk_path(chunk_dir, chunk_index)
+        if not chunk_path.exists():
+            continue
+        received_chunks.append(chunk_index)
+        received_bytes += chunk_path.stat().st_size
+    return received_chunks, received_bytes
 
 
 def _parse_positive_float(value: object) -> float | None:
@@ -310,6 +428,63 @@ def _probe_video(file_path: Path) -> dict:
     }
 
 
+def _thumbnail_path_for_video(file_path: Path) -> Path:
+    return file_path.with_name(f"{file_path.stem}-cover.jpg")
+
+
+def _generate_video_thumbnail(file_path: Path) -> Path | None:
+    thumbnail_path = _thumbnail_path_for_video(file_path)
+    if thumbnail_path.exists() and thumbnail_path.stat().st_size > 0:
+        return thumbnail_path
+
+    result = _run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            "0.200",
+            "-i",
+            str(file_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=640:-2:force_original_aspect_ratio=decrease",
+            "-q:v",
+            "3",
+            str(thumbnail_path),
+        ],
+        timeout=60,
+    )
+    if result.returncode != 0 or not thumbnail_path.exists() or thumbnail_path.stat().st_size <= 0:
+        thumbnail_path.unlink(missing_ok=True)
+        return None
+    return thumbnail_path
+
+
+def _ensure_video_thumbnail_metadata(resolved_path: Path, metadata: dict) -> bool:
+    raw_thumbnail_path = str(metadata.get("thumbnail_path") or "").strip()
+    thumbnail_path = Path(raw_thumbnail_path) if raw_thumbnail_path else None
+    if thumbnail_path and thumbnail_path.is_file() and thumbnail_path.stat().st_size > 0:
+        return False
+
+    try:
+        generated_thumbnail = _generate_video_thumbnail(resolved_path)
+    except ReferenceMediaUnavailableError:
+        return False
+    if not generated_thumbnail:
+        return False
+
+    metadata.update(
+        {
+            "thumbnail_path": str(generated_thumbnail),
+            "thumbnail_shared_relative_path": _relative_to_session_storage(generated_thumbnail),
+            "thumbnail_mime_type": "image/jpeg",
+            "thumbnail_size_bytes": generated_thumbnail.stat().st_size,
+        }
+    )
+    return True
+
+
 def _metadata_missing_video_probe_fields(metadata: dict) -> bool:
     return (
         _parse_positive_float(metadata.get("duration_seconds")) is None
@@ -351,6 +526,9 @@ def _resolve_video_metadata_from_path(session_id: str, resolved_path: Path, meta
         should_write_metadata = True
     resolved_metadata.update(base_fields)
 
+    if _ensure_video_thumbnail_metadata(resolved_path, resolved_metadata):
+        should_write_metadata = True
+
     if should_write_metadata:
         _write_metadata(resolved_path, resolved_metadata)
 
@@ -376,7 +554,11 @@ def _load_asset_metadata(directory: Path, *, limit: int | None = None) -> list[d
 
 
 def list_reference_videos(session_id: str, *, limit: int | None = None) -> list[dict]:
-    return _load_asset_metadata(_asset_dir(session_id, REFERENCE_VIDEOS_DIR), limit=limit)
+    entries: list[dict] = []
+    for metadata in _load_asset_metadata(_asset_dir(session_id, REFERENCE_VIDEOS_DIR), limit=limit):
+        file_path = Path(str(metadata.get("file_path") or ""))
+        entries.append(_resolve_video_metadata_from_path(session_id, file_path, metadata) if file_path.exists() else metadata)
+    return entries
 
 
 def list_storyboards(session_id: str, *, limit: int | None = None) -> list[dict]:
@@ -431,16 +613,14 @@ def _resolve_session_asset_path(session_id: str, raw_path: str, preferred_direct
     raise FileNotFoundError(f"Reference media file not found for {raw_path}")
 
 
-def upload_reference_video(session_id: str, file_bytes: bytes, filename: str) -> dict:
-    _ensure_upload_dir()
-    if len(file_bytes) > MAX_REFERENCE_VIDEO_BYTES:
-        raise ValueError("Reference video exceeds the 500 MB upload limit.")
-
-    reference_video_dir = _ensure_asset_dir(session_id, REFERENCE_VIDEOS_DIR)
-    safe_name = _sanitize_file_name(filename, "reference-video", ".mp4")
-    file_path = _build_unique_path(reference_video_dir, safe_name)
+def _finalize_reference_video_file(session_id: str, file_path: Path, *, mime_type: str | None = None) -> dict:
     metadata_path = _metadata_path(file_path)
-    file_path.write_bytes(file_bytes)
+    thumbnail_path = _thumbnail_path_for_video(file_path)
+    size_bytes = file_path.stat().st_size
+    if size_bytes < 1:
+        raise ValueError("Reference video is empty.")
+    if size_bytes > MAX_REFERENCE_VIDEO_BYTES:
+        raise ValueError("Reference video exceeds the 500 MB upload limit.")
 
     try:
         video_probe = _probe_video(file_path)
@@ -456,16 +636,18 @@ def upload_reference_video(session_id: str, file_bytes: bytes, filename: str) ->
             "file_path": str(file_path),
             "reference_video_path": str(file_path),
             "shared_relative_path": _relative_to_session_storage(file_path),
-            "mime_type": mimetypes.guess_type(file_path.name)[0] or "video/mp4",
-            "size_bytes": len(file_bytes),
+            "mime_type": (mime_type or mimetypes.guess_type(file_path.name)[0] or "video/mp4").strip() or "video/mp4",
+            "size_bytes": size_bytes,
             "duration_seconds": duration_seconds,
             "width": video_probe.get("width"),
             "height": video_probe.get("height"),
             "created_at": created_at,
         }
+        _ensure_video_thumbnail_metadata(file_path, metadata)
         _write_metadata(file_path, metadata)
     except Exception:
         file_path.unlink(missing_ok=True)
+        thumbnail_path.unlink(missing_ok=True)
         metadata_path.unlink(missing_ok=True)
         raise
 
@@ -476,6 +658,160 @@ def upload_reference_video(session_id: str, file_bytes: bytes, filename: str) ->
     )
 
     return metadata
+
+
+def upload_reference_video(session_id: str, file_bytes: bytes, filename: str) -> dict:
+    _ensure_upload_dir()
+    if len(file_bytes) > MAX_REFERENCE_VIDEO_BYTES:
+        raise ValueError("Reference video exceeds the 500 MB upload limit.")
+
+    reference_video_dir = _ensure_asset_dir(session_id, REFERENCE_VIDEOS_DIR)
+    safe_name = _sanitize_file_name(filename, "reference-video", ".mp4")
+    file_path = _build_unique_path(reference_video_dir, safe_name)
+    file_path.write_bytes(file_bytes)
+    return _finalize_reference_video_file(session_id, file_path)
+
+
+def get_reference_video_upload_status(
+    session_id: str,
+    *,
+    upload_id: str,
+    total_chunks: int,
+    total_size: int,
+) -> dict:
+    _validate_reference_video_upload_request(upload_id, total_chunks, total_size)
+
+    completed_metadata = _load_completed_reference_video_upload(session_id, upload_id)
+    if completed_metadata:
+        return {
+            "complete": True,
+            "upload_id": upload_id,
+            "received_chunks": list(range(total_chunks)),
+            "received_chunk_count": total_chunks,
+            "received_bytes": int(completed_metadata.get("size_bytes") or total_size),
+            "total_chunks": total_chunks,
+            "total_size": total_size,
+            "reference_video": completed_metadata,
+        }
+
+    chunk_dir = _reference_video_chunk_dir(session_id, upload_id)
+    _load_reference_video_upload_manifest(
+        session_id,
+        upload_id,
+        total_chunks=total_chunks,
+        total_size=total_size,
+    )
+    received_chunks, received_bytes = _received_reference_video_chunks(chunk_dir, total_chunks)
+    return {
+        "complete": False,
+        "upload_id": upload_id,
+        "received_chunks": received_chunks,
+        "received_chunk_count": len(received_chunks),
+        "received_bytes": received_bytes,
+        "total_chunks": total_chunks,
+        "total_size": total_size,
+    }
+
+
+def store_reference_video_chunk(
+    session_id: str,
+    *,
+    upload_id: str,
+    chunk_index: int,
+    total_chunks: int,
+    total_size: int,
+    payload: bytes,
+    filename: str | None,
+    mime_type: str | None,
+) -> dict:
+    _validate_reference_video_upload_request(upload_id, total_chunks, total_size)
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        raise ValueError("Invalid reference video chunk index.")
+    if len(payload) < 1 or len(payload) > MAX_REFERENCE_VIDEO_CHUNK_BYTES:
+        raise ValueError("Invalid reference video chunk size.")
+
+    chunk_dir = _reference_video_chunk_dir(session_id, upload_id)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    _write_reference_video_upload_manifest(
+        session_id,
+        upload_id,
+        total_chunks=total_chunks,
+        total_size=total_size,
+        filename=filename,
+        mime_type=mime_type,
+    )
+    _reference_video_chunk_path(chunk_dir, chunk_index).write_bytes(payload)
+    return get_reference_video_upload_status(
+        session_id,
+        upload_id=upload_id,
+        total_chunks=total_chunks,
+        total_size=total_size,
+    )
+
+
+def complete_reference_video_chunk_upload(
+    session_id: str,
+    *,
+    upload_id: str,
+    total_chunks: int,
+    total_size: int,
+    filename: str | None,
+    mime_type: str | None,
+) -> dict:
+    _validate_reference_video_upload_request(upload_id, total_chunks, total_size)
+
+    completed_metadata = _load_completed_reference_video_upload(session_id, upload_id)
+    if completed_metadata:
+        return completed_metadata
+
+    manifest = _load_reference_video_upload_manifest(
+        session_id,
+        upload_id,
+        total_chunks=total_chunks,
+        total_size=total_size,
+    )
+    resolved_filename = Path(filename or manifest.get("filename") or "reference-video.mp4").name
+    resolved_mime_type = (mime_type or manifest.get("mime_type") or "video/mp4").strip() or "video/mp4"
+
+    chunk_dir = _reference_video_chunk_dir(session_id, upload_id)
+    chunk_paths = [_reference_video_chunk_path(chunk_dir, index) for index in range(total_chunks)]
+    missing_chunks = [index for index, path in enumerate(chunk_paths) if not path.exists()]
+    if missing_chunks:
+        preview = ", ".join(str(index) for index in missing_chunks[:8])
+        suffix = "..." if len(missing_chunks) > 8 else ""
+        raise ValueError(f"Reference video upload is missing chunks: {preview}{suffix}")
+
+    reference_video_dir = _ensure_asset_dir(session_id, REFERENCE_VIDEOS_DIR)
+    safe_name = _sanitize_file_name(resolved_filename, "reference-video", ".mp4")
+    file_path = _build_unique_path(reference_video_dir, safe_name)
+
+    try:
+        with file_path.open("wb") as output:
+            for chunk_path in chunk_paths:
+                with chunk_path.open("rb") as chunk_file:
+                    shutil.copyfileobj(chunk_file, output)
+
+        actual_size = file_path.stat().st_size
+        if actual_size != total_size:
+            file_path.unlink(missing_ok=True)
+            raise ValueError("Reference video chunk upload size mismatch.")
+
+        metadata = _finalize_reference_video_file(session_id, file_path, mime_type=resolved_mime_type)
+        _write_json(
+            _reference_video_upload_complete_marker_path(session_id, upload_id),
+            {
+                "upload_id": upload_id,
+                "total_chunks": total_chunks,
+                "total_size": total_size,
+                "reference_video": metadata,
+                "completed_at": _utcnow().isoformat(),
+            },
+        )
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        return metadata
+    except Exception:
+        file_path.unlink(missing_ok=True)
+        raise
 
 
 def _resolve_reference_video_metadata(session_id: str, reference_video_path: str | None = None) -> dict:

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TranslationCopy } from "../../i18n";
+import { renderBrandText } from "../../utils/brand";
 import "./FirstRunGuide.css";
 
 const STORAGE_KEY = "shotwright_first_run_guide_v1";
@@ -369,8 +370,8 @@ export default function FirstRunGuide({ copy, enabled, onStepChange }: FirstRunG
         style={{ top: popoverPosition.top, left: popoverPosition.left }}
       >
         <span className="first-run-guide-progress">{copy.progress.replace("{current}", String(activeIndex + 1)).replace("{total}", String(steps.length))}</span>
-        <h2 id="first-run-guide-title">{activeStep.title}</h2>
-        <p>{activeStep.body}</p>
+        <h2 id="first-run-guide-title">{renderBrandText(activeStep.title)}</h2>
+        <p>{renderBrandText(activeStep.body)}</p>
         <div className="first-run-guide-actions">
           <button type="button" className="first-run-guide-link-button" onClick={completeGuide}>
             {copy.skip}

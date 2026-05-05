@@ -25,6 +25,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   AgentSessionStreamConnection,
   cancelChatTurn,
+  completeReferenceVideoUpload,
   createSession,
   deleteSession,
   exportProject,
@@ -32,14 +33,16 @@ import {
   getAgentEvents,
   getAgentMessages,
   getCopilotModelOptions,
+  getReferenceVideoUploadStatus,
   getSessions,
   isRequestAbortError,
   openAgentSessionStream,
   sendChatTurn,
   stopContainer,
   updateSession,
+  uploadImageAttachmentChunk,
   uploadProject,
-  uploadReferenceVideo,
+  uploadReferenceVideoChunk,
 } from "../../services/api";
 import {
   AgentContext,
@@ -63,6 +66,8 @@ import {
   getAgentRuntimeLabel,
   getSessionModelToneClass,
 } from "../../utils/agentModel";
+import { renderBrandText } from "../../utils/brand";
+import { playMediaElement, resetMediaElement } from "../../utils/media";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
 import "./AgentPanel.css";
@@ -95,11 +100,26 @@ type MetaChip = {
 };
 
 const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const SUPPORTED_INLINE_IMAGE_EXTENSIONS = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".webp", "image/webp"],
+  [".gif", "image/gif"],
+]);
 const SUPPORTED_PROJECT_ARCHIVE_EXTENSIONS = new Set([".zip"]);
 const SUPPORTED_REFERENCE_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".wmv", ".mpeg", ".mpg"]);
-const MAX_COMPOSER_IMAGE_BYTES = 6 * 1024 * 1024;
+const MAX_COMPOSER_SOURCE_IMAGE_BYTES = 64 * 1024 * 1024;
+const COMPOSER_IMAGE_CHUNK_BYTES = 4 * 1024 * 1024;
 const MAX_COMPOSER_ATTACHMENTS = 4;
 const MAX_REFERENCE_VIDEO_BYTES = 500 * 1024 * 1024;
+const REFERENCE_VIDEO_CHUNK_BYTES = 8 * 1024 * 1024;
+const REFERENCE_VIDEO_UPLOAD_MIN_CONCURRENCY = 1;
+const REFERENCE_VIDEO_UPLOAD_MAX_CONCURRENCY = 4;
+const REFERENCE_VIDEO_UPLOAD_SLOW_CHUNK_MS = 60_000;
+const REFERENCE_VIDEO_UPLOAD_MAX_ATTEMPTS = 3;
+const REFERENCE_VIDEO_UPLOAD_RETRY_BASE_MS = 1_000;
+const REFERENCE_VIDEO_UPLOAD_RETRY_MAX_MS = 8_000;
 const DEFAULT_COMPOSER_HEIGHT = 172;
 const MIN_COMPOSER_HEIGHT = 152;
 const RESPONDING_COMPOSER_MIN_HEIGHT = 170;
@@ -185,7 +205,19 @@ type ToolExecutionOutcome = "started" | "success" | "failure" | "completed";
 
 type PendingImageAttachment = ChatImageAttachment & {
   id: string;
+  sourceFile: File;
 };
+
+type ReferenceVideoUploadNotice = {
+  state: "uploading" | "success";
+  fileNames: string[];
+  count: number;
+  phase?: "checking" | "uploading" | "processing";
+  currentFileName?: string;
+  currentFileIndex?: number;
+  completedBytes?: number;
+  totalBytes?: number;
+} | null;
 
 type ReferenceMediaGalleryItem = {
   key: string;
@@ -214,6 +246,7 @@ type ChatResultCard = {
   streamUrl: string | null;
   videoSrc: string | null;
   videoFormat: "mp4" | "hls" | null;
+  videoPosterUrl: string | null;
   storyboardUrl: string | null;
   storyboardName: string | null;
   archiveUrl: string | null;
@@ -401,6 +434,14 @@ function buildRenderOutputUrl(sessionId: string | null | undefined, renderOutput
   return `/api/streams/renders/${encodeURIComponent(sessionId)}/${encodeURIComponent(renderOutputId)}`;
 }
 
+function buildRenderOutputThumbnailUrl(sessionId: string | null | undefined, renderOutput: RenderOutputInfo | null | undefined) {
+  if (!sessionId || !renderOutput?.id || !renderOutput.thumbnail_path) {
+    return null;
+  }
+
+  return `/api/streams/renders/${encodeURIComponent(sessionId)}/${encodeURIComponent(renderOutput.id)}/thumbnail`;
+}
+
 function readFileAsDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -427,42 +468,126 @@ function measureImageDataUrl(dataUrl: string) {
 }
 
 async function buildPendingImageAttachment(file: File): Promise<PendingImageAttachment> {
-  const mimeType = file.type.trim().toLowerCase();
-  if (!SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(mimeType)) {
+  const mimeType = resolveInlineImageMimeType(file);
+  if (!mimeType) {
     throw new Error("unsupported-image");
   }
 
-  if (file.size > MAX_COMPOSER_IMAGE_BYTES) {
+  if (file.size > MAX_COMPOSER_SOURCE_IMAGE_BYTES) {
     throw new Error("image-too-large");
   }
 
-  const dataUrl = await readFileAsDataUrl(file);
-  const dimensions = await measureImageDataUrl(dataUrl);
-  const extension = mimeType.split("/")[1] || "png";
-  const displayName = file.name?.trim() || `image-${Date.now()}.${extension}`;
+  const dataUrl = normalizeImageDataUrl(await readFileAsDataUrl(file), mimeType);
+  const dimensions = await measureImageDataUrl(dataUrl).catch(() => null);
+  const extension = mimeType === "image/jpeg" ? "jpg" : mimeType.split("/")[1] || "png";
+  const rawDisplayName = file.name?.trim() || `image-${Date.now()}.${extension}`;
 
   return {
     id: `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    sourceFile: file,
     type: "image",
     mime_type: mimeType,
     data_url: dataUrl,
-    display_name: displayName,
-    width: dimensions.width,
-    height: dimensions.height,
+    display_name: rawDisplayName,
+    width: dimensions?.width ?? null,
+    height: dimensions?.height ?? null,
     size_bytes: file.size,
   };
 }
 
+function stripPendingImageAttachment(attachment: PendingImageAttachment): ChatImageAttachment {
+  const { id, sourceFile, ...chatAttachment } = attachment;
+  return chatAttachment;
+}
+
+function normalizeUploadedImageAttachment(rawAttachment: unknown, fallback: PendingImageAttachment): ChatImageAttachment | null {
+  if (!rawAttachment || typeof rawAttachment !== "object") {
+    return null;
+  }
+
+  const attachment = rawAttachment as Record<string, unknown>;
+  const sharedRelativePath = typeof attachment["shared_relative_path"] === "string" ? attachment["shared_relative_path"] : null;
+  const filePath = typeof attachment["file_path"] === "string" ? attachment["file_path"] : null;
+  if (!sharedRelativePath && !filePath) {
+    return null;
+  }
+
+  return {
+    type: "image",
+    mime_type: typeof attachment["mime_type"] === "string" ? attachment["mime_type"] : fallback.mime_type,
+    display_name: typeof attachment["display_name"] === "string" ? attachment["display_name"] : fallback.display_name,
+    file_path: filePath,
+    shared_relative_path: sharedRelativePath,
+    workspace_relative_path:
+      typeof attachment["workspace_relative_path"] === "string" ? attachment["workspace_relative_path"] : sharedRelativePath,
+    width: typeof attachment["width"] === "number" ? attachment["width"] : fallback.width,
+    height: typeof attachment["height"] === "number" ? attachment["height"] : fallback.height,
+    size_bytes: typeof attachment["size_bytes"] === "number" ? attachment["size_bytes"] : fallback.size_bytes,
+  };
+}
+
+async function uploadPendingImageAttachment(sessionId: string, attachment: PendingImageAttachment): Promise<ChatImageAttachment> {
+  const totalChunks = Math.max(1, Math.ceil(attachment.sourceFile.size / COMPOSER_IMAGE_CHUNK_BYTES));
+  const uploadId = `image-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  let uploadedAttachment: ChatImageAttachment | null = null;
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const start = chunkIndex * COMPOSER_IMAGE_CHUNK_BYTES;
+    const end = Math.min(attachment.sourceFile.size, start + COMPOSER_IMAGE_CHUNK_BYTES);
+    const response = await uploadImageAttachmentChunk(sessionId, attachment.sourceFile.slice(start, end), {
+      uploadId,
+      chunkIndex,
+      totalChunks,
+      totalSize: attachment.sourceFile.size,
+      mimeType: attachment.mime_type,
+      displayName: attachment.display_name,
+      width: attachment.width,
+      height: attachment.height,
+    });
+    const data = response.data as { complete?: boolean; attachment?: unknown };
+    if (data.complete) {
+      uploadedAttachment = normalizeUploadedImageAttachment(data.attachment, attachment);
+    }
+  }
+
+  if (!uploadedAttachment) {
+    throw new Error("image-read-failed");
+  }
+
+  return uploadedAttachment;
+}
+
 function getClipboardImageFiles(event: ClipboardEvent<HTMLTextAreaElement>) {
   return Array.from(event.clipboardData?.items || [])
-    .filter((item) => item.kind === "file" && SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(item.type.toLowerCase()))
     .map((item) => item.getAsFile())
-    .filter((file): file is File => Boolean(file));
+    .filter((file): file is File => Boolean(file && isInlineImageFile(file)));
 }
 
 function getFileExtension(fileName: string) {
   const suffix = fileName.slice(Math.max(0, fileName.lastIndexOf(".")));
   return suffix.trim().toLowerCase();
+}
+
+function resolveInlineImageMimeType(file: File) {
+  const mimeType = file.type.trim().toLowerCase();
+  if (SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(mimeType)) {
+    return mimeType;
+  }
+
+  return SUPPORTED_INLINE_IMAGE_EXTENSIONS.get(getFileExtension(file.name)) ?? null;
+}
+
+function isInlineImageFile(file: File) {
+  return Boolean(resolveInlineImageMimeType(file));
+}
+
+function normalizeImageDataUrl(dataUrl: string, mimeType: string) {
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex < 0) {
+    return dataUrl;
+  }
+
+  return `data:${mimeType};base64,${dataUrl.slice(commaIndex + 1)}`;
 }
 
 function isReferenceVideoFile(file: File) {
@@ -474,13 +599,255 @@ function isReferenceVideoFile(file: File) {
   return SUPPORTED_REFERENCE_VIDEO_EXTENSIONS.has(getFileExtension(file.name));
 }
 
+function resolveReferenceVideoMimeType(file: File) {
+  const mimeType = file.type.trim().toLowerCase();
+  if (mimeType.startsWith("video/")) {
+    return mimeType;
+  }
+
+  const extension = getFileExtension(file.name);
+  if (extension === ".mov") return "video/quicktime";
+  if (extension === ".webm") return "video/webm";
+  if (extension === ".avi") return "video/x-msvideo";
+  if (extension === ".mkv") return "video/x-matroska";
+  return "video/mp4";
+}
+
+function buildStableReferenceVideoUploadId(file: File) {
+  const fingerprint = `${file.name}|${file.size}|${file.lastModified || 0}|${file.type}`;
+  let hash = 5381;
+  for (let index = 0; index < fingerprint.length; index += 1) {
+    hash = (hash * 33) ^ fingerprint.charCodeAt(index);
+  }
+  const safeHash = (hash >>> 0).toString(36);
+  const safeSize = Math.max(0, file.size).toString(36);
+  const safeModified = Math.max(0, file.lastModified || 0).toString(36);
+  return `video-${safeHash}-${safeSize}-${safeModified}`.slice(0, 96);
+}
+
+type ReferenceVideoUploadProgress = {
+  phase: "checking" | "uploading" | "processing";
+  completedBytes: number;
+  totalBytes: number;
+};
+
+async function uploadReferenceVideoResumable(
+  sessionId: string,
+  file: File,
+  onProgress?: (progress: ReferenceVideoUploadProgress) => void,
+): Promise<ReferenceVideoInfo> {
+  const totalChunks = Math.max(1, Math.ceil(file.size / REFERENCE_VIDEO_CHUNK_BYTES));
+  const uploadId = buildStableReferenceVideoUploadId(file);
+  const mimeType = resolveReferenceVideoMimeType(file);
+  const displayName = file.name || "reference-video.mp4";
+
+  onProgress?.({ phase: "checking", completedBytes: 0, totalBytes: file.size });
+  const statusResponse = await getReferenceVideoUploadStatus(sessionId, {
+    uploadId,
+    totalChunks,
+    totalSize: file.size,
+  });
+  const initialStatus = statusResponse.data;
+  if (initialStatus.complete && initialStatus.reference_video) {
+    onProgress?.({ phase: "processing", completedBytes: file.size, totalBytes: file.size });
+    return initialStatus.reference_video;
+  }
+
+  const receivedChunks = new Set(
+    Array.isArray(initialStatus.received_chunks)
+      ? initialStatus.received_chunks.filter((chunkIndex) => Number.isInteger(chunkIndex))
+      : [],
+  );
+  let completedBytes = Math.min(
+    file.size,
+    typeof initialStatus.received_bytes === "number" && Number.isFinite(initialStatus.received_bytes)
+      ? Math.max(0, initialStatus.received_bytes)
+      : 0,
+  );
+  let adaptiveConcurrency = Math.min(
+    REFERENCE_VIDEO_UPLOAD_MAX_CONCURRENCY,
+    Math.max(REFERENCE_VIDEO_UPLOAD_MIN_CONCURRENCY, totalChunks),
+  );
+
+  onProgress?.({ phase: "uploading", completedBytes, totalBytes: file.size });
+  const missingChunkIndexes: number[] = [];
+  const inFlightChunkBytes = new Map<number, number>();
+
+  const emitUploadProgress = () => {
+    let inFlightBytes = 0;
+    inFlightChunkBytes.forEach((loadedBytes) => {
+      inFlightBytes += loadedBytes;
+    });
+    onProgress?.({
+      phase: "uploading",
+      completedBytes: Math.min(file.size, completedBytes + inFlightBytes),
+      totalBytes: file.size,
+    });
+  };
+
+  const updateAdaptiveConcurrency = (result: "fast" | "slow") => {
+    adaptiveConcurrency =
+      result === "slow"
+        ? Math.max(REFERENCE_VIDEO_UPLOAD_MIN_CONCURRENCY, Math.floor(adaptiveConcurrency / 2))
+        : Math.min(
+            REFERENCE_VIDEO_UPLOAD_MAX_CONCURRENCY,
+            Math.max(REFERENCE_VIDEO_UPLOAD_MIN_CONCURRENCY, adaptiveConcurrency * 2),
+          );
+  };
+
+  const waitBeforeRetry = (attemptNumber: number) => {
+    const delayMs =
+      Math.min(
+        REFERENCE_VIDEO_UPLOAD_RETRY_MAX_MS,
+        REFERENCE_VIDEO_UPLOAD_RETRY_BASE_MS * 2 ** Math.max(0, attemptNumber - 1),
+      ) + Math.floor(Math.random() * 250);
+    return new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+  };
+
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    if (!receivedChunks.has(chunkIndex)) {
+      missingChunkIndexes.push(chunkIndex);
+    }
+  }
+
+  const uploadChunkWithRetry = async (chunkIndex: number) => {
+    const start = chunkIndex * REFERENCE_VIDEO_CHUNK_BYTES;
+    const end = Math.min(file.size, start + REFERENCE_VIDEO_CHUNK_BYTES);
+    const chunkSize = end - start;
+    const chunk = file.slice(start, end);
+
+    for (let attemptNumber = 1; attemptNumber <= REFERENCE_VIDEO_UPLOAD_MAX_ATTEMPTS; attemptNumber += 1) {
+      let slowTimer: number | null = null;
+      let adjustedForSlowAttempt = false;
+      const startedAt = Date.now();
+      const markSlowAttempt = () => {
+        if (adjustedForSlowAttempt) return;
+        adjustedForSlowAttempt = true;
+        updateAdaptiveConcurrency("slow");
+      };
+
+      inFlightChunkBytes.set(chunkIndex, 0);
+      emitUploadProgress();
+      slowTimer = window.setTimeout(markSlowAttempt, REFERENCE_VIDEO_UPLOAD_SLOW_CHUNK_MS);
+
+      try {
+        await uploadReferenceVideoChunk(
+          sessionId,
+          chunk,
+          {
+            uploadId,
+            chunkIndex,
+            totalChunks,
+            totalSize: file.size,
+            mimeType,
+            displayName,
+          },
+          (event) => {
+            const loaded = Math.min(chunkSize, Math.max(0, event.loaded || 0));
+            inFlightChunkBytes.set(chunkIndex, loaded);
+            emitUploadProgress();
+          },
+        );
+        if (slowTimer !== null) {
+          window.clearTimeout(slowTimer);
+        }
+        if (Date.now() - startedAt > REFERENCE_VIDEO_UPLOAD_SLOW_CHUNK_MS) {
+          markSlowAttempt();
+        } else {
+          updateAdaptiveConcurrency("fast");
+        }
+        inFlightChunkBytes.delete(chunkIndex);
+        completedBytes = Math.min(file.size, completedBytes + chunkSize);
+        emitUploadProgress();
+        return;
+      } catch (error) {
+        if (slowTimer !== null) {
+          window.clearTimeout(slowTimer);
+        }
+        if (Date.now() - startedAt > REFERENCE_VIDEO_UPLOAD_SLOW_CHUNK_MS) {
+          markSlowAttempt();
+        }
+        inFlightChunkBytes.delete(chunkIndex);
+        emitUploadProgress();
+
+        if (attemptNumber >= REFERENCE_VIDEO_UPLOAD_MAX_ATTEMPTS) {
+          throw error;
+        }
+        await waitBeforeRetry(attemptNumber);
+      }
+    }
+  };
+
+  if (missingChunkIndexes.length) {
+    await new Promise<void>((resolve, reject) => {
+      let activeUploads = 0;
+      let completedChunkCount = 0;
+      let nextChunkCursor = 0;
+      let firstError: unknown = null;
+      let settled = false;
+
+      const settleIfDone = () => {
+        if (settled || activeUploads > 0) return;
+        if (firstError) {
+          settled = true;
+          reject(firstError);
+          return;
+        }
+        if (completedChunkCount >= missingChunkIndexes.length) {
+          settled = true;
+          resolve();
+        }
+      };
+
+      const launchAvailableChunks = () => {
+        if (settled || firstError) {
+          settleIfDone();
+          return;
+        }
+
+        while (activeUploads < adaptiveConcurrency && nextChunkCursor < missingChunkIndexes.length) {
+          const chunkIndex = missingChunkIndexes[nextChunkCursor];
+          nextChunkCursor += 1;
+          activeUploads += 1;
+
+          uploadChunkWithRetry(chunkIndex)
+            .then(() => {
+              activeUploads -= 1;
+              completedChunkCount += 1;
+              launchAvailableChunks();
+            })
+            .catch((error) => {
+              activeUploads -= 1;
+              firstError = firstError || error;
+              settleIfDone();
+            });
+        }
+
+        settleIfDone();
+      };
+
+      launchAvailableChunks();
+    });
+  }
+
+  onProgress?.({ phase: "processing", completedBytes: file.size, totalBytes: file.size });
+  const completeResponse = await completeReferenceVideoUpload(sessionId, {
+    uploadId,
+    totalChunks,
+    totalSize: file.size,
+    mimeType,
+    displayName,
+  });
+  return completeResponse.data;
+}
+
 function isProjectArchiveFile(file: File) {
   return SUPPORTED_PROJECT_ARCHIVE_EXTENSIONS.has(getFileExtension(file.name));
 }
 
 function getDroppedMediaFiles(event: DragEvent<HTMLElement>) {
   return Array.from(event.dataTransfer?.files || []).filter(
-    (file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()) || isReferenceVideoFile(file) || isProjectArchiveFile(file),
+    (file) => isInlineImageFile(file) || isReferenceVideoFile(file) || isProjectArchiveFile(file),
   );
 }
 
@@ -1892,15 +2259,25 @@ function getMessageImageAttachments(message: ChatMessage): ChatImageAttachment[]
 
   return attachments
     .filter((attachment): attachment is Record<string, unknown> => Boolean(attachment && typeof attachment === "object"))
-    .map((attachment) => ({
-      type: "image" as const,
-      mime_type: typeof attachment["mime_type"] === "string" ? attachment["mime_type"] : "image/png",
-      data_url: typeof attachment["data_url"] === "string" ? attachment["data_url"] : "",
-      display_name: typeof attachment["display_name"] === "string" ? attachment["display_name"] : null,
-      width: typeof attachment["width"] === "number" ? attachment["width"] : null,
-      height: typeof attachment["height"] === "number" ? attachment["height"] : null,
-      size_bytes: typeof attachment["size_bytes"] === "number" ? attachment["size_bytes"] : null,
-    }))
+    .map((attachment) => {
+      const sharedPath =
+        typeof attachment["shared_relative_path"] === "string"
+          ? attachment["shared_relative_path"]
+          : typeof attachment["workspace_relative_path"] === "string"
+            ? attachment["workspace_relative_path"]
+            : "";
+      const directDataUrl = typeof attachment["data_url"] === "string" ? attachment["data_url"] : "";
+      const imageSource = directDataUrl || buildUploadAssetUrl(sharedPath) || "";
+      return {
+        type: "image" as const,
+        mime_type: typeof attachment["mime_type"] === "string" ? attachment["mime_type"] : "image/png",
+        data_url: imageSource,
+        display_name: typeof attachment["display_name"] === "string" ? attachment["display_name"] : null,
+        width: typeof attachment["width"] === "number" ? attachment["width"] : null,
+        height: typeof attachment["height"] === "number" ? attachment["height"] : null,
+        size_bytes: typeof attachment["size_bytes"] === "number" ? attachment["size_bytes"] : null,
+      };
+    })
     .filter((attachment) => Boolean(attachment.data_url));
 }
 
@@ -2185,6 +2562,7 @@ function buildChatResultCards(content: string, sessionId: string | null | undefi
     { mp4: null, stream: null, storyboard: null, archive: null },
   );
   const mp4Name = latestByKind.mp4 ? basename(latestByKind.mp4.value, latestByKind.mp4.value) : null;
+  const renderOutput = latestByKind.mp4 ? findRenderOutputForValue(latestByKind.mp4.value, context) : null;
   const mp4Url = resolveChatResultRenderUrl(latestByKind.mp4?.value, sessionId, context);
   const streamUrl = latestByKind.stream ? resolveUploadOrDirectUrl(latestByKind.stream.value) : null;
   const storyboardUrl = latestByKind.storyboard ? resolveChatResultStoryboardUrl(latestByKind.storyboard.value, context) : null;
@@ -2192,6 +2570,7 @@ function buildChatResultCards(content: string, sessionId: string | null | undefi
   const archiveUrl = latestByKind.archive ? resolveUploadOrDirectUrl(latestByKind.archive.value) : null;
   const videoSrc = streamUrl || mp4Url;
   const videoFormat: ChatResultCard["videoFormat"] = streamUrl ? "hls" : mp4Url ? "mp4" : null;
+  const videoPosterUrl = buildRenderOutputThumbnailUrl(sessionId, renderOutput);
   const fallbackTitle = storyboardName || (archiveUrl ? copy.video.archive : copy.video.resultTitle);
 
   return {
@@ -2205,6 +2584,7 @@ function buildChatResultCards(content: string, sessionId: string | null | undefi
         streamUrl,
         videoSrc,
         videoFormat,
+        videoPosterUrl,
         storyboardUrl,
         storyboardName,
         archiveUrl,
@@ -2548,25 +2928,29 @@ function buildMarkdownComponents(locale: Locale, copy: TranslationCopy): Compone
   };
 }
 
-function ChatResultInlineVideo({ src, format, title }: { src: string; format: "mp4" | "hls"; title: string }) {
+function ChatResultInlineVideo({
+  src,
+  format,
+  title,
+  poster,
+}: {
+  src: string;
+  format: "mp4" | "hls";
+  title: string;
+  poster?: string | null;
+}) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return undefined;
 
-    const resetVideo = () => {
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-    };
-
-    resetVideo();
+    resetMediaElement(video);
 
     if (format === "mp4") {
       video.src = src;
       video.load();
-      return () => resetVideo();
+      return () => resetMediaElement(video);
     }
 
     if (Hls.isSupported()) {
@@ -2575,17 +2959,17 @@ function ChatResultInlineVideo({ src, format, title }: { src: string; format: "m
       hls.attachMedia(video);
       return () => {
         hls.destroy();
-        resetVideo();
+        resetMediaElement(video);
       };
     }
 
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = src;
       video.load();
-      return () => resetVideo();
+      return () => resetMediaElement(video);
     }
 
-    return () => resetVideo();
+    return () => resetMediaElement(video);
   }, [format, src]);
 
   return (
@@ -2596,6 +2980,7 @@ function ChatResultInlineVideo({ src, format, title }: { src: string; format: "m
       muted
       playsInline
       preload="metadata"
+      poster={poster || undefined}
       title={title}
     />
   );
@@ -2658,6 +3043,7 @@ export default function AgentPanel({
   const [stoppingGenerationSessionId, setStoppingGenerationSessionId] = useState<string | null>(null);
   const [uploadingProject, setUploadingProject] = useState(false);
   const [uploadingReferenceVideo, setUploadingReferenceVideo] = useState(false);
+  const [referenceVideoUploadNotice, setReferenceVideoUploadNotice] = useState<ReferenceVideoUploadNotice>(null);
   const [modelOptions, setModelOptions] = useState<CopilotModelOption[]>([]);
   const [modelOptionsLoading, setModelOptionsLoading] = useState(false);
   const [draftModel, setDraftModel] = useState("");
@@ -2707,6 +3093,46 @@ export default function AgentPanel({
   const sessionsErrorMessage = getUiErrorMessage(sessionsError, copy);
   const panelErrorMessage = getUiErrorMessage(panelError, copy);
   const sessionSettingsErrorMessage = getUiErrorMessage(sessionSettingsError, copy);
+  const referenceVideoUploadFileLabel = referenceVideoUploadNotice
+    ? referenceVideoUploadNotice.fileNames.length > 2
+      ? `${referenceVideoUploadNotice.fileNames.slice(0, 2).join(", ")} +${referenceVideoUploadNotice.fileNames.length - 2}`
+      : referenceVideoUploadNotice.fileNames.join(", ")
+    : "";
+  const referenceVideoUploadPercent =
+    referenceVideoUploadNotice?.state === "uploading" &&
+    typeof referenceVideoUploadNotice.totalBytes === "number" &&
+    referenceVideoUploadNotice.totalBytes > 0
+      ? Math.max(
+          0,
+          Math.min(
+            100,
+            Math.round(((referenceVideoUploadNotice.completedBytes || 0) / referenceVideoUploadNotice.totalBytes) * 100),
+          ),
+        )
+      : 0;
+  const referenceVideoUploadPhaseLabel =
+    referenceVideoUploadNotice?.phase === "checking"
+      ? copy.agent.referenceVideoUploadChecking
+      : referenceVideoUploadNotice?.phase === "processing"
+        ? copy.agent.referenceVideoUploadProcessing
+        : copy.agent.referenceVideoUploading;
+  const referenceVideoUploadProgressLabel =
+    referenceVideoUploadNotice?.state === "uploading" && referenceVideoUploadNotice.totalBytes
+      ? `${referenceVideoUploadPercent}% · ${formatFileSize(
+          referenceVideoUploadNotice.completedBytes || 0,
+          locale,
+          "0 B",
+        )} / ${formatFileSize(referenceVideoUploadNotice.totalBytes, locale, "-")}`
+      : "";
+  const referenceVideoUploadCurrentLabel =
+    referenceVideoUploadNotice?.state === "uploading" && referenceVideoUploadNotice.currentFileName
+      ? `${referenceVideoUploadNotice.currentFileIndex || 1}/${referenceVideoUploadNotice.count} · ${
+          referenceVideoUploadNotice.currentFileName
+        }`
+      : referenceVideoUploadFileLabel;
+  const referenceVideoUploadProgressStyle = {
+    "--upload-progress": `${referenceVideoUploadPercent}%`,
+  } as CSSProperties;
 
   const sortedEvents = useMemo(
     () => [...events].sort((left, right) => {
@@ -2776,6 +3202,7 @@ export default function AgentPanel({
   const stoppingGeneration = Boolean(currentSession && stoppingGenerationSessionId === currentSession._id);
   const sessionStatus = context?.session.status || currentSession?.status || "idle";
   const isResponding = sending || sessionStatus === "running";
+  const composerAttachmentPickerDisabled = !currentSession || uploadingReferenceVideo || uploadingProject;
   const composerMinHeight = isResponding ? RESPONDING_COMPOSER_MIN_HEIGHT : MIN_COMPOSER_HEIGHT;
   const visibleMessages = useMemo(() => {
     if (!currentSession || !optimisticTurn || optimisticTurn.sessionId !== currentSession._id) {
@@ -2817,6 +3244,7 @@ export default function AgentPanel({
   }, [renderOutputs]);
   const latestRenderOutput = sortedRenderOutputs[0] ?? null;
   const latestRenderDirectUrl = buildRenderOutputUrl(currentSession?._id, latestRenderOutput?.id);
+  const latestRenderThumbnailUrl = buildRenderOutputThumbnailUrl(currentSession?._id, latestRenderOutput);
   const renderPreviewItems = useMemo<ReferenceMediaGalleryItem[]>(() => {
     if (!currentSession) {
       return [];
@@ -2829,6 +3257,7 @@ export default function AgentPanel({
       if (!directUrl) {
         continue;
       }
+      const thumbnailUrl = buildRenderOutputThumbnailUrl(currentSession._id, renderOutput);
 
       items.push({
         key: `${renderOutput.id}:video`,
@@ -2843,6 +3272,7 @@ export default function AgentPanel({
         ]
           .filter(Boolean)
           .join(" · "),
+        thumbnailSrc: thumbnailUrl,
       });
     }
 
@@ -2875,6 +3305,7 @@ export default function AgentPanel({
       );
       const latestStoryboard = relatedStoryboards[0] ?? null;
       const videoUrl = buildUploadAssetUrl(referenceVideo.shared_relative_path);
+      const referenceVideoThumbnailUrl = buildUploadAssetUrl(referenceVideo.thumbnail_shared_relative_path);
       const latestStoryboardUrl = latestStoryboard ? buildUploadAssetUrl(latestStoryboard.shared_relative_path) : null;
       const referenceVideoMeta = [
         formatDurationSeconds(referenceVideo.duration_seconds, locale, copy.common.notSpecified),
@@ -2894,7 +3325,7 @@ export default function AgentPanel({
           label: copy.agent.referenceMediaPreviewVideo,
           title: referenceVideo.filename,
           meta: referenceVideoMeta,
-          thumbnailSrc: latestStoryboardUrl,
+          thumbnailSrc: referenceVideoThumbnailUrl || latestStoryboardUrl,
         });
       }
 
@@ -3839,6 +4270,7 @@ export default function AgentPanel({
       if (!previous) return null;
       return previous.sessionId === currentSession?._id ? previous : null;
     });
+    setReferenceVideoUploadNotice(null);
   }, [currentSession?._id]);
 
   useEffect(() => {
@@ -4160,7 +4592,12 @@ export default function AgentPanel({
               <div className={`chat-result-card-body${card.storyboardUrl && card.videoSrc ? " has-storyboard" : ""}`}>
                 {card.videoSrc && card.videoFormat ? (
                   <div className="chat-result-card-media is-video" data-testid="chat-result-video">
-                    <ChatResultInlineVideo src={card.videoSrc} format={card.videoFormat} title={card.title} />
+                    <ChatResultInlineVideo
+                      src={card.videoSrc}
+                      format={card.videoFormat}
+                      title={card.title}
+                      poster={card.videoPosterUrl}
+                    />
                   </div>
                 ) : null}
 
@@ -4193,11 +4630,12 @@ export default function AgentPanel({
 
     const sessionId = currentSession._id;
     const content = composerPromptRef.current.trim();
-    const attachmentsToSend = pendingAttachments.map(({ id, ...attachment }) => attachment);
-    if (!content && !attachmentsToSend.length) return;
+    const pendingAttachmentsSnapshot = pendingAttachments;
+    const optimisticAttachments = pendingAttachmentsSnapshot.map(stripPendingImageAttachment);
+    if (!content && !optimisticAttachments.length) return;
 
     const optimisticUserMessage = buildOptimisticMessage(sessionId, "user", content, {
-      attachments: attachmentsToSend,
+      attachments: optimisticAttachments,
     });
     const optimisticAssistantMessage = buildOptimisticMessage(sessionId, "assistant", "", {
       streaming: true,
@@ -4222,7 +4660,8 @@ export default function AgentPanel({
       updated_at: new Date().toISOString(),
     });
 
-    void sendChatTurn(sessionId, { content, attachments: attachmentsToSend })
+    void Promise.all(pendingAttachmentsSnapshot.map((attachment) => uploadPendingImageAttachment(sessionId, attachment)))
+      .then((attachmentsToSend) => sendChatTurn(sessionId, { content, attachments: attachmentsToSend }))
       .then(() => {
         setPanelError(null);
         void Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
@@ -4230,7 +4669,7 @@ export default function AgentPanel({
       .catch(async (err: any) => {
         setPanelError(buildUiError(err, "failedSendPrompt"));
         setComposerPromptValue(content);
-        setPendingAttachments((previous) => (previous.length ? previous : pendingAttachments));
+        setPendingAttachments((previous) => (previous.length ? previous : pendingAttachmentsSnapshot));
         setOptimisticTurn((previous) => (previous?.sessionId === sessionId ? null : previous));
         await Promise.allSettled([loadCurrentSession(sessionId), fetchSessions()]);
       })
@@ -4280,11 +4719,24 @@ export default function AgentPanel({
   const handleUploadReferenceVideos = async (files: File[]) => {
     if (!currentSession || !files.length) return;
 
+    const fileNames = files.map((file) => file.name).filter(Boolean);
     setUploadingReferenceVideo(true);
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    let previousFilesBytes = 0;
+    setReferenceVideoUploadNotice({
+      state: "uploading",
+      phase: "checking",
+      fileNames,
+      count: files.length,
+      currentFileName: fileNames[0],
+      currentFileIndex: 1,
+      completedBytes: 0,
+      totalBytes,
+    });
     setComposerAttachmentError(null);
 
     try {
-      for (const file of files) {
+      for (const [index, file] of files.entries()) {
         if (!isReferenceVideoFile(file)) {
           throw new Error("unsupported-image");
         }
@@ -4292,12 +4744,26 @@ export default function AgentPanel({
           throw new Error("reference-video-too-large");
         }
 
-        await uploadReferenceVideo(currentSession._id, file);
+        await uploadReferenceVideoResumable(currentSession._id, file, (progress) => {
+          setReferenceVideoUploadNotice({
+            state: "uploading",
+            phase: progress.phase,
+            fileNames,
+            count: files.length,
+            currentFileName: file.name,
+            currentFileIndex: index + 1,
+            completedBytes: Math.min(totalBytes, previousFilesBytes + progress.completedBytes),
+            totalBytes,
+          });
+        });
+        previousFilesBytes += file.size;
       }
 
       await Promise.allSettled([loadCurrentSession(currentSession._id), fetchSessions()]);
+      setReferenceVideoUploadNotice({ state: "success", fileNames, count: files.length });
       setPanelError(null);
     } catch (error: any) {
+      setReferenceVideoUploadNotice(null);
       if (error instanceof Error && error.message === "reference-video-too-large") {
         setComposerAttachmentError(copy.agent.referenceVideoTooLarge);
       } else if (error instanceof Error && error.message === "unsupported-image") {
@@ -4314,7 +4780,7 @@ export default function AgentPanel({
     if (!files.length) return;
 
     const projectFiles = files.filter((file) => isProjectArchiveFile(file));
-    const imageFiles = files.filter((file) => SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(file.type.toLowerCase()));
+    const imageFiles = files.filter((file) => isInlineImageFile(file));
     const videoFiles = files.filter((file) => !isProjectArchiveFile(file) && isReferenceVideoFile(file));
     const unsupportedCount = files.length - projectFiles.length - imageFiles.length - videoFiles.length;
 
@@ -4374,8 +4840,14 @@ export default function AgentPanel({
     composerTextareaRef.current?.focus();
   };
 
-  const handleOpenComposerAttachmentPicker = () => {
-    if (!currentSession || uploadingReferenceVideo || uploadingProject) return;
+  const handleComposerAttachmentPickerKeyDown = (event: KeyboardEvent<HTMLLabelElement>) => {
+    if (composerAttachmentPickerDisabled) {
+      event.preventDefault();
+      return;
+    }
+
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
     composerAttachmentInputRef.current?.click();
   };
 
@@ -4999,26 +5471,27 @@ export default function AgentPanel({
                         <div className="session-rename-actions">
                           <button
                             type="submit"
-                            className="icon-button session-rename-action"
+                            className="icon-button session-rename-action session-rename-action-confirm"
                             data-testid="session-rename-confirm"
                             aria-label={savingSessionName ? copy.common.saving : copy.common.confirm}
                             title={savingSessionName ? copy.common.saving : copy.common.confirm}
                             disabled={savingSessionName || !draftSessionName.trim()}
                           >
-                            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                              <path d="M4.2 8.15 6.8 10.8 11.8 5.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                            <svg className="session-rename-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                              <path d="M16.7 5.8 8.4 14.1 3.9 9.6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
                             </svg>
                           </button>
                           <button
                             type="button"
-                            className="icon-button session-rename-action"
+                            className="icon-button session-rename-action session-rename-action-cancel"
+                            data-testid="session-rename-cancel"
                             aria-label={copy.common.cancel}
                             title={copy.common.cancel}
                             onClick={handleCancelRenameSession}
                             disabled={savingSessionName}
                           >
-                            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-                              <path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z" fill="currentColor"/>
+                            <svg className="session-rename-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                              <path d="M5.4 5.4 14.6 14.6M14.6 5.4 5.4 14.6" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" />
                             </svg>
                           </button>
                         </div>
@@ -5163,7 +5636,7 @@ export default function AgentPanel({
 
                           <article className={`chat-message role-${message.role}`}>
                             <div className="chat-message-meta">
-                              <span className="chat-message-author">{roleLabel}</span>
+                              <span className="chat-message-author">{renderBrandText(roleLabel)}</span>
                               <time>{formatDateTime(message.created_at, locale, copy.common.notStarted)}</time>
                             </div>
 
@@ -5177,6 +5650,7 @@ export default function AgentPanel({
                               {messageImageAttachments.length ? (
                                 <div className={`chat-attachment-grid${hasMarkdownContent || resultCards.length ? " has-copy" : ""}`}>
                                   {messageImageAttachments.map((attachment, index) => {
+                                    const attachmentSource = attachment.data_url || "";
                                     const attachmentMeta = [
                                       attachment.display_name,
                                       attachment.width && attachment.height ? `${attachment.width} x ${attachment.height}` : null,
@@ -5185,10 +5659,10 @@ export default function AgentPanel({
                                       .join(" · ");
 
                                     return (
-                                      <figure key={`${message._id}-${attachment.data_url.slice(0, 24)}-${index}`} className="chat-attachment-card">
+                                      <figure key={`${message._id}-${attachmentSource.slice(0, 24)}-${index}`} className="chat-attachment-card">
                                         <img
                                           className="chat-attachment-image"
-                                          src={attachment.data_url}
+                                          src={attachmentSource}
                                           alt={attachment.display_name || copy.agent.attachmentImageAlt}
                                           loading="lazy"
                                         />
@@ -5224,7 +5698,7 @@ export default function AgentPanel({
                 })
               ) : showStarterCards ? (
                 <div className="chat-welcome">
-                  <span className="eyebrow">{copy.agent.starterEyebrow}</span>
+                  <span className="eyebrow">{renderBrandText(copy.agent.starterEyebrow)}</span>
                   <h2>{copy.agent.starterTitle}</h2>
                   <p>{copy.agent.starterDescription}</p>
                   <div className="welcome-prompts">
@@ -5290,6 +5764,58 @@ export default function AgentPanel({
           <div className="composer-shell" ref={composerShellRef}>
             {composerAttachmentError ? <div className="inline-alert composer-alert">{composerAttachmentError}</div> : null}
             {sessionSettingsErrorMessage ? <div className="inline-alert composer-alert">{sessionSettingsErrorMessage}</div> : null}
+            {referenceVideoUploadNotice ? (
+              <div
+                className={`composer-upload-notice state-${referenceVideoUploadNotice.state}`}
+                data-testid="reference-video-upload-notice"
+                role="status"
+              >
+                <span className="composer-upload-notice-icon" aria-hidden="true">
+                  {referenceVideoUploadNotice.state === "uploading" ? (
+                    <svg viewBox="0 0 16 16" focusable="false">
+                      <path d="M8 2.25a.75.75 0 0 1 .75.75v5.19l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 1.06-1.06l1.72 1.72V3A.75.75 0 0 1 8 2.25ZM3 12.5a.75.75 0 0 1 .75-.75h8.5a.75.75 0 0 1 0 1.5h-8.5A.75.75 0 0 1 3 12.5Z" fill="currentColor"/>
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 16 16" focusable="false">
+                      <path d="M13.53 4.53a.75.75 0 0 0-1.06-1.06L6.75 9.19 3.53 5.97a.75.75 0 0 0-1.06 1.06l3.75 3.75a.75.75 0 0 0 1.06 0l6.25-6.25Z" fill="currentColor"/>
+                    </svg>
+                  )}
+                </span>
+                <span className="composer-upload-notice-copy">
+                  <strong>
+                    {referenceVideoUploadNotice.state === "uploading"
+                      ? referenceVideoUploadPhaseLabel
+                      : copy.agent.referenceVideoUploadSuccess}
+                  </strong>
+                  <span title={referenceVideoUploadFileLabel}>
+                    {referenceVideoUploadCurrentLabel ||
+                      `${referenceVideoUploadNotice.count} ${copy.agent.referenceMediaPreviewVideo}`}
+                  </span>
+                  {referenceVideoUploadNotice.state === "uploading" && referenceVideoUploadProgressLabel ? (
+                    <span className="composer-upload-notice-progress-label">{referenceVideoUploadProgressLabel}</span>
+                  ) : null}
+                  {referenceVideoUploadNotice.state === "success" ? <span>{copy.agent.referenceVideoUploadHint}</span> : null}
+                </span>
+                {referenceVideoUploadNotice.state === "uploading" ? (
+                  <span className="composer-upload-notice-progress" style={referenceVideoUploadProgressStyle} aria-hidden="true">
+                    <span className="composer-upload-notice-progress-bar" />
+                  </span>
+                ) : null}
+                {referenceVideoUploadNotice.state === "success" ? (
+                  <button
+                    type="button"
+                    className="composer-upload-notice-dismiss"
+                    aria-label={copy.common.remove}
+                    title={copy.common.remove}
+                    onClick={() => setReferenceVideoUploadNotice(null)}
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                      <path d="M4.22 4.22a.75.75 0 0 1 1.06 0L8 6.94l2.72-2.72a.75.75 0 1 1 1.06 1.06L9.06 8l2.72 2.72a.75.75 0 1 1-1.06 1.06L8 9.06l-2.72 2.72a.75.75 0 1 1-1.06-1.06L6.94 8 4.22 5.28a.75.75 0 0 1 0-1.06Z" fill="currentColor"/>
+                    </svg>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
 
             <div
               ref={composerCardRef}
@@ -5298,15 +5824,6 @@ export default function AgentPanel({
               onDragLeave={handleComposerDragLeave}
               onDrop={handleComposerDrop}
             >
-              <input
-                ref={composerAttachmentInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif,video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.wmv,.mpeg,.mpg,.zip,application/zip,application/x-zip-compressed"
-                hidden
-                multiple
-                onChange={handleComposerAttachmentInputChange}
-              />
-
               {pendingAttachments.length ? (
                 <div ref={composerAttachmentsRef} className="composer-attachments">
                   {pendingAttachments.map((attachment, index) => {
@@ -5365,19 +5882,28 @@ export default function AgentPanel({
 
               <div ref={composerFooterRef} className="composer-footer">
                 <div className="composer-footer-main">
-                  <button
-                    type="button"
-                    className="composer-tool-button composer-attach-button"
+                  <label
+                    className={`composer-tool-button composer-attach-button${composerAttachmentPickerDisabled ? " is-disabled" : ""}`}
                     data-testid="composer-attachment-trigger"
                     aria-label={copy.agent.composerAttachImage}
+                    aria-disabled={composerAttachmentPickerDisabled}
                     title={copy.agent.composerAttachImage}
-                    onClick={handleOpenComposerAttachmentPicker}
-                    disabled={!currentSession || uploadingReferenceVideo || uploadingProject}
+                    tabIndex={composerAttachmentPickerDisabled ? -1 : 0}
+                    onKeyDown={handleComposerAttachmentPickerKeyDown}
                   >
+                    <input
+                      ref={composerAttachmentInputRef}
+                      className="composer-attachment-input"
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,video/*,.mp4,.mov,.m4v,.avi,.mkv,.webm,.wmv,.mpeg,.mpg,.zip,application/zip,application/x-zip-compressed"
+                      multiple
+                      disabled={composerAttachmentPickerDisabled}
+                      onChange={handleComposerAttachmentInputChange}
+                    />
                     <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
                       <path d="M8 2.25a.75.75 0 0 1 .75.75v4.25H13a.75.75 0 0 1 0 1.5H8.75V13a.75.75 0 0 1-1.5 0V8.75H3a.75.75 0 0 1 0-1.5h4.25V3A.75.75 0 0 1 8 2.25Z" fill="currentColor"/>
                     </svg>
-                  </button>
+                  </label>
 
                   {composerSessionSettings}
                 </div>
@@ -5539,6 +6065,7 @@ export default function AgentPanel({
                             <video
                               className="reference-media-gallery-thumb"
                               src={item.src}
+                              poster={item.thumbnailSrc || undefined}
                               muted
                               playsInline
                               preload="metadata"
@@ -5736,7 +6263,7 @@ export default function AgentPanel({
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">{copy.agent.workflowEyebrow}</span>
-                <h3>{copy.agent.workflowTitle}</h3>
+                <h3>{renderBrandText(copy.agent.workflowTitle)}</h3>
                 <p className="panel-description">{copy.agent.workflowDescription}</p>
               </div>
             </div>
@@ -5778,6 +6305,7 @@ export default function AgentPanel({
               downloadUrl={context?.latest_render_url || previewVideoSrc}
               assetName={latestRenderName}
               projectName={activeProject?.filename || null}
+              poster={latestRenderThumbnailUrl}
             />
           </div>
         </div>
@@ -5855,7 +6383,15 @@ export default function AgentPanel({
                 ) : null}
 
                 {mediaPreviewItem.kind === "video" ? (
-                  <video className="media-preview-video-element" src={mediaPreviewItem.src} controls autoPlay playsInline preload="metadata" />
+                  <video
+                    className="media-preview-video-element"
+                    src={mediaPreviewItem.src}
+                    poster={mediaPreviewItem.thumbnailSrc || undefined}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    onLoadedMetadata={(event) => playMediaElement(event.currentTarget)}
+                  />
                 ) : (
                   <img className="media-preview-image-element" src={mediaPreviewItem.src} alt={mediaPreviewItem.title} />
                 )}

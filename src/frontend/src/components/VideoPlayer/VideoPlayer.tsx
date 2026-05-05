@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import Hls from "hls.js";
 import { useI18n } from "../../i18n";
+import { playMediaElement, resetMediaElement } from "../../utils/media";
 import "./VideoPlayer.css";
 
 interface VideoPlayerProps {
@@ -9,9 +10,10 @@ interface VideoPlayerProps {
   downloadUrl?: string | null;
   assetName?: string | null;
   projectName?: string | null;
+  poster?: string | null;
 }
 
-export default function VideoPlayer({ src, format, downloadUrl, assetName, projectName }: VideoPlayerProps) {
+export default function VideoPlayer({ src, format, downloadUrl, assetName, projectName, poster }: VideoPlayerProps) {
   const { copy } = useI18n();
   const videoRef = useRef<HTMLVideoElement>(null);
 
@@ -19,41 +21,37 @@ export default function VideoPlayer({ src, format, downloadUrl, assetName, proje
     const video = videoRef.current;
     if (!video || !src) return;
 
-    const resetVideo = () => {
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-    };
-
-    resetVideo();
+    resetMediaElement(video);
 
     if (format === "mp4") {
       video.src = src;
       video.load();
-      return () => resetVideo();
+      return () => resetMediaElement(video);
     }
 
     if (Hls.isSupported()) {
       const hls = new Hls();
+      const handleManifestParsed = () => playMediaElement(video);
       hls.loadSource(src);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.play().catch(() => {});
-      });
+      hls.on(Hls.Events.MANIFEST_PARSED, handleManifestParsed);
       return () => {
+        hls.off(Hls.Events.MANIFEST_PARSED, handleManifestParsed);
         hls.destroy();
-        resetVideo();
+        resetMediaElement(video);
       };
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
       // Safari native HLS
+      const handleLoadedMetadata = () => playMediaElement(video);
       video.src = src;
-      video.addEventListener("loadedmetadata", () => {
-        video.play().catch(() => {});
-      });
-      return () => resetVideo();
+      video.addEventListener("loadedmetadata", handleLoadedMetadata);
+      return () => {
+        video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+        resetMediaElement(video);
+      };
     }
 
-    return () => resetVideo();
+    return () => resetMediaElement(video);
   }, [format, src]);
 
   return (
@@ -76,7 +74,7 @@ export default function VideoPlayer({ src, format, downloadUrl, assetName, proje
           </a>
         </div>
       </div>
-      <video ref={videoRef} controls preload="metadata" className="video-element" />
+      <video ref={videoRef} controls preload="metadata" poster={poster || undefined} className="video-element" />
     </div>
   );
 }

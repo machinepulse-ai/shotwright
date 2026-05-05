@@ -698,6 +698,60 @@ def _render_metadata_path(output_path: Path) -> Path:
     return output_path.parent / f"{output_path.name}{RENDER_METADATA_SUFFIX}"
 
 
+def _render_thumbnail_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}-cover.jpg")
+
+
+def _generate_render_thumbnail(output_path: Path) -> Path | None:
+    thumbnail_path = _render_thumbnail_path(output_path)
+    if thumbnail_path.is_file() and thumbnail_path.stat().st_size > 0:
+        return thumbnail_path
+
+    try:
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                "0.200",
+                "-i",
+                str(output_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=640:-2:force_original_aspect_ratio=decrease",
+                "-q:v",
+                "3",
+                str(thumbnail_path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    if completed.returncode != 0 or not thumbnail_path.exists() or thumbnail_path.stat().st_size <= 0:
+        thumbnail_path.unlink(missing_ok=True)
+        return None
+    return thumbnail_path
+
+
+def _ensure_render_thumbnail_metadata(output_path: Path, metadata: dict) -> bool:
+    raw_thumbnail_path = str(metadata.get("thumbnail_path") or "").strip()
+    thumbnail_path = Path(raw_thumbnail_path) if raw_thumbnail_path else None
+    if thumbnail_path and thumbnail_path.is_file() and thumbnail_path.stat().st_size > 0:
+        return False
+
+    generated_thumbnail = _generate_render_thumbnail(output_path)
+    if not generated_thumbnail:
+        return False
+    metadata["thumbnail_path"] = str(generated_thumbnail)
+    return True
+
+
 def _read_json(path: Path) -> dict | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -751,6 +805,7 @@ def record_render_output(
         "stream_id": stream_id,
         "playlist_url": playlist_url,
     }
+    _ensure_render_thumbnail_metadata(resolved_output_path, metadata)
     _render_metadata_path(resolved_output_path).write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -775,6 +830,11 @@ def list_render_outputs(session_id: str, *, limit: int | None = None) -> list[di
         file_path = Path(str(metadata.get("file_path") or ""))
         if not file_path.exists():
             continue
+        if _ensure_render_thumbnail_metadata(file_path, metadata):
+            _render_metadata_path(file_path).write_text(
+                json.dumps(metadata, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
         render_outputs.append(metadata)
         if limit is not None and len(render_outputs) >= limit:
             break

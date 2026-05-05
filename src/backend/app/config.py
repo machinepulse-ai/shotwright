@@ -73,6 +73,21 @@ class Settings(BaseSettings):
     python_tool_system_site_packages: bool = True
     python_tool_dependency_sync_timeout_seconds: int = 1800
 
+    # --- Agent TTS providers ---
+    tts_provider: str = "edge"
+    tts_openai_api_key: str = ""
+    tts_openai_base_url: str = ""
+    tts_openai_model: str = "tts-1"
+    tts_openai_voice: str = "alloy"
+    tts_azure_speech_key: str = ""
+    tts_azure_region: str = ""
+    tts_azure_voice: str = "zh-CN-XiaoxiaoNeural"
+    tts_edge_voice: str = "zh-CN-XiaoxiaoNeural"
+    tts_elevenlabs_api_key: str = ""
+    tts_elevenlabs_base_url: str = "https://api.elevenlabs.io"
+    tts_elevenlabs_model: str = "eleven_multilingual_v2"
+    tts_elevenlabs_voice_id: str = ""
+
     # --- Future: Redis ---
     # redis_uri: str = "redis://redis:6379/0"
 

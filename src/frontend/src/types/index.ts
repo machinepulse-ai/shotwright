@@ -63,8 +63,11 @@ export interface ChatMessage {
 export interface ChatImageAttachment {
   type: "image";
   mime_type: string;
-  data_url: string;
+  data_url?: string | null;
   display_name?: string | null;
+  file_path?: string | null;
+  shared_relative_path?: string | null;
+  workspace_relative_path?: string | null;
   width?: number | null;
   height?: number | null;
   size_bytes?: number | null;
@@ -93,6 +96,9 @@ export interface ReferenceVideoInfo {
   duration_seconds: number;
   width?: number | null;
   height?: number | null;
+  thumbnail_path?: string | null;
+  thumbnail_shared_relative_path?: string | null;
+  thumbnail_mime_type?: string | null;
   created_at: string;
 }
 
@@ -138,6 +144,7 @@ export interface RenderOutputInfo {
   stderr_path?: string | null;
   stream_id?: string | null;
   playlist_url?: string | null;
+  thumbnail_path?: string | null;
 }
 
 export interface ProjectCompositionInfo {

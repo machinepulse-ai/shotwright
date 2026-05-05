@@ -47,6 +47,10 @@
   --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 }
 
+.brand-name {
+  unicode-bidi: isolate;
+}
+
 html[data-theme="dark"] {
   color-scheme: dark;
   --workbench-bg: #111318;

@@ -15,3 +15,4 @@ torch==2.11.0+cpu
 faster-whisper==1.2.1
 openai-whisper==20250625
 insightface==0.2.1
+edge-tts>=7.2,<8

@@ -60,6 +60,16 @@ class FakeSessionCollection:
         return SimpleNamespace(modified_count=1)
 
 
+class FakeAdminCollection:
+    def __init__(self, doc: dict | None = None) -> None:
+        self.doc = dict(doc or {})
+
+    async def find_one(self, query: dict) -> dict | None:
+        if query.get('_id') == self.doc.get('_id'):
+            return dict(self.doc)
+        return None
+
+
 def test_build_empty_project_jsx_resets_current_project_without_modal_prompts() -> None:
     script = module._build_empty_project_jsx()
 
@@ -449,6 +459,87 @@ async def test_generate_storyboard_tool_passes_crop_to_reference_media(monkeypat
     assert captured['session_id'] == 'session-1'
     assert captured['reference_video_path'] == 'session-1/_reference-videos/demo.mp4'
     assert captured['crop'] == '10%,20%,50%,25%'
+
+
+@pytest.mark.asyncio
+async def test_generate_tts_audio_stages_output_into_active_project(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_audio = tmp_path / 'narration.mp3'
+    source_audio.write_bytes(b'audio')
+    project_root = tmp_path / 'project'
+    project_root.mkdir(parents=True, exist_ok=True)
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'status': 'idle',
+            'active_project_id': 'project-1',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'scene.aep',
+        'workspace_dir': str(project_root),
+        'entry_aep_file': 'scene.aep',
+        'aep_files': ['scene.aep'],
+        'compositions': [{'name': 'Main'}],
+        'composition_catalog_updated_at': '2026-05-02T08:00:00Z',
+    }
+    captured: dict[str, object] = {}
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_refresh_project_files(session_id: str, project_id: str) -> dict:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    def fake_generate_tts_audio(session_id: str, **kwargs) -> dict:
+        captured['session_id'] = session_id
+        captured.update(kwargs)
+        return {
+            'id': 'tts-1',
+            'session_id': session_id,
+            'provider': 'windows_sapi',
+            'filename': source_audio.name,
+            'file_path': str(source_audio),
+            'shared_relative_path': 'session-1/_tts/narration.mp3',
+            'mime_type': 'audio/mpeg',
+            'format': 'mp3',
+            'size_bytes': source_audio.stat().st_size,
+            'text_char_count': 5,
+            'text_preview': 'hello',
+        }
+
+    async def fake_publish_context_refresh(_session_id: str, _reason: str, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module, 'get_admin_collection', lambda: FakeAdminCollection({'_id': 'settings'}))
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+    monkeypatch.setattr(module.pm, 'refresh_project_files', fake_refresh_project_files)
+    monkeypatch.setattr(module.tts_media, 'generate_tts_audio', fake_generate_tts_audio)
+    monkeypatch.setattr(module, 'publish_context_refresh', fake_publish_context_refresh)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['generate_tts_audio'].handler(
+        SimpleNamespace(arguments={'text': 'hello', 'provider': 'windows_sapi', 'output_name': 'narration.mp3'})
+    )
+
+    assert result.result_type == 'success'
+    assert captured['session_id'] == 'session-1'
+    assert captured['text'] == 'hello'
+    assert (project_root / 'assets' / 'audio' / 'narration.mp3').read_bytes() == b'audio'
+
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['project_id'] == 'project-1'
+    assert payload['project_relative_path'] == 'assets/audio/narration.mp3'
+    assert payload['project_audio_path'] == str(project_root / 'assets' / 'audio' / 'narration.mp3')
 
 
 @pytest.mark.asyncio

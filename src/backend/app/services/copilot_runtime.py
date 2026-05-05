@@ -212,6 +212,41 @@ def _save_inline_attachment(
     return file_path, relative_path
 
 
+def _resolve_inline_attachment_reference(
+    app_session_id: str,
+    storage_root: str,
+    *,
+    file_path: str | None = None,
+    shared_relative_path: str | None = None,
+    workspace_relative_path: str | None = None,
+) -> tuple[Path, str] | None:
+    storage_path = Path(storage_root).resolve()
+    session_path = (storage_path / app_session_id).resolve()
+    candidates: list[Path] = []
+
+    if file_path:
+        candidates.append(Path(file_path))
+    for relative_path in (shared_relative_path, workspace_relative_path):
+        if relative_path:
+            candidates.append(storage_path / relative_path)
+
+    for candidate in candidates:
+        try:
+            resolved_path = candidate.resolve()
+            resolved_path.relative_to(session_path)
+        except (OSError, ValueError):
+            continue
+        if not resolved_path.is_file():
+            continue
+        try:
+            relative_path = resolved_path.relative_to(storage_path).as_posix()
+        except ValueError:
+            relative_path = resolved_path.name
+        return resolved_path, relative_path
+
+    return None
+
+
 def _prepare_turn_attachments(
     attachments: list[dict] | None,
     *,
@@ -224,37 +259,54 @@ def _prepare_turn_attachments(
     for attachment in attachments or []:
         data_url = str(attachment.get("data_url") or "")
         _, _, encoded_payload = data_url.partition(",")
-        if not encoded_payload:
-            if app_session_id:
-                logger.warning("Skipping malformed inline image attachment for session %s", app_session_id)
-            continue
-
         mime_type = str(attachment.get("mime_type") or "application/octet-stream")
         display_name = _first_non_empty(attachment.get("display_name"))
-
-        copilot_attachment = {
-            "type": "blob",
-            "data": encoded_payload,
-            "mimeType": mime_type,
-        }
-        copilot_attachments.append(copilot_attachment)
 
         persisted_attachment = {
             "type": "image",
             "mime_type": mime_type,
-            "data_url": data_url,
         }
 
-        if app_session_id and storage_root:
-            saved_attachment = _save_inline_attachment(
-                encoded_payload,
-                mime_type=mime_type,
-                display_name=display_name,
-                app_session_id=app_session_id,
-                storage_root=storage_root,
+        if encoded_payload:
+            copilot_attachment = {
+                "type": "blob",
+                "data": encoded_payload,
+                "mimeType": mime_type,
+            }
+            copilot_attachments.append(copilot_attachment)
+
+            if app_session_id and storage_root:
+                saved_attachment = _save_inline_attachment(
+                    encoded_payload,
+                    mime_type=mime_type,
+                    display_name=display_name,
+                    app_session_id=app_session_id,
+                    storage_root=storage_root,
+                )
+                if saved_attachment:
+                    file_path, relative_path = saved_attachment
+                    file_attachment = {
+                        "type": "file",
+                        "path": str(file_path),
+                    }
+                    if file_path.name:
+                        file_attachment["displayName"] = file_path.name
+                    copilot_attachments.append(file_attachment)
+                    persisted_attachment["file_path"] = str(file_path)
+                    persisted_attachment["shared_relative_path"] = relative_path
+                    persisted_attachment["workspace_relative_path"] = relative_path
+            if "file_path" not in persisted_attachment:
+                persisted_attachment["data_url"] = data_url
+        elif app_session_id and storage_root:
+            referenced_attachment = _resolve_inline_attachment_reference(
+                app_session_id,
+                storage_root,
+                file_path=_first_non_empty(attachment.get("file_path")),
+                shared_relative_path=_first_non_empty(attachment.get("shared_relative_path")),
+                workspace_relative_path=_first_non_empty(attachment.get("workspace_relative_path")),
             )
-            if saved_attachment:
-                file_path, relative_path = saved_attachment
+            if referenced_attachment:
+                file_path, relative_path = referenced_attachment
                 file_attachment = {
                     "type": "file",
                     "path": str(file_path),
@@ -265,6 +317,15 @@ def _prepare_turn_attachments(
                 persisted_attachment["file_path"] = str(file_path)
                 persisted_attachment["shared_relative_path"] = relative_path
                 persisted_attachment["workspace_relative_path"] = relative_path
+        else:
+            if app_session_id:
+                logger.warning("Skipping malformed inline image attachment for session %s", app_session_id)
+            continue
+
+        if "file_path" not in persisted_attachment and "data_url" not in persisted_attachment:
+            if app_session_id:
+                logger.warning("Skipping unresolved inline image attachment for session %s", app_session_id)
+            continue
 
         for key in ("display_name", "width", "height", "size_bytes"):
             value = attachment.get(key)
@@ -733,7 +794,9 @@ class ShotwrightCopilotRuntimeManager:
             "For a blank project, prefer create_empty_after_effects_project instead of handwritten boilerplate JSX. "
             "For user-supplied inline images, prefer inspect_workspace to discover recent image attachments, then use stage_reference_images or create_reference_composition instead of copying files with shell commands. "
             "For user-supplied reference videos, prefer inspect_workspace to discover uploaded reference_videos, then use generate_storyboard_from_reference_video before creating the AEP composition. When only a local motion detail matters, pass the storyboard tool's crop parameter so you can inspect a focused region instead of the whole frame. When comparing against a Shotwright render, pass the session's latest_render_path or another session-local export mp4 into the same storyboard tool so the crop and cadence stay comparable. Inspect workspace state before multi-round edits so you can reuse the stored project compositions and structured render_outputs instead of guessing which comp or mp4 is the latest. "
+            "For narration, voiceover, or spoken guide tracks, use generate_tts_audio first, then import the returned project_audio_path into After Effects and align the audio layer with the composition timing. "
             "Use run_python_code for CPU-only media analysis, synthetic asset generation, audio/video preprocessing, Whisper-style speech analysis, ONNX/InsightFace helpers, and data-driven AE inputs before writing complex JSX. "
+            "In After Effects JSX, create captions, subtitles, title cards, and dense CJK text with comp.layers.addBoxText(); never assign TextDocument.boxText because it is read-only, and center rendered bounds with sourceRectAtTime(). "
             "Once a session already has an active project, treat it as the default target for later creative turns. If the user asks to change, add, remove, tweak, or render something without explicitly asking for a new project or a different uploaded archive, keep editing that active project and its current compositions instead of creating another project. "
             "If a project bootstrap tool returns a project_id but the save step fails, keep using that same managed workspace on the next retry instead of creating another project. "
             "If you need to inspect a generated storyboard visually, use the available file or image viewing tool on the storyboard path returned by the Shotwright tool. "

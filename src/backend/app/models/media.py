@@ -16,6 +16,9 @@ class ReferenceVideoInfo(BaseModel):
     duration_seconds: float = Field(ge=0.0)
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
+    thumbnail_path: str | None = None
+    thumbnail_shared_relative_path: str | None = None
+    thumbnail_mime_type: str | None = None
     created_at: datetime
 
 
@@ -64,3 +67,4 @@ class RenderOutputInfo(BaseModel):
     stderr_path: str | None = None
     stream_id: str | None = None
     playlist_url: str | None = None
+    thumbnail_path: str | None = None

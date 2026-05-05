@@ -30,6 +30,7 @@ module.exports = (_env, argv) => {
   const mode = argv?.mode || process.env.NODE_ENV || "development";
   const isProd = mode === "production";
   const hashLength = 12;
+  const jsHashToken = isProd ? "contenthash" : "fullhash";
   const swIconSource = fs.readFileSync(path.resolve(__dirname, "public/sw-icon.svg"));
   const swIconHash = crypto.createHash("sha256").update(swIconSource).digest("hex").slice(0, hashLength);
   const swIconFilename = isProd ? `assets/sw-icon.${swIconHash}.svg` : "sw-icon.svg";
@@ -39,9 +40,11 @@ module.exports = (_env, argv) => {
     entry: "./src/index.tsx",
     output: {
       path: path.resolve(__dirname, "dist"),
-      filename: isProd ? `assets/[name].[contenthash:${hashLength}].js` : "[name].js",
-      chunkFilename: isProd ? `assets/[name].[contenthash:${hashLength}].chunk.js` : "[name].chunk.js",
+      filename: `assets/[name].[${jsHashToken}:${hashLength}].js`,
+      chunkFilename: `assets/[name].[${jsHashToken}:${hashLength}].chunk.js`,
       assetModuleFilename: isProd ? `assets/[name].[contenthash:${hashLength}][ext][query]` : "assets/[name][ext][query]",
+      hotUpdateChunkFilename: `assets/[id].[fullhash:${hashLength}].hot-update.js`,
+      hotUpdateMainFilename: `assets/[runtime].[fullhash:${hashLength}].hot-update.json`,
       publicPath: "/",
       clean: true,
     },
@@ -97,6 +100,20 @@ module.exports = (_env, argv) => {
       host: "0.0.0.0",
       port: devServerPort,
       hot: true,
+      client: {
+        overlay: {
+          errors: true,
+          warnings: false,
+          runtimeErrors: function runtimeErrors(error) {
+            const name = error && typeof error.name === "string" ? error.name : "";
+            const message = error && typeof error.message === "string" ? error.message : String(error || "");
+            if (name === "AbortError" && /operation was aborted|play\(\) request was interrupted|media operation was aborted/i.test(message)) {
+              return false;
+            }
+            return true;
+          },
+        },
+      },
       historyApiFallback: true,
       proxy: [
         {
