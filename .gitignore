@@ -33,6 +33,7 @@ tests/artifacts/*
 !tests/artifacts/.gitkeep
 validation-data/templates/*
 !validation-data/templates/.gitkeep
+!validation-data/templates/validation_motion.aep
 validation-data/work/*
 !validation-data/work/.gitkeep
 .shotwright/inline-images/
