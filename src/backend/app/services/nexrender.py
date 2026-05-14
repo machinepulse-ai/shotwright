@@ -815,20 +815,29 @@ def record_render_output(
 
 def list_render_outputs(session_id: str, *, limit: int | None = None) -> list[dict]:
     session_dir = EXPORT_DIR / session_id
-    if not session_dir.exists():
+    try:
+        if not session_dir.exists():
+            return []
+        metadata_paths = sorted(
+            session_dir.glob(f"*{RENDER_METADATA_SUFFIX}"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        logger.warning("Skipping unreadable render output directory %s: %s", session_dir, exc)
         return []
 
     render_outputs: list[dict] = []
-    for metadata_path in sorted(
-        session_dir.glob(f"*{RENDER_METADATA_SUFFIX}"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    ):
+    for metadata_path in metadata_paths:
         metadata = _read_json(metadata_path)
         if not metadata:
             continue
         file_path = Path(str(metadata.get("file_path") or ""))
-        if not file_path.exists():
+        try:
+            if not file_path.exists():
+                continue
+        except OSError as exc:
+            logger.warning("Skipping unreadable render output %s: %s", file_path, exc)
             continue
         if _ensure_render_thumbnail_metadata(file_path, metadata):
             _render_metadata_path(file_path).write_text(

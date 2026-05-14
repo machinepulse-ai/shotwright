@@ -60,20 +60,58 @@ function normalizeInput(input) {
   });
 }
 
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergePlainObjects(base, patch) {
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (isPlainObject(value) && isPlainObject(merged[key])) {
+      merged[key] = mergePlainObjects(merged[key], value);
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function buildHttpOnlyCodexConfig(existingConfig, baseUrl) {
+  const providerId = "shotwright_http";
+  const config = isPlainObject(existingConfig) ? existingConfig : {};
+  return mergePlainObjects(config, {
+    model_provider: providerId,
+    model_providers: {
+      [providerId]: {
+        name: "Shotwright HTTP",
+        base_url: baseUrl,
+        env_key: "CODEX_API_KEY",
+        wire_api: "responses",
+        supports_websockets: false,
+      },
+    },
+  });
+}
+
 function buildCodexOptions(request) {
   const options = {};
+  const baseUrl = typeof request.base_url === "string" ? request.base_url.trim() : "";
+  const disableResponsesWebsocket = request.disable_responses_websocket === true;
 
   if (typeof request.codex_path_override === "string" && request.codex_path_override.trim()) {
     options.codexPathOverride = request.codex_path_override.trim();
   }
-  if (typeof request.base_url === "string" && request.base_url.trim()) {
-    options.baseUrl = request.base_url.trim();
+  if (baseUrl && !disableResponsesWebsocket) {
+    options.baseUrl = baseUrl;
   }
   if (typeof request.api_key === "string" && request.api_key.trim()) {
     options.apiKey = request.api_key.trim();
   }
   if (request.config && typeof request.config === "object" && !Array.isArray(request.config)) {
     options.config = request.config;
+  }
+  if (baseUrl && disableResponsesWebsocket) {
+    options.config = buildHttpOnlyCodexConfig(options.config, baseUrl);
   }
   if (request.env && typeof request.env === "object" && !Array.isArray(request.env)) {
     options.env = Object.fromEntries(

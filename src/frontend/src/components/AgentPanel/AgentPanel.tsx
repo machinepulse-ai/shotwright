@@ -18,7 +18,6 @@ import {
 } from "react";
 import ReactMarkdown, { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import Hls from "hls.js";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
@@ -67,7 +66,7 @@ import {
   getSessionModelToneClass,
 } from "../../utils/agentModel";
 import { renderBrandText } from "../../utils/brand";
-import { playMediaElement, resetMediaElement } from "../../utils/media";
+import { bindVideoSource, playMediaElement, resetMediaElement } from "../../utils/media";
 import VideoPlayer from "../VideoPlayer/VideoPlayer";
 import ContainerManager from "../ContainerManager/ContainerManager";
 import "./AgentPanel.css";
@@ -2392,6 +2391,10 @@ function buildRenderUrl(sessionId: string, latestRenderPath: string | null | und
 }
 
 const CHAT_RESULT_ASSET_LINE_PATTERN = /^(?:[-*+]\s*)?(?:\*\*)?\s*([^:：]{1,80}?)(?:\s*\*\*)?\s*[：:]\s*(.+?)\s*$/i;
+const CHAT_RESULT_MARKDOWN_LINK_PATTERN = /\[[^\]]*]\(([^)]+)\)/g;
+const CHAT_RESULT_CODE_VALUE_PATTERN = /`([^`]+)`/g;
+const CHAT_RESULT_PLAIN_ASSET_PATTERN =
+  /(?:https?:\/\/[^\s`)\]]+|\/api\/[^\s`)\]]+|[A-Za-z]:[\\/][^\s`)\]]+|[\w./\\-]+\.(?:m3u8|mp4|mov|jpe?g|png|webp|gif|zip|7z|tar|tgz|gz)(?:[?#][^\s`)\]]*)?)/gi;
 
 function classifyChatResultAsset(label: string, value: string): ChatResultAssetKind | null {
   const normalizedLabel = label.trim().toLowerCase();
@@ -2403,7 +2406,7 @@ function classifyChatResultAsset(label: string, value: string): ChatResultAssetK
   if (/分镜|storyboard/.test(normalizedLabel) || /\.(jpe?g|png|webp|gif)(?:[?#].*)?$/i.test(normalizedValue)) {
     return "storyboard";
   }
-  if (/归档|archive/.test(normalizedLabel) || normalizedValue.includes("/archive")) {
+  if (/归档|archive/.test(normalizedLabel) || normalizedValue.includes("/archive") || /\.(zip|7z|tar|tgz|gz)(?:[?#].*)?$/i.test(normalizedValue)) {
     return "archive";
   }
   if (/mp4|output|render|视频|渲染/.test(normalizedLabel) || /\.mp4(?:[?#].*)?$/i.test(normalizedValue)) {
@@ -2441,17 +2444,98 @@ function extractChatResultAssetValue(rawValue: string) {
     .trim();
 }
 
+function normalizeChatResultAssetValue(rawValue: string) {
+  return rawValue
+    .replace(/^["'`(<]+|["'`)>]+$/g, "")
+    .replace(/[，,。.;；]+$/g, "")
+    .trim();
+}
+
+function getChatResultLabelNearValue(line: string, valueStart: number) {
+  const beforeValue = line.slice(0, valueStart).replace(/\*\*/g, "").replace(/`[^`]*`/g, "");
+  const colonIndex = Math.max(beforeValue.lastIndexOf(":"), beforeValue.lastIndexOf("："));
+  if (colonIndex >= 0) {
+    const beforeColon = beforeValue.slice(0, colonIndex);
+    const labelStart = Math.max(
+      beforeColon.lastIndexOf("，"),
+      beforeColon.lastIndexOf(","),
+      beforeColon.lastIndexOf("。"),
+      beforeColon.lastIndexOf(";"),
+      beforeColon.lastIndexOf("；"),
+      beforeColon.lastIndexOf("|"),
+      beforeColon.lastIndexOf("\n"),
+    );
+    const label = beforeColon.slice(labelStart + 1).trim();
+    if (label) return label;
+  }
+
+  const fallback = beforeValue.split(/[，,。；;|]/).pop()?.trim() || "";
+  return fallback.slice(-36).trim() || "result";
+}
+
+function rangeContains(ranges: Array<[number, number]>, start: number, end: number) {
+  return ranges.some(([rangeStart, rangeEnd]) => start >= rangeStart && end <= rangeEnd);
+}
+
+function extractChatResultAssetRefsFromLine(line: string) {
+  const refs: ChatResultAsset[] = [];
+  const occupiedRanges: Array<[number, number]> = [];
+  const seen = new Set<string>();
+
+  const addRef = (rawValue: string, start: number, end: number, labelOverride?: string) => {
+    const value = normalizeChatResultAssetValue(rawValue);
+    if (!value) return;
+    const label = labelOverride || getChatResultLabelNearValue(line, start);
+    const kind = classifyChatResultAsset(label, value);
+    if (!kind || !isLikelyChatResultAssetValue(kind, value)) return;
+    const key = `${kind}:${value}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    refs.push({ kind, label, value });
+    occupiedRanges.push([start, end]);
+  };
+
+  for (const match of line.matchAll(CHAT_RESULT_MARKDOWN_LINK_PATTERN)) {
+    const matchText = match[0] || "";
+    const value = match[1] || "";
+    const start = match.index ?? 0;
+    addRef(value, start, start + matchText.length);
+  }
+
+  for (const match of line.matchAll(CHAT_RESULT_CODE_VALUE_PATTERN)) {
+    const matchText = match[0] || "";
+    const value = match[1] || "";
+    const start = match.index ?? 0;
+    addRef(value, start, start + matchText.length);
+  }
+
+  for (const match of line.matchAll(CHAT_RESULT_PLAIN_ASSET_PATTERN)) {
+    const matchText = match[0] || "";
+    const start = match.index ?? 0;
+    const end = start + matchText.length;
+    if (rangeContains(occupiedRanges, start, end)) continue;
+    addRef(matchText, start, end);
+  }
+
+  return refs;
+}
+
 function parseChatResultAssets(content: string) {
   const assets: ChatResultAsset[] = [];
   const markdownLines: string[] = [];
 
   for (const line of content.split(/\r?\n/)) {
+    const lineRefs = extractChatResultAssetRefsFromLine(line);
+    if (lineRefs.length) {
+      assets.push(...lineRefs);
+      continue;
+    }
+
     const match = CHAT_RESULT_ASSET_LINE_PATTERN.exec(line.trim());
     if (!match) {
       markdownLines.push(line);
       continue;
     }
-
     const label = match[1].trim();
     if (
       label.length > 36 ||
@@ -2945,31 +3029,7 @@ function ChatResultInlineVideo({
     const video = videoRef.current;
     if (!video || !src) return undefined;
 
-    resetMediaElement(video);
-
-    if (format === "mp4") {
-      video.src = src;
-      video.load();
-      return () => resetMediaElement(video);
-    }
-
-    if (Hls.isSupported()) {
-      const hls = new Hls();
-      hls.loadSource(src);
-      hls.attachMedia(video);
-      return () => {
-        hls.destroy();
-        resetMediaElement(video);
-      };
-    }
-
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = src;
-      video.load();
-      return () => resetMediaElement(video);
-    }
-
-    return () => resetMediaElement(video);
+    return bindVideoSource(video, src, format);
   }, [format, src]);
 
   return (

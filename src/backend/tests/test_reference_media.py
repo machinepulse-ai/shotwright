@@ -290,6 +290,37 @@ def test_generate_storyboard_rejects_crop_outside_source_frame(monkeypatch: pyte
         module.generate_storyboard("session-1", crop="90%,10%,20%,40%")
 
 
+def test_analyze_storyboard_flags_pale_warm_low_contrast_subtitles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    storyboard_path = tmp_path / "subtitle-zone.jpg"
+    storyboard_path.write_bytes(b"image")
+    warm_pixels = bytes([210, 140, 40]) * 60
+    bright_pixels = bytes([245, 245, 230]) * 35
+    neutral_pixels = bytes([90, 130, 90]) * 5
+    raw_pixels = warm_pixels + bright_pixels + neutral_pixels
+
+    monkeypatch.setattr(module, "_probe_image_dimensions", lambda _path: (10, 10))
+    monkeypatch.setattr(
+        module,
+        "_run_binary_command",
+        lambda _command, *, timeout: subprocess.CompletedProcess(
+            args=_command,
+            returncode=0,
+            stdout=raw_pixels,
+            stderr=b"",
+        ),
+    )
+
+    analysis = module.analyze_storyboard_image_darkness(storyboard_path)
+
+    assert analysis["black_caption_risk"] is False
+    assert analysis["low_contrast_caption_risk"] is True
+    assert analysis["caption_quality_risk"] is True
+    assert "pale warm caption backing" in analysis["risk_reasons"][0]
+
+
 @pytest.mark.skipif(
     not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
     reason="ffmpeg/ffprobe not available in this environment",

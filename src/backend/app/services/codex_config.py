@@ -219,6 +219,11 @@ def resolve_codex_runtime_settings(admin_doc: dict[str, Any] | None = None) -> d
             local_profile.get("base_url"),
             settings.codex_base_url,
         ),
+        "codex_disable_responses_websocket": _resolve_bool(
+            "codex_disable_responses_websocket",
+            doc,
+            default=settings.codex_disable_responses_websocket,
+        ),
         "codex_model": _first_non_empty(
             doc.get("codex_model"),
             configured_model,

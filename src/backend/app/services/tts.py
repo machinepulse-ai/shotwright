@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -17,6 +18,8 @@ import httpx
 
 from app.config import settings
 from app.services.session_streams import publish_context_refresh
+
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(settings.upload_dir)
 EXPORT_DIR = Path(settings.export_dir)
@@ -569,16 +572,29 @@ def _publish_context_refresh_in_background(session_id: str, reason: str, **paylo
 
 
 def _load_asset_metadata(directory: Path, *, limit: int | None = None) -> list[dict]:
-    if not directory.exists():
+    try:
+        if not directory.exists():
+            return []
+        metadata_paths = sorted(
+            directory.glob(f"*{METADATA_SUFFIX}"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        logger.warning("Skipping unreadable TTS metadata directory %s: %s", directory, exc)
         return []
 
     entries: list[dict] = []
-    for metadata_path in sorted(directory.glob(f"*{METADATA_SUFFIX}"), key=lambda path: path.stat().st_mtime, reverse=True):
+    for metadata_path in metadata_paths:
         metadata = _read_metadata(metadata_path)
         if not metadata:
             continue
         file_path = Path(str(metadata.get("file_path") or ""))
-        if not file_path.exists():
+        try:
+            if not file_path.exists():
+                continue
+        except OSError as exc:
+            logger.warning("Skipping unreadable TTS asset %s: %s", file_path, exc)
             continue
         entries.append(metadata)
         if limit is not None and len(entries) >= limit:

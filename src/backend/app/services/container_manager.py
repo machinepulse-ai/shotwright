@@ -46,7 +46,12 @@ def _resolve_payload_mount_source() -> str | None:
 
 def _uses_preinstalled_runtime_image(image: str) -> bool:
     normalized = image.strip().lower()
-    return normalized.endswith(":runtime")
+    return (
+        normalized == "shotwright"
+        or normalized == "shotwright:latest"
+        or normalized.endswith(":runtime")
+        or normalized.endswith(":allinone")
+    )
 
 
 def _build_container_environment(image: str) -> dict[str, str]:

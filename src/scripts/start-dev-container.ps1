@@ -45,6 +45,43 @@ function Get-FrontendDependencyFingerprint {
     return ($hashes -join '|')
 }
 
+function Repair-DataVolumeAcl {
+    param(
+        [string[]]$Paths
+    )
+
+    if ($env:SHOTWRIGHT_REPAIR_VOLUME_ACL -and @('0', 'false', 'no', 'off') -contains $env:SHOTWRIGHT_REPAIR_VOLUME_ACL.Trim().ToLowerInvariant()) {
+        return
+    }
+
+    foreach ($path in $Paths) {
+        if (-not (Test-Path $path)) {
+            continue
+        }
+
+        Write-Host "[dev-container] Repairing data volume ACL: $path" -ForegroundColor DarkYellow
+        $repairTargets = @($path)
+        $children = Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($children) {
+            $repairTargets += @($children | ForEach-Object { $_.FullName })
+        }
+
+        foreach ($repairTarget in $repairTargets) {
+            & takeown.exe /F $repairTarget *> $null
+            & icacls.exe $repairTarget /inheritance:e /grant '*S-1-1-0:(OI)(CI)(F)' '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /C *> $null
+        }
+
+        if ($env:SHOTWRIGHT_REPAIR_VOLUME_ACL_RECURSIVE -and @('1', 'true', 'yes', 'on') -contains $env:SHOTWRIGHT_REPAIR_VOLUME_ACL_RECURSIVE.Trim().ToLowerInvariant()) {
+            & takeown.exe /F $path /R /D Y *> $null
+            & icacls.exe $path /inheritance:e /grant '*S-1-1-0:(OI)(CI)(F)' '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T /C *> $null
+        }
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[dev-container] Data volume ACL repair finished with warnings for $path" -ForegroundColor DarkYellow
+        }
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 $backendStdout = Join-Path $logRoot 'backend.stdout.log'
@@ -86,6 +123,16 @@ elseif (-not ($env:PYTHONPATH -split ';' | Where-Object { $_ -eq $backendRoot })
 if (-not $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS) {
     $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS = '12'
 }
+if (-not $env:SHOTWRIGHT_DEV_SERVER_WS_URL) {
+    $env:SHOTWRIGHT_DEV_SERVER_WS_URL = 'auto://0.0.0.0:0/ws'
+}
+
+Repair-DataVolumeAcl -Paths @(
+    'C:\data\uploads',
+    'C:\data\exports',
+    'C:\data\hls',
+    'C:\data\python'
+)
 
 $gracefulShutdownSeconds = $env:SHOTWRIGHT_DEV_GRACEFUL_SHUTDOWN_SECONDS
 $verifySkillsSsl = $true

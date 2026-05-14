@@ -41,6 +41,7 @@ class AgentSettingsUpdate(BaseModel):
     codex_bridge_script: str = ""
     codex_path_override: str = ""
     codex_base_url: str = ""
+    codex_disable_responses_websocket: bool = True
     codex_model: str = Field(default="gpt-5.4", min_length=1)
     codex_reasoning_effort: ReasoningEffort | None = "high"
     codex_turn_timeout_seconds: float = Field(default=900.0, gt=0)
@@ -72,6 +73,7 @@ class AdminSettings(BaseModel):
     codex_bridge_script: str = ""
     codex_path_override: str = ""
     codex_base_url: str = ""
+    codex_disable_responses_websocket: bool = True
     codex_model: str = "gpt-5.4"
     codex_reasoning_effort: ReasoningEffort | None = "high"
     codex_turn_timeout_seconds: float = 900.0

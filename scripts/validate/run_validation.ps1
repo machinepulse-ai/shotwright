@@ -22,7 +22,7 @@ $WorkspaceConfig = $ShotwrightConfig.workspace
 $ContainerPaths = $ShotwrightConfig.paths.windowsContainer
 
 if ([string]::IsNullOrWhiteSpace($ImageTag)) {
-    $ImageTag = 'shotwright:dev'
+    $ImageTag = 'shotwright:allinone'
 }
 if ([string]::IsNullOrWhiteSpace($ContainerName)) {
     $ContainerName = 'shotwright-validation'

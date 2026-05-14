@@ -111,19 +111,19 @@ flowchart LR
 ### Step 1 — Build the Docker image
 
 - What: Produce the all-in-one Windows worker image with Node.js, Python, ffmpeg, nexrender, and the selected After Effects install baked in.
-- Result: A local Docker image tagged `shotwright:runtime`.
+- Result: A local Docker image tagged `shotwright:allinone`.
 - Skip: This step is mandatory.
 
 ```powershell
-docker build -t shotwright:runtime .
+docker build --target shotwright -t shotwright:allinone .
 ```
 
-The Dockerfile now copies the published `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` payload into the runtime image and runs `install_after_effects_in_container.ps1` during image build. Worker containers created by the service can therefore start from the preinstalled `shotwright:runtime` image without a separate payload-mount workflow.
+The Dockerfile now copies the published `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` payload into the all-in-one image and runs `install_after_effects_in_container.ps1` during image build. Worker containers and the development service therefore start from the same preinstalled `shotwright:allinone` image without a separate payload-mount workflow.
 
 To disable the startup re-check explicitly:
 
 ```powershell
-docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:runtime .
+docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:allinone .
 ```
 
 <details>
@@ -136,7 +136,8 @@ docker build `
 	--build-arg https_proxy=$proxy `
 	--build-arg HTTP_PROXY=$proxy `
 	--build-arg HTTPS_PROXY=$proxy `
-	-t shotwright:runtime .
+	--target shotwright `
+	-t shotwright:allinone .
 ```
 
 </details>
@@ -148,7 +149,7 @@ docker build `
 - Skip: If you only care about installer-cache mode, jump to Step 3.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:runtime
+powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:allinone
 ```
 
 ### Step 3 — Run validation in installer-cache mode
@@ -197,7 +198,7 @@ Run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
-	-ImageTag shotwright:runtime `
+	-ImageTag shotwright:allinone `
 	-AfterEffectsPayloadRoot (Join-Path 'C:\data\payload' $setup.payload_dir_name) `
 	-CreativeCloudHelperRoot (Join-Path 'C:\data\payload' $setup.helper_dir_name)
 ```
@@ -259,8 +260,8 @@ python .\scripts\skills\publish_skills_release.py
 
 ## 📝 Design Notes
 
-- The default worker image is `shotwright:runtime`, which copies the published GHCR setup payload into the image and installs the `setup-versions.yml` selection during image build.
-- Validation can still exercise host-mount and installer-cache flows explicitly, but service-created worker containers now default to the preinstalled runtime image.
+- The default worker image is `shotwright:allinone`, which copies the published GHCR setup payload into the image, installs the `setup-versions.yml` selection during image build, and includes the backend/frontend development toolchain.
+- Validation can still exercise host-mount and installer-cache flows explicitly, but service-created worker containers and the development service now default to the same preinstalled image.
 - Container startup still runs `scripts/runtime_entrypoint.ps1`. When `aerender.exe` is already present, the shared installer path returns immediately.
 - Validation JSX is patch-only by design. nexrender owns render execution and output routing.
 - The validation job uses `outputExt: mp4` plus `@nexrender/action-copy` so the smoke test ends with a single predictable video artifact.

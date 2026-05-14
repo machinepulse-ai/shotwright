@@ -74,7 +74,7 @@ RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:P
 FROM ${AE_SETUP_IMAGE} AS after-effects-setup
 
 # =============================================================================
-# Stage: shotwright — all-in-one AE runtime container (default target)
+# Stage: shotwright — all-in-one app + AE runtime container (default target)
 # =============================================================================
 FROM base AS shotwright
 
@@ -93,14 +93,44 @@ RUN & 'C:/Program Files/nodejs/npm.cmd' install -g \
       @nexrender/cli@1.63.3
 
 WORKDIR C:/workspace
+COPY AGENTS.md C:/workspace/AGENTS.md
 COPY keepalive.ps1 C:/workspace/keepalive.ps1
 COPY shotwright-config.json C:/workspace/shotwright-config.json
 COPY setup-versions.yml C:/workspace/setup-versions.yml
-COPY scripts/ C:/workspace/scripts/
+COPY scripts/install/install_after_effects_in_container.ps1 C:/workspace/scripts/install/install_after_effects_in_container.ps1
+COPY scripts/install/modify_setup_win.py C:/workspace/scripts/install/modify_setup_win.py
+COPY scripts/install/setup_versions.py C:/workspace/scripts/install/setup_versions.py
 COPY validation-data/templates/validation_motion.aep C:/workspace/validation-data/templates/validation_motion.aep
 COPY --from=after-effects-setup C:/payload C:/data/payload
 
 RUN & 'C:/workspace/scripts/install/install_after_effects_in_container.ps1' -RequirePayload
+
+COPY scripts/ C:/workspace/scripts/
+RUN & 'C:/workspace/scripts/install/install_open_fonts.ps1'
+
+COPY src/backend/pyproject.toml src/backend/.python-version C:/workspace/src/backend/
+RUN & python -m pip install --no-cache-dir --quiet --retries 10 --timeout $env:PIP_DEFAULT_TIMEOUT uv; \
+      & python C:/workspace/scripts/install/install_pyproject_dependencies.py C:/workspace/src/backend/pyproject.toml --index-url $env:PIP_INDEX_URL
+
+COPY src/backend/requirements-aigc.txt C:/workspace/src/backend/requirements-aigc.txt
+COPY src/backend/codex-bridge/package.json src/backend/codex-bridge/package-lock.json C:/workspace/src/backend/codex-bridge/
+RUN Set-Location C:/workspace/src/backend/codex-bridge; \
+      & 'C:/Program Files/nodejs/npm.cmd' ci --omit=dev --no-progress --fetch-retries 5 --fetch-timeout 120000
+
+COPY src/frontend/package.json src/frontend/package-lock.json C:/workspace/src/frontend/
+RUN Set-Location C:/workspace/src/frontend; \
+      & 'C:/Program Files/nodejs/npm.cmd' ci --no-progress --fetch-retries 5 --fetch-timeout 120000
+
+COPY src/backend/app/ C:/workspace/src/backend/app/
+COPY src/backend/codex-bridge/ C:/workspace/src/backend/codex-bridge/
+COPY src/frontend/ C:/workspace/src/frontend/
+COPY src/scripts/ C:/workspace/src/scripts/
+
+ENV SHOTWRIGHT_PYTHON_TOOL_AUTO_SYNC_DEPENDENCIES=true \
+      SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR=C:/data/python \
+      SHOTWRIGHT_PYTHON_TOOL_REQUIREMENTS=C:/workspace/src/backend/requirements-aigc.txt
+
+EXPOSE 3000 8000
 
 CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:/workspace/scripts/runtime_entrypoint.ps1"]
 

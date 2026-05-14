@@ -50,6 +50,95 @@ _SENSITIVE_ENV_NAMES = (
     "ELEVENLABS_API_KEY",
     "ANTHROPIC_API_KEY",
 )
+_PYTHON_REQUIREMENT_IMPORT_NAMES = {
+    "edge-tts": "edge_tts",
+    "faster-whisper": "faster_whisper",
+    "imageio-ffmpeg": "imageio_ffmpeg",
+    "opencv-contrib-python": "cv2",
+    "opencv-contrib-python-headless": "cv2",
+    "opencv-python": "cv2",
+    "opencv-python-headless": "cv2",
+    "openai-whisper": "whisper",
+    "pillow": "PIL",
+    "python-dotenv": "dotenv",
+    "pyyaml": "yaml",
+    "scikit-image": "skimage",
+    "scikit-learn": "sklearn",
+}
+_PYTHON_REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
+SHOTWRIGHT_RECOMMENDED_FONTS = {
+    "default_chinese_caption": {
+        "postscript_names": [
+            "NotoSansSC-Bold",
+            "NotoSansSC-Medium",
+            "NotoSansSC-Regular",
+            "MicrosoftYaHei-Bold",
+            "MicrosoftYaHeiUI-Bold",
+            "SimHei",
+            "SimSun",
+        ],
+        "notes": "Use for Simplified Chinese subtitles and body text. Prefer PostScript names, not UI display names.",
+    },
+    "cute_handwritten_chinese": {
+        "postscript_names": [
+            "LXGWWenKai-Medium",
+            "LXGWWenKai-Regular",
+            "NotoSansSC-Bold",
+        ],
+        "notes": "Use for cute pet stickers, friendly captions, and informal Chinese labels.",
+    },
+    "serif_chinese_title": {
+        "postscript_names": [
+            "NotoSerifSC-Bold",
+            "NotoSerifSC-Medium",
+            "NotoSerifSC-Regular",
+            "SimSun",
+        ],
+        "notes": "Use for editorial title cards or premium Chinese title treatment.",
+    },
+    "avoid_for_chinese": [
+        "MS-Gothic",
+        "MSGothic",
+        "YuGothic",
+    ],
+    "license": "Bundled recommended families are SIL Open Font License 1.1 fonts installed by scripts/install/install_open_fonts.ps1.",
+}
+SHOTWRIGHT_CREATIVE_QUALITY_POLICY = {
+    "intent_before_execution": [
+        "Choose an audience, emotion, story beat, and visual idea before writing JSX; the style should explain the content, not decorate it generically.",
+        "For reference-driven work, let the source footage decide rhythm, framing, and text placement before adding effects.",
+        "Name the creative reason for each major visual system: typography, motion, color, transitions, stickers, cards, or sound cues.",
+    ],
+    "avoid_low_effort_success": [
+        "A render that is technically valid but visually plain, muddy, generic, or hard to read is not finished.",
+        "Do not satisfy broad style words by scattering random transitions, stickers, or text effects; each element must support the story beat.",
+        "Do not use stale QA, placeholder comps, or whole-frame pixel ratios as proof of creative quality.",
+    ],
+    "storyboard_self_review": [
+        "After rendering, inspect full-frame and focused storyboards and identify the weakest frame before finalizing.",
+        "Ask whether the result has a clear first impression on a phone-sized screen, a coherent visual hierarchy, readable text, and at least one deliberate memorable moment.",
+        "If the storyboard only proves that nothing is broken, revise the design instead of finalizing.",
+    ],
+}
+
+SHOTWRIGHT_SUBTITLE_STYLE_POLICY = {
+    "principles": [
+        "Do not force a universal subtitle look; choose typography, backing, contrast, and motion from the current art direction and footage.",
+        "Subtitle design is part of the creative idea. It should feel intentional in the storyboard, not merely pass a readability checklist.",
+        "Dense or busy footage needs an explicit separation strategy, but the strategy can be any style that fits the piece.",
+    ],
+    "quality_risks": [
+        "Heavy dark strokes or shadows that become the visible style instead of a readability aid.",
+        "Text placed directly over busy footage without a deliberate contrast or layout reason.",
+        "Style labels such as cute, premium, TVC, or Douyin that are claimed in the response but not visible in storyboard frames.",
+        "Repeating a black-dominant caption treatment after the user rejects black subtitles.",
+    ],
+    "qa_checks": [
+        "Inspect actual text layer fill, stroke, shadow, and backing-shape colors in JSX or AE properties before rendering.",
+        "Review cropped subtitle-zone storyboard frames at a large enough size; do not rely on whole-frame black-pixel ratios.",
+        "If captions are technically legible but visually weak, muddy, generic, or disconnected from the footage, revise before finalizing.",
+    ],
+}
 
 
 def _tool_success(payload: dict, session_log: str) -> ToolResult:
@@ -210,6 +299,80 @@ def _hash_python_tool_requirements(requirements_paths: list[Path]) -> str:
     return digest.hexdigest()
 
 
+def _parse_python_requirement_imports(requirements_paths: list[Path]) -> list[str]:
+    imports: set[str] = set()
+    for requirements_path in requirements_paths:
+        try:
+            lines = requirements_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for raw_line in lines:
+            line = raw_line.split("#", 1)[0].strip()
+            if not line or line.startswith("-") or "://" in line:
+                continue
+            line = line.split(";", 1)[0].strip()
+            match = _PYTHON_REQUIREMENT_NAME_RE.match(line)
+            if not match:
+                continue
+            package_name = match.group(1).lower().replace("_", "-")
+            module_name = _PYTHON_REQUIREMENT_IMPORT_NAMES.get(package_name, package_name.replace("-", "_"))
+            if module_name:
+                imports.add(module_name)
+    return sorted(imports)
+
+
+def _probe_python_tool_imports(
+    python_path: Path,
+    required_imports: list[str],
+    *,
+    timeout_seconds: int,
+) -> tuple[bool, list[str], str]:
+    if not required_imports:
+        return True, [], ""
+
+    probe_script = (
+        "import importlib, json, sys\n"
+        f"mods = {json.dumps(required_imports, ensure_ascii=True)}\n"
+        "missing = []\n"
+        "for mod in mods:\n"
+        "    try:\n"
+        "        importlib.import_module(mod)\n"
+        "    except Exception as exc:\n"
+        "        missing.append({'module': mod, 'error': exc.__class__.__name__ + ': ' + str(exc)[:160]})\n"
+        "print(json.dumps({'missing': missing}, ensure_ascii=False))\n"
+        "sys.exit(1 if missing else 0)\n"
+    )
+    try:
+        completed = _run_python_runtime_command(
+            [str(python_path), "-c", probe_script],
+            timeout_seconds=max(15, min(timeout_seconds, 120)),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, required_imports, str(exc)
+
+    output = (completed.stdout or completed.stderr or "").strip()
+    missing_modules: list[str] = []
+    for line in reversed([item.strip() for item in output.splitlines() if item.strip()]):
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        raw_missing = parsed.get("missing") if isinstance(parsed, dict) else None
+        if isinstance(raw_missing, list):
+            for item in raw_missing:
+                if isinstance(item, dict) and str(item.get("module") or "").strip():
+                    missing_modules.append(str(item["module"]))
+                elif isinstance(item, str) and item.strip():
+                    missing_modules.append(item.strip())
+            break
+
+    if completed.returncode == 0 and not missing_modules:
+        return True, [], output
+    if not missing_modules:
+        missing_modules = required_imports
+    return False, sorted(set(missing_modules)), output
+
+
 def _read_python_tool_state(state_path: Path) -> dict:
     try:
         return json.loads(state_path.read_text(encoding="utf-8"))
@@ -315,7 +478,35 @@ def _sync_python_tool_runtime() -> tuple[Path, dict, dict[str, str], str | None]
             return Path(sys.executable), runtime, {}, f"Could not create Python tool venv: {output}"
 
     state = _read_python_tool_state(state_path)
-    if state.get("requirements_fingerprint") != fingerprint:
+    required_imports = _parse_python_requirement_imports(requirements_paths)
+    runtime["required_imports"] = required_imports
+    runtime["import_probe"] = {
+        "checked": False,
+        "ok": None,
+        "missing_imports": [],
+    }
+
+    should_install = state.get("requirements_fingerprint") != fingerprint
+    if not should_install:
+        probe_ok, missing_imports, probe_output = _probe_python_tool_imports(
+            venv_python,
+            required_imports,
+            timeout_seconds=sync_timeout_seconds,
+        )
+        runtime["import_probe"] = {
+            "checked": True,
+            "ok": probe_ok,
+            "missing_imports": missing_imports,
+        }
+        if not probe_ok:
+            should_install = True
+            runtime["repair_reason"] = (
+                "missing_imports:" + ",".join(missing_imports)
+                if missing_imports
+                else _truncate_text(_redact_sensitive_text(probe_output), 1000)
+            )
+
+    if should_install:
         pip_env = os.environ.copy()
         pip_env.update(
             {
@@ -349,13 +540,35 @@ def _sync_python_tool_runtime() -> tuple[Path, dict, dict[str, str], str | None]
             output = _truncate_text(_redact_sensitive_text((completed.stderr or completed.stdout or "").strip()), 4000)
             return venv_python, runtime, _build_python_tool_runtime_env_patch(runtime), f"Could not sync Python packages: {output}"
 
+        probe_ok, missing_imports, probe_output = _probe_python_tool_imports(
+            venv_python,
+            required_imports,
+            timeout_seconds=sync_timeout_seconds,
+        )
+        runtime["import_probe"] = {
+            "checked": True,
+            "ok": probe_ok,
+            "missing_imports": missing_imports,
+        }
+        if not probe_ok:
+            output = _truncate_text(_redact_sensitive_text(probe_output), 2000)
+            missing = ", ".join(missing_imports) if missing_imports else "unknown modules"
+            return (
+                venv_python,
+                runtime,
+                _build_python_tool_runtime_env_patch(runtime),
+                f"Python runtime dependencies are still missing after sync: {missing}. {output}",
+            )
+
         runtime["synced"] = True
         _write_python_tool_state(
             state_path,
             {
                 "requirements_fingerprint": fingerprint,
                 "requirements_paths": [str(path) for path in requirements_paths],
+                "required_imports": required_imports,
                 "python_executable": str(venv_python),
+                "import_probe_ok": True,
                 "synced_at": datetime.now(timezone.utc),
             },
         )
@@ -1076,6 +1289,9 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             "reference_videos": rm.list_reference_videos(app_session_id, limit=8),
             "storyboards": rm.list_storyboards(app_session_id, limit=8),
             "tts_audio": tts_media.list_tts_audio(app_session_id, limit=8),
+            "recommended_fonts": SHOTWRIGHT_RECOMMENDED_FONTS,
+            "creative_quality_policy": SHOTWRIGHT_CREATIVE_QUALITY_POLICY,
+            "subtitle_style_policy": SHOTWRIGHT_SUBTITLE_STYLE_POLICY,
         }
         return _tool_success(payload, "Loaded Shotwright workspace state")
 
@@ -2221,7 +2437,18 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             name="run_after_effects_jsx",
             description=(
                 "Execute a JSX script inside the active After Effects container. When a project_id or active project exists, "
-                "the script can use SHOTWRIGHT_PROJECT_ROOT and SHOTWRIGHT_PROJECT_FILE to save updates back into the managed workspace."
+                "the script can use SHOTWRIGHT_PROJECT_ROOT and SHOTWRIGHT_PROJECT_FILE to save updates back into the managed workspace. "
+                "For captions, subtitles, title cards, lower thirds, CJK, and any multi-line copy, create paragraph text with "
+                "comp.layers.addBoxText([width, height]); never use point text for sentence text and never assign TextDocument.boxText. "
+                "After setting Source Text, call sourceRectAtTime(0, false), set Anchor Point to the true rendered center "
+                "[rect.left + rect.width / 2, rect.top + rect.height / 2], then set Position to the intended visual center. "
+                "For Chinese text, use verified PostScript font names from inspect_workspace.recommended_fonts or app.fonts.allFonts. "
+                "Prefer NotoSansSC-Bold/Medium/Regular for readable captions, LXGWWenKai-Medium/Regular for cute sticker text, "
+                "and NotoSerifSC-Bold/Medium for title cards. Do not use MS-Gothic or YuGothic for Chinese, and verify "
+                "textProp.value.font after setting the TextDocument. For creative subtitle, title, sticker, and lower-third design, "
+                "follow inspect_workspace.creative_quality_policy and inspect_workspace.subtitle_style_policy: choose a deliberate "
+                "art direction that fits the footage and story, then verify the storyboard shows that intent. Do not treat the policy "
+                "as a fixed style recipe or finalize a render that is merely technically valid but visually weak."
             ),
             handler=run_after_effects_jsx,
             parameters={
@@ -2252,7 +2479,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             name="render_after_effects_project",
             description=(
                 "Render a managed or uploaded After Effects project through nexrender-cli and prepare an HLS preview. "
-                "When patch_script is provided, Shotwright first persists that JSX into the managed project so later exports match the preview."
+                "When patch_script is provided, Shotwright first persists that JSX into the managed project so later exports match the preview. "
+                "After a successful render, the agent should call generate_storyboard_from_reference_video on the rendered mp4, "
+                "review the storyboard for creative intent, pacing, framing, text safety, hierarchy, weak frames, and missing glyphs, "
+                "then revise or finalize."
             ),
             handler=render_after_effects_project,
             parameters={

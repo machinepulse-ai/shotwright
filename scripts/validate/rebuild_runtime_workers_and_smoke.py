@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKER_BASE_URL = "npipe:////./pipe/docker_engine"
 API_BASE_URL = os.environ.get("SHOTWRIGHT_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 DEV_CONTAINER_NAME = os.environ.get("SHOTWRIGHT_DEV_CONTAINER", "shotwright-dev")
-RUNTIME_IMAGE = os.environ.get("SHOTWRIGHT_RUNTIME_IMAGE", "shotwright:runtime")
+RUNTIME_IMAGE = os.environ.get("SHOTWRIGHT_RUNTIME_IMAGE", "shotwright:allinone")
 
 
 def log(message: str) -> None:
@@ -68,7 +68,7 @@ def stream_runtime_build(client: docker.APIClient) -> None:
         "--tag",
         RUNTIME_IMAGE,
         "--target",
-        "final",
+        "shotwright",
     ]
     for key, value in build_args.items():
         command.extend(["--build-arg", f"{key}={value}"])

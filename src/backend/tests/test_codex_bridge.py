@@ -121,3 +121,16 @@ def test_build_codex_input_uses_local_images_for_persisted_attachments() -> None
         {"type": "text", "text": "describe this"},
         {"type": "local_image", "path": "C:/data/uploads/session/reference.png"},
     ]
+
+
+def test_codex_bridge_request_disables_responses_websocket_for_custom_base_url() -> None:
+    client = module.CodexBridgeClient(
+        api_key="test-key",
+        base_url="http://codex.internal.test/v1",
+        disable_responses_websocket=True,
+    )
+
+    request = client.build_request(input="hello")
+
+    assert request["base_url"] == "http://codex.internal.test/v1"
+    assert request["disable_responses_websocket"] is True

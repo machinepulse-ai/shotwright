@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # --- Docker ---
     docker_host: str = "npipe:////./pipe/docker_engine"
-    shotwright_image: str = "shotwright:runtime"
+    shotwright_image: str = "shotwright:allinone"
     container_isolation: str = "process"
     container_network: str = ""
     container_data_root: str = "C:\\data"
@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     codex_path_override: str = ""
     codex_runtime_home: str = ""
     codex_base_url: str = ""
+    codex_disable_responses_websocket: bool = True
     codex_model: str = "gpt-5.4"
     codex_reasoning_effort: str = "high"
     codex_turn_timeout_seconds: float = 900.0

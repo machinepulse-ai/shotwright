@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
-import Hls from "hls.js";
 import { useI18n } from "../../i18n";
-import { playMediaElement, resetMediaElement } from "../../utils/media";
+import { bindVideoSource } from "../../utils/media";
 import "./VideoPlayer.css";
 
 interface VideoPlayerProps {
@@ -21,37 +20,7 @@ export default function VideoPlayer({ src, format, downloadUrl, assetName, proje
     const video = videoRef.current;
     if (!video || !src) return;
 
-    resetMediaElement(video);
-
-    if (format === "mp4") {
-      video.src = src;
-      video.load();
-      return () => resetMediaElement(video);
-    }
-
-    if (Hls.isSupported()) {
-      const hls = new Hls();
-      const handleManifestParsed = () => playMediaElement(video);
-      hls.loadSource(src);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, handleManifestParsed);
-      return () => {
-        hls.off(Hls.Events.MANIFEST_PARSED, handleManifestParsed);
-        hls.destroy();
-        resetMediaElement(video);
-      };
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      // Safari native HLS
-      const handleLoadedMetadata = () => playMediaElement(video);
-      video.src = src;
-      video.addEventListener("loadedmetadata", handleLoadedMetadata);
-      return () => {
-        video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-        resetMediaElement(video);
-      };
-    }
-
-    return () => resetMediaElement(video);
+    return bindVideoSource(video, src, format, { autoplay: true });
   }, [format, src]);
 
   return (

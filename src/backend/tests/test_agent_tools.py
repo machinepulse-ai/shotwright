@@ -246,6 +246,15 @@ async def test_inspect_workspace_serializes_recent_image_attachment_datetimes(
 
     payload = json.loads(result.text_result_for_llm)
     assert payload['recent_image_attachments'][0]['created_at'] == attachment_time.isoformat()
+    assert 'NotoSansSC-Bold' in payload['recommended_fonts']['default_chinese_caption']['postscript_names']
+    assert 'MS-Gothic' in payload['recommended_fonts']['avoid_for_chinese']
+    assert 'creative_quality_policy' in payload
+    assert 'technically valid but visually plain' in payload['creative_quality_policy']['avoid_low_effort_success'][0]
+    assert 'Do not force a universal subtitle look' in payload['subtitle_style_policy']['principles'][0]
+    run_jsx_tool = tools['run_after_effects_jsx']
+    assert 'creative_quality_policy' in run_jsx_tool.description
+    assert 'subtitle_style_policy' in run_jsx_tool.description
+    assert 'merely technically valid but visually weak' in run_jsx_tool.description
 
 
 @pytest.mark.asyncio
@@ -417,13 +426,64 @@ async def test_python_tool_runtime_syncs_requirements_once(
 
     assert second_error is None
     assert second_runtime['synced'] is False
-    assert calls == []
+    assert not any(command[:3] == [sys.executable, '-m', 'venv'] for command in calls)
+    assert not any('-r' in command and str(requirements_path) in command for command in calls)
 
     requirements_path.write_text('requests==2.32.1\n', encoding='utf-8')
     _python_path, third_runtime, _env_patch, third_error = await module._ensure_python_tool_runtime()
 
     assert third_error is None
     assert third_runtime['synced'] is True
+    assert any('-r' in command and str(requirements_path) in command for command in calls)
+
+
+@pytest.mark.asyncio
+async def test_python_tool_runtime_repairs_matching_fingerprint_when_import_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / 'python-runtime'
+    venv_dir = runtime_dir / 'aigc-venv'
+    requirements_path = tmp_path / 'requirements-aigc.txt'
+    requirements_path.write_text('pillow==11.3.0\nopencv-python==4.13.0.92\n', encoding='utf-8')
+    python_path = venv_dir / ('Scripts' if module.os.name == 'nt' else 'bin') / (
+        'python.exe' if module.os.name == 'nt' else 'python'
+    )
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text('', encoding='utf-8')
+
+    monkeypatch.setattr(module.settings, 'python_tool_auto_sync_dependencies', True)
+    monkeypatch.setattr(module.settings, 'python_tool_runtime_dir', str(runtime_dir))
+    monkeypatch.setattr(module.settings, 'python_tool_venv_dir', str(venv_dir))
+    monkeypatch.setattr(module.settings, 'python_tool_requirements', str(requirements_path))
+    monkeypatch.setattr(module.settings, 'python_tool_pip_cache_dir', '')
+    monkeypatch.setattr(module.settings, 'python_tool_system_site_packages', True)
+    monkeypatch.setattr(module.settings, 'python_tool_dependency_sync_timeout_seconds', 60)
+
+    fingerprint = module._hash_python_tool_requirements([requirements_path])
+    state_path = module._python_tool_state_path(venv_dir)
+    state_path.write_text(json.dumps({'requirements_fingerprint': fingerprint}), encoding='utf-8')
+
+    calls: list[list[str]] = []
+    probe_count = 0
+
+    def fake_run(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        nonlocal probe_count
+        calls.append(command)
+        if command[:2] == [str(python_path), '-c']:
+            probe_count += 1
+            if probe_count == 1:
+                return subprocess.CompletedProcess(command, 1, '{"missing":[{"module":"PIL"},{"module":"cv2"}]}', '')
+            return subprocess.CompletedProcess(command, 0, '{"missing":[]}', '')
+        return subprocess.CompletedProcess(command, 0, '', '')
+
+    monkeypatch.setattr(module, '_run_python_runtime_command', fake_run)
+
+    _python_path, runtime, _env_patch, error = await module._ensure_python_tool_runtime()
+
+    assert error is None
+    assert runtime['synced'] is True
+    assert runtime['import_probe']['ok'] is True
     assert any('-r' in command and str(requirements_path) in command for command in calls)
 
 

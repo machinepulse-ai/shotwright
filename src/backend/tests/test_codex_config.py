@@ -40,6 +40,7 @@ wire_api = "responses"
     assert runtime_settings["codex_model"] == "gpt-5.5"
     assert runtime_settings["codex_reasoning_effort"] == "xhigh"
     assert runtime_settings["codex_base_url"] == "http://codex.internal.test/v1"
+    assert runtime_settings["codex_disable_responses_websocket"] is True
     assert codex_config.resolve_openai_api_key({}) == "secret-key"
 
 

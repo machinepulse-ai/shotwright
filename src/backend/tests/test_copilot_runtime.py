@@ -91,6 +91,9 @@ def test_system_prompt_warns_against_duplicate_project_recovery() -> None:
     assert "keep using that same managed workspace" in prompt
     assert "do not switch into repository inspection" in prompt
     assert "treat it as the default target for later creative turns" in prompt
+    assert "inspect_workspace.creative_quality_policy" in prompt
+    assert "inspect_workspace.subtitle_style_policy" in prompt
+    assert "merely technically valid but visually weak" in prompt
 
 
 class FakeFindOneCollection:

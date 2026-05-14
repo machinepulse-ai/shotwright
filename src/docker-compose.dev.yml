@@ -2,8 +2,8 @@
 # Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 #
 # Enables:
-#   - Single dev container based on shotwright:runtime
-#   - After Effects 26.2 preinstalled in the runtime base image
+#   - Single dev container based on the all-in-one Shotwright image
+#   - After Effects 26.2 preinstalled in the same image used by agent workers
 #   - Backend hot reload via uvicorn --reload with source mount
 #   - Frontend webpack-dev-server with HMR via source mount
 
@@ -19,12 +19,12 @@ services:
     profiles: ["split-services"]
 
   dev:
-    image: shotwright-dev:latest
+    image: shotwright:allinone
     build:
       context: ..
-      dockerfile: src/Dockerfile.dev
+      dockerfile: Dockerfile
+      target: shotwright
       args:
-        DEV_BASE_IMAGE: ${SHOTWRIGHT_DEV_BASE_IMAGE:-shotwright:runtime}
         http_proxy: ${http_proxy:-}
         https_proxy: ${https_proxy:-}
         HTTP_PROXY: ${HTTP_PROXY:-}
@@ -34,6 +34,13 @@ services:
         PIP_DEFAULT_TIMEOUT: ${PIP_DEFAULT_TIMEOUT:-120}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     container_name: shotwright-dev
+    command:
+      - powershell
+      - -NoProfile
+      - -ExecutionPolicy
+      - Bypass
+      - -File
+      - C:/workspace/src/scripts/start-dev-container.ps1
     isolation: process
     restart: unless-stopped
     depends_on:
@@ -55,7 +62,7 @@ services:
       SHOTWRIGHT_CODEX_REASONING_EFFORT: ${SHOTWRIGHT_CODEX_REASONING_EFFORT:-high}
       SHOTWRIGHT_CODEX_TURN_TIMEOUT_SECONDS: ${SHOTWRIGHT_CODEX_TURN_TIMEOUT_SECONDS:-900}
       SHOTWRIGHT_DOCKER_HOST: npipe:////./pipe/docker_engine
-      SHOTWRIGHT_SHOTWRIGHT_IMAGE: ${SHOTWRIGHT_SHOTWRIGHT_IMAGE:-shotwright:runtime}
+      SHOTWRIGHT_SHOTWRIGHT_IMAGE: ${SHOTWRIGHT_SHOTWRIGHT_IMAGE:-shotwright:allinone}
       SHOTWRIGHT_CONTAINER_ISOLATION: ${SHOTWRIGHT_CONTAINER_ISOLATION:-process}
       SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_AUTO_DETECT: "false"
       SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE: ${SHOTWRIGHT_CONTAINER_PAYLOAD_MOUNT_SOURCE:-}
@@ -74,6 +81,7 @@ services:
       - ../scripts:C:/workspace/scripts
       - ../validation-data:C:/workspace/validation-data
       - ./backend/app:C:/workspace/src/backend/app
+      - ./backend/codex-bridge/bridge.mjs:C:/workspace/src/backend/codex-bridge/bridge.mjs
       - ./backend:C:/workspace/src/backend-config:ro
       - ./frontend:C:/workspace/src/frontend
       - frontend-node-modules:C:/workspace/src/frontend/node_modules

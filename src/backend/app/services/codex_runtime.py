@@ -24,6 +24,7 @@ from app.database import (
 )
 from app.models.session import ReasoningEffort
 from app.services import nexrender as nr
+from app.services import reference_media as rm
 from app.services.agent_model_metadata import build_agent_model_metadata
 from app.services.codex_bridge import CodexBridgeClient, CodexBridgeError, build_codex_input
 from app.services.codex_config import (
@@ -50,6 +51,7 @@ from app.services.session_streams import (
     publish_session_updated,
     publish_timeline_event,
 )
+from app.services.session_titles import maybe_auto_title_session
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +63,11 @@ _CODEX_TOOL_COMMAND_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _SHELL_ARG_RE_TEMPLATE = r"--{name}(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))"
-_DIRECT_TOOL_MAX_STEPS = 18
+_DIRECT_TOOL_MAX_STEPS = 26
+_DIRECT_TOOL_THREAD_RECOVERY_RETRIES = 2
+_MANGLED_CJK_RANGE_TEXT_RE = re.compile(r"\\x04e00-\\x09fff")
+_MANGLED_CJK_RANGE_RE = re.compile(r"\x04e00-\x09fff")
+_JSON_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f]")
 _DIRECT_TOOL_PLAN_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -107,6 +113,8 @@ class _CodexTurnState:
         self.turn_id = turn_id
         self.content = ""
         self.version = 0
+        self.direct_final_response = ""
+        self.latest_thread_id: str | None = None
         self.tool_items_started: set[str] = set()
         self.tool_items_completed: set[str] = set()
         self.tool_item_started_at: dict[str, float] = {}
@@ -465,7 +473,13 @@ class ShotwrightCodexRuntimeManager:
                 "- For user-supplied reference videos, prefer inspect_workspace, then generate_storyboard_from_reference_video before creating the AEP composition.",
                 "- For narration, voiceover, or spoken guide tracks, use generate_tts_audio first, then import the returned project_audio_path into After Effects and align the audio layer with the composition timing.",
                 "- Use run_python_code for CPU-only media analysis, synthetic asset generation, audio/video preprocessing, Whisper-style speech analysis, ONNX/InsightFace helpers, and data-driven AE inputs before writing complex JSX.",
-                "- In After Effects JSX, create captions, subtitles, title cards, and dense CJK text with comp.layers.addBoxText(); never assign TextDocument.boxText because it is read-only, and center rendered bounds with sourceRectAtTime().",
+                "- In After Effects JSX, create captions, subtitles, title cards, and dense CJK text with comp.layers.addBoxText(); never assign TextDocument.boxText because it is read-only. After setting Source Text, read sourceRectAtTime(0, false), set Anchor Point to [rect.left + rect.width / 2, rect.top + rect.height / 2], and only then position the layer at the intended visual center.",
+                "- For Chinese text in After Effects, never set fonts by UI display names like Microsoft YaHei. Use verified PostScript names from inspect_workspace.recommended_fonts or app.fonts.allFonts. Prefer NotoSansSC-Bold/Medium/Regular for readable subtitles, LXGWWenKai-Medium/Regular for cute pet sticker text, and NotoSerifSC-Bold/Medium for title cards. Do not use MS-Gothic/YuGothic for Chinese.",
+                "- After setting a TextDocument font, verify textProp.value.font is the intended PostScript name; if AE falls back, immediately switch to the next recommended font before rendering.",
+                "- For creative subtitle, title, sticker, transition, and motion design, follow inspect_workspace.creative_quality_policy and inspect_workspace.subtitle_style_policy. These are not fixed style recipes: infer an art direction from the user's goal and source media, then make typography, color, motion, and layout serve that idea.",
+                "- Build the first render to a production-facing quality bar: clear creative intent, strong composition, deliberate typography, varied motion rhythm, coherent color and lighting, no generic one-note templates, no random transition spam, no oversized text that can clip or miss glyphs, and no result that is merely technically valid but visually weak.",
+                "- For TVC, social video, narration, lyric, subtitle, or reference-driven edits, use run_python_code or generate_storyboard_from_reference_video to inspect media timing before JSX when that improves alignment.",
+                "- After every successful render_after_effects_project call, generate a storyboard from that rendered mp4 and review creative intent, pacing, framing, text safety, visual hierarchy, missing glyphs, subtitle-zone readability, the weakest frame, and obvious quality issues before finalizing. Do not rely only on whole-frame pixel ratios or absence of errors; if the storyboard only proves that nothing is broken, revise JSX and render again.",
                 "- Once a session already has an active project, treat it as the default target for follow-up edits and renders.",
                 "- Use run_after_effects_jsx only for creative edits that are not already covered by the higher-level Shotwright tools.",
                 "- If run_after_effects_jsx fails after a project was created, fix the JSX and retry against the same project_id; do not create a replacement workspace unless the project tool reports that the workspace is unrecoverable.",
@@ -473,7 +487,7 @@ class ShotwrightCodexRuntimeManager:
                 "- In After Effects JSX, do not call setValue() on animated properties that may already have keyframes; remove existing keys first or use setValueAtTime()/setValueAtKey().",
                 "- For normal Shotwright creative work, do not use arbitrary shell commands unless the user explicitly asks for repository/debug work or every relevant Shotwright tool has failed.",
                 "- Do not override the container image unless the user explicitly asks for a different image.",
-                "- When rendering succeeds, mention the preview stream and export archive when relevant.",
+                "- When rendering succeeds, format asset lines separately so Shotwright can render cards: 成片: `file.mp4`, 预览流: `/api/streams/.../index.m3u8`, 分镜图: `storyboard.jpg`, 工程归档: `/api/projects/.../archive`.",
             ]
         )
 
@@ -544,6 +558,7 @@ class ShotwrightCodexRuntimeManager:
                 "- In this Shotwright web runtime, do not call shell_command yourself. Return structured Shotwright tool calls; the backend executes them directly and sends you the JSON result.",
                 "- Return one tool call at a time. After each tool result, decide the next tool call or final response.",
                 "- For any request to create or render After Effects content, use Shotwright tools before finalizing. Usually call ensure_after_effects_container, create_after_effects_project or create_empty_after_effects_project, then render_after_effects_project, and export_project_archive when useful.",
+                "- After a render_after_effects_project success, call generate_storyboard_from_reference_video on that render output and review the storyboard for both correctness and creative quality before final. Do not final immediately after render.",
                 "- List tools:",
                 f"  {base_command} --list",
                 "- Run a tool:",
@@ -627,6 +642,7 @@ class ShotwrightCodexRuntimeManager:
             bridge_script=bridge_script or None,
             api_key=api_key,
             base_url=str(runtime_settings.get("codex_base_url") or ""),
+            disable_responses_websocket=bool(runtime_settings.get("codex_disable_responses_websocket")),
             codex_path_override=str(runtime_settings.get("codex_path_override") or ""),
             extra_env={
                 "CODEX_HOME": codex_runtime_home,
@@ -643,6 +659,7 @@ class ShotwrightCodexRuntimeManager:
                 "- You must respond only with JSON matching the provided schema.",
                 "- Use action=tool_call when a Shotwright backend operation is needed.",
                 "- Use action=final only after the requested creative work is complete or no tool is needed.",
+                "- If render_after_effects_project succeeded during this turn, action=final is allowed only after generate_storyboard_from_reference_video has also succeeded for that rendered output and you have reviewed whether to revise for correctness and creative quality.",
                 "- Never call shell_command, never ask to run codex_tool_runner.py, and never claim a render/export exists until a tool result confirms it.",
                 "- For tool_call, set tool_name to exactly one available Shotwright tool and arguments_json to a JSON object string for that tool.",
                 "- For final, set tool_name to an empty string, arguments_json to {}, and response to the user-facing answer.",
@@ -667,13 +684,42 @@ class ShotwrightCodexRuntimeManager:
         try:
             arguments = json.loads(arguments_json)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Codex Shotwright tool arguments_json must be a JSON object string: {arguments_json[:500]}") from exc
+            repaired_arguments_json = self._repair_direct_tool_arguments_json(arguments_json)
+            if repaired_arguments_json == arguments_json:
+                raise ValueError(
+                    f"Codex Shotwright tool arguments_json must be a JSON object string: {arguments_json[:500]}"
+                ) from exc
+            try:
+                arguments = json.loads(repaired_arguments_json)
+            except json.JSONDecodeError as repaired_exc:
+                raise ValueError(
+                    f"Codex Shotwright tool arguments_json must be a JSON object string: {arguments_json[:500]}"
+                ) from repaired_exc
         if not isinstance(arguments, dict):
             raise ValueError("Codex Shotwright tool arguments_json must decode to a JSON object.")
         parsed["arguments"] = arguments
         parsed["tool_name"] = str(parsed.get("tool_name") or "").strip()
         parsed["response"] = str(parsed.get("response") or "").strip()
         return parsed
+
+    def _repair_direct_tool_arguments_json(self, arguments_json: str) -> str:
+        # Codex sometimes mangles JSX regex ranges like \u4e00-\u9fff inside
+        # nested JSON strings into raw control characters. Preserve the intended
+        # JavaScript escape before falling back to generic JSON control escaping.
+        repaired = _MANGLED_CJK_RANGE_TEXT_RE.sub(r"\\u4e00-\\u9fff", arguments_json)
+        repaired = _MANGLED_CJK_RANGE_RE.sub(r"\\u4e00-\\u9fff", repaired)
+
+        def escape_control(match: re.Match[str]) -> str:
+            ch = match.group(0)
+            if ch == "\n":
+                return r"\n"
+            if ch == "\r":
+                return r"\r"
+            if ch == "\t":
+                return r"\t"
+            return f"\\u{ord(ch):04x}"
+
+        return _JSON_CONTROL_CHAR_RE.sub(escape_control, repaired)
 
     def _looks_like_direct_tool_plan(self, text: str) -> bool:
         stripped = text.strip()
@@ -747,6 +793,256 @@ class ShotwrightCodexRuntimeManager:
             ]
         )
 
+    def _parse_tool_text_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        text_result = payload.get("text_result_for_llm")
+        if not isinstance(text_result, str) or not text_result.strip():
+            return {}
+        try:
+            parsed = json.loads(text_result)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _extract_render_review_target(self, payload: dict[str, object]) -> dict[str, object] | None:
+        if not payload.get("success"):
+            return None
+        parsed = self._parse_tool_text_payload(payload)
+        output_path = _first_non_empty(
+            parsed.get("output_path"),
+            parsed.get("render_path"),
+            (parsed.get("render_output") or {}).get("file_path") if isinstance(parsed.get("render_output"), dict) else "",
+            (parsed.get("render_output") or {}).get("shared_relative_path")
+            if isinstance(parsed.get("render_output"), dict)
+            else "",
+        )
+        if not output_path:
+            return None
+        return {
+            "output_path": output_path,
+            "output_name": Path(str(output_path)).stem,
+            "playlist_url": _first_non_empty(parsed.get("playlist_url"), parsed.get("latest_stream_url")),
+            "project_id": _first_non_empty(parsed.get("project_id"), parsed.get("active_project_id")),
+        }
+
+    def _build_render_review_required_followup(self, pending_render_review: dict[str, object]) -> str:
+        render_path = str(pending_render_review.get("output_path") or "").strip()
+        output_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(pending_render_review.get("output_name") or "render")).strip("_")
+        storyboard_name = f"{output_stem or 'render'}_review_storyboard.jpg"
+        arguments = {
+            "reference_video_path": render_path,
+            "output_name": storyboard_name,
+            "interval_seconds": 1.0,
+            "columns": 4,
+            "width": 360,
+            "description": "Review the completed render before finalizing",
+        }
+        return "\n".join(
+            [
+                "Shotwright quality gate blocked finalization.",
+                "render_after_effects_project succeeded in this turn, but the rendered mp4 has not been storyboard-reviewed yet.",
+                "Return a Direct Shotwright tool_call now:",
+                json.dumps(
+                    {
+                        "action": "tool_call",
+                        "tool_name": "generate_storyboard_from_reference_video",
+                        "arguments_json": json.dumps(arguments, ensure_ascii=False),
+                        "response": "Generate a storyboard from the completed render before finalizing.",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                "After the storyboard tool succeeds, identify the weakest frame and decide whether the result needs a JSX revision and another render. Only final when the render passes both correctness and creative-quality review.",
+            ]
+        )
+
+    def _review_render_storyboard_quality(
+        self,
+        app_session_id: str,
+        pending_render_review: dict[str, object],
+        storyboard_payload: dict[str, object],
+    ) -> dict[str, object]:
+        render_path = str(pending_render_review.get("output_path") or "").strip()
+        if not render_path:
+            return {"success": False, "blocking": False, "error": "missing render output path"}
+
+        output_stem = re.sub(
+            r"[^A-Za-z0-9_.-]+",
+            "_",
+            str(pending_render_review.get("output_name") or Path(render_path).stem or "render"),
+        ).strip("_")
+        try:
+            subtitle_storyboard = rm.generate_storyboard(
+                app_session_id,
+                reference_video_path=render_path,
+                output_name=f"{output_stem or 'render'}_subtitle_zone_review.jpg",
+                interval_seconds=1.0,
+                columns=4,
+                width=420,
+                crop={"x": "0%", "y": "68%", "width": "100%", "height": "30%"},
+            )
+            analysis = rm.analyze_storyboard_image_darkness(subtitle_storyboard["storyboard_image_path"])
+        except Exception as exc:
+            logger.warning("Render storyboard quality review failed for %s: %s", app_session_id, exc)
+            return {"success": False, "blocking": False, "error": str(exc)}
+
+        return {
+            "success": True,
+            "blocking": bool(analysis.get("caption_quality_risk") or analysis.get("black_caption_risk")),
+            "subtitle_zone_storyboard": subtitle_storyboard,
+            "full_storyboard": storyboard_payload,
+            "analysis": analysis,
+        }
+
+    def _build_render_quality_block_followup(
+        self,
+        pending_render_review: dict[str, object],
+        quality_review: dict[str, object],
+    ) -> str | list[dict[str, str]]:
+        analysis = quality_review.get("analysis") if isinstance(quality_review.get("analysis"), dict) else {}
+        subtitle_storyboard = (
+            quality_review.get("subtitle_zone_storyboard")
+            if isinstance(quality_review.get("subtitle_zone_storyboard"), dict)
+            else {}
+        )
+        full_storyboard = (
+            quality_review.get("full_storyboard") if isinstance(quality_review.get("full_storyboard"), dict) else {}
+        )
+        text = "\n".join(
+            [
+                "Shotwright quality gate blocked finalization.",
+                "The subtitle-zone storyboard suggests a caption readability/design risk such as a black-dominant plate or low-contrast pale backing.",
+                "This is a backend visual metric gate, not a style recipe: inspect the attached storyboard images, then revise the actual design so the captions fit the creative direction and remain readable without turning into a black slab or a pale low-contrast strip.",
+                "",
+                "Render under review:",
+                json.dumps(pending_render_review, ensure_ascii=False, indent=2),
+                "",
+                "Attached images include the full-frame storyboard when available and a focused subtitle-zone storyboard. Use the visuals, not only the metrics, before choosing the fix.",
+                "",
+                "Subtitle-zone storyboard and metrics:",
+                json.dumps(
+                    {
+                        "storyboard_image_path": subtitle_storyboard.get("storyboard_image_path"),
+                        "shared_relative_path": subtitle_storyboard.get("shared_relative_path"),
+                        "analysis": analysis,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                "",
+                "Return a Direct Shotwright tool_call that revises the active project, then render again. Do not final until a new render passes full-frame and subtitle-zone review.",
+            ]
+        )
+        return self._build_visual_review_input(
+            text,
+            full_storyboard.get("storyboard_image_path"),
+            subtitle_storyboard.get("storyboard_image_path"),
+        )
+
+    def _build_render_visual_review_followup(
+        self,
+        pending_render_review: dict[str, object],
+        storyboard_payload: dict[str, object],
+        quality_review: dict[str, object],
+    ) -> str | list[dict[str, str]]:
+        subtitle_storyboard = (
+            quality_review.get("subtitle_zone_storyboard")
+            if isinstance(quality_review.get("subtitle_zone_storyboard"), dict)
+            else {}
+        )
+        analysis = quality_review.get("analysis") if isinstance(quality_review.get("analysis"), dict) else {}
+        text = "\n".join(
+            [
+                "Shotwright backend generated storyboard images for the completed render.",
+                "Inspect the attached full-frame storyboard and focused subtitle-zone storyboard before deciding the next action.",
+                "Use visual judgment here: identify the weakest frame, check subtitle readability and style fit, check text safety and missing glyphs, and decide whether to revise JSX and render again or final.",
+                "",
+                "Render under review:",
+                json.dumps(pending_render_review, ensure_ascii=False, indent=2),
+                "",
+                "Storyboard result and subtitle-zone metrics:",
+                json.dumps(
+                    {
+                        "full_storyboard_image_path": storyboard_payload.get("storyboard_image_path"),
+                        "full_storyboard_shared_relative_path": storyboard_payload.get("shared_relative_path"),
+                        "subtitle_zone_storyboard_image_path": subtitle_storyboard.get("storyboard_image_path"),
+                        "subtitle_zone_shared_relative_path": subtitle_storyboard.get("shared_relative_path"),
+                        "analysis": analysis,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                "",
+                "Continue using the Direct Shotwright tool protocol. Return a revision tool_call if the visual review finds a weak result; otherwise return final with the render assets.",
+            ]
+        )
+        return self._build_visual_review_input(
+            text,
+            storyboard_payload.get("storyboard_image_path"),
+            subtitle_storyboard.get("storyboard_image_path"),
+        )
+
+    def _build_visual_review_input(
+        self,
+        text: str,
+        *image_paths: object,
+    ) -> str | list[dict[str, str]]:
+        items: list[dict[str, str]] = [{"type": "text", "text": text}]
+        seen: set[str] = set()
+        for raw_path in image_paths:
+            path = str(raw_path or "").strip()
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            try:
+                if not Path(path).is_file():
+                    continue
+            except OSError:
+                continue
+            items.append({"type": "local_image", "path": path})
+        return items if len(items) > 1 else text
+
+    def _is_recoverable_direct_tool_bridge_error(self, exc: CodexBridgeError) -> bool:
+        message = "\n".join(
+            item
+            for item in (
+                str(exc),
+                exc.stderr,
+                json.dumps(exc.record, ensure_ascii=False) if exc.record else "",
+            )
+            if item
+        ).lower()
+        recoverable_markers = (
+            "currently experiencing high demand",
+            "reconnecting",
+            "thread not found",
+            "failed to record rollout items",
+            "timeout",
+            "temporar",
+        )
+        return any(marker in message for marker in recoverable_markers)
+
+    def _build_direct_tool_thread_recovery_input(self, runtime_content: str, exc: CodexBridgeError) -> str:
+        return "\n\n".join(
+            [
+                runtime_content,
+                self._build_direct_tool_protocol_instructions(),
+                "Shotwright recovery note:",
+                "The previous Codex thread became unavailable during this same Shotwright turn.",
+                f"Recoverable bridge error: {str(exc).strip() or exc.__class__.__name__}",
+                "Do not rely on prior Codex thread memory. Call inspect_workspace first, then continue the original user request from the current Shotwright session state.",
+                "Reuse existing container, active project, generated assets, reference videos, Python analysis files, renders, and storyboards reported by inspect_workspace. Do not recreate a replacement project unless the active project is unrecoverable.",
+            ]
+        )
+
+    def _storyboard_matches_pending_render(self, arguments: dict[str, object], pending_render_review: dict[str, object]) -> bool:
+        requested_path = str(arguments.get("reference_video_path") or "").strip()
+        render_path = str(pending_render_review.get("output_path") or "").strip()
+        if not requested_path or not render_path:
+            return False
+        if requested_path == render_path:
+            return True
+        return Path(requested_path).name.lower() == Path(render_path).name.lower()
+
     async def _run_direct_tool_loop(
         self,
         *,
@@ -773,27 +1069,60 @@ class ShotwrightCodexRuntimeManager:
             "\n\n".join([runtime_content, self._build_direct_tool_protocol_instructions()]),
             persisted_attachments,
         )
+        pending_render_review: dict[str, object] | None = None
+        thread_recovery_attempts = 0
 
         for step_index in range(1, _DIRECT_TOOL_MAX_STEPS + 1):
-            result = await client.run_turn(
-                input=current_input,
-                thread_id=current_thread_id,
-                working_directory=str(runtime_settings.get("codex_workspace_root") or ""),
-                model=model,
-                model_reasoning_effort=reasoning_effort,
-                approval_policy=str(runtime_settings.get("codex_approval_policy") or ""),
-                sandbox_mode=str(runtime_settings.get("codex_sandbox_mode") or ""),
-                network_access_enabled=bool(runtime_settings.get("codex_network_access_enabled")),
-                skip_git_repo_check=bool(runtime_settings.get("codex_skip_git_repo_check")),
-                web_search_mode=str(runtime_settings.get("codex_web_search_mode") or ""),
-                config=codex_sdk_config or None,
-                output_schema=_DIRECT_TOOL_PLAN_SCHEMA,
-                on_event=on_event,
-            )
+            try:
+                result = await client.run_turn(
+                    input=current_input,
+                    thread_id=current_thread_id,
+                    working_directory=str(runtime_settings.get("codex_workspace_root") or ""),
+                    model=model,
+                    model_reasoning_effort=reasoning_effort,
+                    approval_policy=str(runtime_settings.get("codex_approval_policy") or ""),
+                    sandbox_mode=str(runtime_settings.get("codex_sandbox_mode") or ""),
+                    network_access_enabled=bool(runtime_settings.get("codex_network_access_enabled")),
+                    skip_git_repo_check=bool(runtime_settings.get("codex_skip_git_repo_check")),
+                    web_search_mode=str(runtime_settings.get("codex_web_search_mode") or ""),
+                    config=codex_sdk_config or None,
+                    output_schema=_DIRECT_TOOL_PLAN_SCHEMA,
+                    on_event=on_event,
+                )
+            except CodexBridgeError as exc:
+                if (
+                    thread_recovery_attempts >= _DIRECT_TOOL_THREAD_RECOVERY_RETRIES
+                    or not self._is_recoverable_direct_tool_bridge_error(exc)
+                ):
+                    raise
+                thread_recovery_attempts += 1
+                await self._persist_event(
+                    app_session_id,
+                    "codex.thread.recovered",
+                    {
+                        "provider": "codex",
+                        "attempt": thread_recovery_attempts,
+                        "previous_thread_id": current_thread_id,
+                        "message": str(exc).strip() or exc.__class__.__name__,
+                    },
+                    turn_id=turn_state.turn_id,
+                    sequence=runtime.next_event_sequence(),
+                )
+                current_thread_id = None
+                pending_render_review = None
+                current_input = self._build_direct_tool_thread_recovery_input(runtime_content, exc)
+                continue
             current_thread_id = result.thread_id or current_thread_id
             plan = self._parse_direct_tool_plan(result.final_response)
             action = str(plan["action"])
             if action == "final":
+                if pending_render_review is not None:
+                    quality_review = pending_render_review.get("quality_review")
+                    if isinstance(quality_review, dict) and quality_review.get("blocking"):
+                        current_input = self._build_render_quality_block_followup(pending_render_review, quality_review)
+                    else:
+                        current_input = self._build_render_review_required_followup(pending_render_review)
+                    continue
                 final_response = str(plan.get("response") or "").strip()
                 if not final_response:
                     final_response = "Shotwright completed the requested work."
@@ -851,6 +1180,31 @@ class ShotwrightCodexRuntimeManager:
                 payload=payload,
                 duration_seconds=round(monotonic() - tool_started_at, 3),
             )
+            if tool_name == "render_after_effects_project":
+                pending_render_review = self._extract_render_review_target(payload)
+            elif (
+                tool_name == "generate_storyboard_from_reference_video"
+                and payload.get("success")
+                and pending_render_review is not None
+                and self._storyboard_matches_pending_render(arguments, pending_render_review)
+            ):
+                storyboard_payload = self._parse_tool_text_payload(payload)
+                quality_review = self._review_render_storyboard_quality(
+                    app_session_id,
+                    pending_render_review,
+                    storyboard_payload,
+                )
+                pending_render_review["quality_review"] = quality_review
+                if quality_review.get("blocking"):
+                    current_input = self._build_render_quality_block_followup(pending_render_review, quality_review)
+                    continue
+                current_input = self._build_render_visual_review_followup(
+                    pending_render_review,
+                    storyboard_payload,
+                    quality_review,
+                )
+                pending_render_review = None
+                continue
             current_input = self._build_tool_result_followup(tool_name, payload)
 
         raise ValueError(
@@ -1060,8 +1414,19 @@ class ShotwrightCodexRuntimeManager:
         event: dict,
     ) -> None:
         event_type = str(event.get("type") or "unknown")
+        if event_type == "thread.started":
+            thread_id = str(event.get("thread_id") or "").strip()
+            if thread_id:
+                turn_state.latest_thread_id = thread_id
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
         assistant_text = item.get("text") if item.get("type") == "agent_message" else None
+        if isinstance(assistant_text, str) and self._looks_like_direct_tool_plan(assistant_text):
+            try:
+                plan = self._parse_direct_tool_plan(assistant_text)
+            except ValueError:
+                plan = {}
+            if str(plan.get("action") or "") == "final":
+                turn_state.direct_final_response = str(plan.get("response") or "").strip()
         if (
             isinstance(assistant_text, str)
             and assistant_text != turn_state.content
@@ -1104,6 +1469,7 @@ class ShotwrightCodexRuntimeManager:
             if persisted_attachments:
                 user_metadata["attachments"] = persisted_attachments
             await self._persist_message(app_session_id, "user", content, user_metadata)
+            await maybe_auto_title_session(app_session_id, content, persisted_attachments)
 
             image_attachment_count = sum(
                 1
@@ -1262,6 +1628,44 @@ class ShotwrightCodexRuntimeManager:
                 raise
             except TimeoutError:
                 timeout_message = f"Shotwright timed out waiting for this Codex turn after {turn_timeout_seconds:g} seconds."
+                if turn_state.direct_final_response:
+                    assistant_text = turn_state.direct_final_response
+                    logger.warning(
+                        "Codex turn for %s hit the timeout after a final Direct Tool response was received; marking completed.",
+                        app_session_id,
+                    )
+                    turn_state.content = assistant_text
+                    turn_state.version += 1
+                    updated_doc = await self._sync_streaming_message(
+                        turn_state,
+                        content=assistant_text,
+                        version=turn_state.version,
+                        streaming=False,
+                        state="completed",
+                    )
+                    if updated_doc:
+                        assistant_doc = updated_doc
+                    await self._persist_event(
+                        app_session_id,
+                        "session.timeout_recovered",
+                        {
+                            "provider": "codex",
+                            "message": timeout_message,
+                            "timeout_seconds": turn_timeout_seconds,
+                            "reason": "direct_final_response_received_before_timeout",
+                        },
+                        turn_id=turn_id,
+                        sequence=runtime.next_event_sequence(),
+                    )
+                    session_extra = {"last_error": None, "agent_provider": "codex"}
+                    if turn_state.latest_thread_id:
+                        session_extra["agent_thread_id"] = turn_state.latest_thread_id
+                        session_extra["codex_thread_id"] = turn_state.latest_thread_id
+                    await self._set_session_status(app_session_id, "idle", **session_extra)
+                    return {
+                        "assistant_message": assistant_doc,
+                        "session_status": "idle",
+                    }
                 logger.warning("Codex turn timed out for %s after %ss", app_session_id, turn_timeout_seconds)
                 turn_state.version += 1
                 updated_doc = await self._sync_streaming_message(

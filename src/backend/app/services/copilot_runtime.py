@@ -43,6 +43,7 @@ from app.services.session_streams import (
     publish_session_updated,
     publish_timeline_event,
 )
+from app.services.session_titles import maybe_auto_title_session
 
 logger = logging.getLogger(__name__)
 
@@ -796,7 +797,12 @@ class ShotwrightCopilotRuntimeManager:
             "For user-supplied reference videos, prefer inspect_workspace to discover uploaded reference_videos, then use generate_storyboard_from_reference_video before creating the AEP composition. When only a local motion detail matters, pass the storyboard tool's crop parameter so you can inspect a focused region instead of the whole frame. When comparing against a Shotwright render, pass the session's latest_render_path or another session-local export mp4 into the same storyboard tool so the crop and cadence stay comparable. Inspect workspace state before multi-round edits so you can reuse the stored project compositions and structured render_outputs instead of guessing which comp or mp4 is the latest. "
             "For narration, voiceover, or spoken guide tracks, use generate_tts_audio first, then import the returned project_audio_path into After Effects and align the audio layer with the composition timing. "
             "Use run_python_code for CPU-only media analysis, synthetic asset generation, audio/video preprocessing, Whisper-style speech analysis, ONNX/InsightFace helpers, and data-driven AE inputs before writing complex JSX. "
-            "In After Effects JSX, create captions, subtitles, title cards, and dense CJK text with comp.layers.addBoxText(); never assign TextDocument.boxText because it is read-only, and center rendered bounds with sourceRectAtTime(). "
+            "In After Effects JSX, create captions, subtitles, title cards, and dense CJK text with comp.layers.addBoxText(); never assign TextDocument.boxText because it is read-only. After setting Source Text, read sourceRectAtTime(0, false), set Anchor Point to [rect.left + rect.width / 2, rect.top + rect.height / 2], and only then position the layer at the intended visual center. "
+            "For Chinese text in After Effects, never set fonts by UI display names like Microsoft YaHei. Use verified PostScript names from inspect_workspace.recommended_fonts or app.fonts.allFonts. Prefer NotoSansSC-Bold/Medium/Regular for readable subtitles, LXGWWenKai-Medium/Regular for cute pet sticker text, and NotoSerifSC-Bold/Medium for title cards. Do not use MS-Gothic/YuGothic for Chinese. After setting a TextDocument font, verify textProp.value.font is the intended PostScript name; if AE falls back, immediately switch to the next recommended font before rendering. "
+            "For creative subtitle, title, sticker, transition, and motion design, follow inspect_workspace.creative_quality_policy and inspect_workspace.subtitle_style_policy. These are not fixed style recipes: infer an art direction from the user's goal and source media, then make typography, color, motion, and layout serve that idea. "
+            "Build the first render to a production-facing quality bar: clear creative intent, strong composition, deliberate typography, varied motion rhythm, coherent color and lighting, no generic one-note templates, no random transition spam, no oversized text that can clip or miss glyphs, and no result that is merely technically valid but visually weak. "
+            "For TVC, social video, narration, lyric, subtitle, or reference-driven edits, use run_python_code or generate_storyboard_from_reference_video to inspect media timing before JSX when that improves alignment. "
+            "After every successful render_after_effects_project call, generate a storyboard from that rendered mp4 and review creative intent, pacing, framing, text safety, visual hierarchy, missing glyphs, subtitle-zone readability, the weakest frame, and obvious quality issues before finalizing. Do not rely only on whole-frame pixel ratios or absence of errors; if the storyboard only proves that nothing is broken, revise JSX and render again. "
             "Once a session already has an active project, treat it as the default target for later creative turns. If the user asks to change, add, remove, tweak, or render something without explicitly asking for a new project or a different uploaded archive, keep editing that active project and its current compositions instead of creating another project. "
             "If a project bootstrap tool returns a project_id but the save step fails, keep using that same managed workspace on the next retry instead of creating another project. "
             "If you need to inspect a generated storyboard visually, use the available file or image viewing tool on the storyboard path returned by the Shotwright tool. "
@@ -806,7 +812,7 @@ class ShotwrightCopilotRuntimeManager:
             "Do not override the container image unless the user explicitly asks for a different image. "
             "If the user asks to create a new AEP and no suitable project already exists, create a managed Shotwright project workspace first and save the .aep there before rendering or exporting. "
             "If multiple uploaded projects or AEP files exist and the intended target is ambiguous, ask the user a concise clarification question. "
-            "When rendering succeeds, mention the preview stream and export archive when relevant."
+            "When rendering succeeds, format asset lines separately so Shotwright can render cards: 成片: `file.mp4`, 预览流: `/api/streams/.../index.m3u8`, 分镜图: `storyboard.jpg`, 工程归档: `/api/projects/.../archive`."
         )
 
     async def _build_runtime_turn_content(self, app_session_id: str, content: str) -> str:
@@ -1237,6 +1243,7 @@ class ShotwrightCopilotRuntimeManager:
                 content,
                 user_metadata,
             )
+            await maybe_auto_title_session(app_session_id, content, persisted_attachments)
 
             image_attachment_count = sum(
                 1
@@ -1337,6 +1344,7 @@ class ShotwrightCopilotRuntimeManager:
                     content,
                     user_metadata,
                 )
+                await maybe_auto_title_session(app_session_id, content, persisted_attachments)
                 image_attachment_count = sum(
                     1
                     for attachment in persisted_attachments

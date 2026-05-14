@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import mimetypes
 import re
@@ -15,6 +16,8 @@ from uuid import uuid4
 
 from app.config import settings
 from app.services.session_streams import publish_context_refresh
+
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(settings.upload_dir)
 EXPORT_DIR = Path(settings.export_dir)
@@ -375,6 +378,17 @@ def _run_command(command: list[str], *, timeout: int) -> subprocess.CompletedPro
         raise ReferenceMediaUnavailableError(f"{command[0]} is not available in the Shotwright backend runtime.") from exc
 
 
+def _run_binary_command(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise ReferenceMediaUnavailableError(f"{command[0]} is not available in the Shotwright backend runtime.") from exc
+
+
 def _publish_context_refresh_in_background(session_id: str, reason: str, **payload: object) -> None:
     try:
         loop = asyncio.get_running_loop()
@@ -425,6 +439,131 @@ def _probe_video(file_path: Path) -> dict:
         "duration_seconds": round(duration_seconds, 3),
         "width": width,
         "height": height,
+    }
+
+
+def _probe_image_dimensions(file_path: Path) -> tuple[int, int]:
+    result = _run_command(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            str(file_path),
+        ],
+        timeout=30,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise ValueError(stderr or "ffprobe could not read storyboard image dimensions.")
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("ffprobe returned invalid metadata for the storyboard image.") from exc
+
+    streams = payload.get("streams") or []
+    video_stream = next((stream for stream in streams if str(stream.get("codec_type") or "").lower() == "video"), None)
+    if not isinstance(video_stream, dict):
+        raise ValueError("Storyboard image does not contain a readable image stream.")
+
+    width = _parse_positive_int(video_stream.get("width"))
+    height = _parse_positive_int(video_stream.get("height"))
+    if width is None or height is None:
+        raise ValueError("Storyboard image dimensions are unavailable.")
+    return width, height
+
+
+def analyze_storyboard_image_darkness(storyboard_path: str | Path, *, max_sample_pixels: int = 500_000) -> dict:
+    """Return coarse dark-area metrics for a storyboard image without requiring Pillow/OpenCV."""
+
+    path = Path(storyboard_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Storyboard image not found at {path}")
+
+    width, height = _probe_image_dimensions(path)
+    result = _run_binary_command(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        timeout=60,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise ValueError(stderr or "ffmpeg could not decode storyboard image pixels.")
+
+    raw = result.stdout or b""
+    total_pixels = min(width * height, len(raw) // 3)
+    if total_pixels <= 0:
+        raise ValueError("Storyboard image decoded to zero pixels.")
+
+    sample_stride = max(1, total_pixels // max(1, max_sample_pixels))
+    sampled = 0
+    near_black = 0
+    dark = 0
+    bright = 0
+    warm_orange = 0
+    for pixel_index in range(0, total_pixels, sample_stride):
+        offset = pixel_index * 3
+        r = raw[offset]
+        g = raw[offset + 1]
+        b = raw[offset + 2]
+        sampled += 1
+        max_channel = max(r, g, b)
+        min_channel = min(r, g, b)
+        if max_channel < 45:
+            near_black += 1
+        if max_channel < 80:
+            dark += 1
+        if min_channel > 210:
+            bright += 1
+        if r > 180 and 70 < g < 180 and b < 90:
+            warm_orange += 1
+
+    near_black_ratio = near_black / sampled
+    dark_ratio = dark / sampled
+    bright_ratio = bright / sampled
+    warm_orange_ratio = warm_orange / sampled
+    risk_reasons: list[str] = []
+    black_risk_reasons: list[str] = []
+    low_contrast_risk_reasons: list[str] = []
+    if near_black_ratio >= 0.18:
+        black_risk_reasons.append("near-black pixels dominate the focused storyboard region")
+    if near_black_ratio >= 0.10 and dark_ratio >= 0.32:
+        black_risk_reasons.append("dark pixels are high enough to suggest a heavy dark subtitle plate")
+    if warm_orange_ratio >= 0.045 and bright_ratio >= 0.12 and dark_ratio <= 0.08:
+        low_contrast_risk_reasons.append(
+            "bright text over a pale warm caption backing may lack enough contrast in the focused subtitle region"
+        )
+    risk_reasons.extend(black_risk_reasons)
+    risk_reasons.extend(low_contrast_risk_reasons)
+
+    return {
+        "image_path": str(path),
+        "width": width,
+        "height": height,
+        "sampled_pixels": sampled,
+        "near_black_ratio": round(near_black_ratio, 4),
+        "dark_ratio": round(dark_ratio, 4),
+        "bright_ratio": round(bright_ratio, 4),
+        "warm_orange_ratio": round(warm_orange_ratio, 4),
+        "black_caption_risk": bool(black_risk_reasons),
+        "low_contrast_caption_risk": bool(low_contrast_risk_reasons),
+        "caption_quality_risk": bool(risk_reasons),
+        "risk_reasons": risk_reasons,
     }
 
 
@@ -536,16 +675,29 @@ def _resolve_video_metadata_from_path(session_id: str, resolved_path: Path, meta
 
 
 def _load_asset_metadata(directory: Path, *, limit: int | None = None) -> list[dict]:
-    if not directory.exists():
+    try:
+        if not directory.exists():
+            return []
+        metadata_paths = sorted(
+            directory.glob(f"*{METADATA_SUFFIX}"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError as exc:
+        logger.warning("Skipping unreadable media metadata directory %s: %s", directory, exc)
         return []
 
     entries: list[dict] = []
-    for metadata_path in sorted(directory.glob(f"*{METADATA_SUFFIX}"), key=lambda path: path.stat().st_mtime, reverse=True):
+    for metadata_path in metadata_paths:
         metadata = _read_metadata(metadata_path)
         if not metadata:
             continue
         file_path = Path(str(metadata.get("file_path") or ""))
-        if not file_path.exists():
+        try:
+            if not file_path.exists():
+                continue
+        except OSError as exc:
+            logger.warning("Skipping unreadable media asset %s: %s", file_path, exc)
             continue
         entries.append(metadata)
         if limit is not None and len(entries) >= limit:

@@ -7,6 +7,7 @@ const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 
 const devServerPort = Number(process.env.PORT || 3000);
 const apiProxyTarget = process.env.SHOTWRIGHT_API_PROXY_TARGET || "http://127.0.0.1:8000";
+const devServerClientWebSocketURL = process.env.SHOTWRIGHT_DEV_SERVER_WS_URL || "auto://0.0.0.0:0/ws";
 
 function createStaticAssetPlugin(name, filename, source) {
   return {
@@ -99,15 +100,17 @@ module.exports = (_env, argv) => {
     devServer: {
       host: "0.0.0.0",
       port: devServerPort,
+      allowedHosts: "all",
       hot: true,
       client: {
+        webSocketURL: devServerClientWebSocketURL,
         overlay: {
           errors: true,
           warnings: false,
           runtimeErrors: function runtimeErrors(error) {
             const name = error && typeof error.name === "string" ? error.name : "";
             const message = error && typeof error.message === "string" ? error.message : String(error || "");
-            if (name === "AbortError" && /operation was aborted|play\(\) request was interrupted|media operation was aborted/i.test(message)) {
+            if (/AbortError|operation was aborted|play\(\) request was interrupted|media operation was aborted|loading was aborted/i.test(`${name} ${message}`)) {
               return false;
             }
             return true;

@@ -126,6 +126,7 @@ class CodexBridgeClient:
         bridge_script: str | Path | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        disable_responses_websocket: bool | None = None,
         codex_path_override: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> None:
@@ -133,6 +134,11 @@ class CodexBridgeClient:
         self.bridge_script = Path(bridge_script) if bridge_script else default_bridge_script_path()
         self.api_key = _first_non_empty(api_key, settings.openai_api_key, os.environ.get("OPENAI_API_KEY"))
         self.base_url = _first_non_empty(base_url, settings.codex_base_url)
+        self.disable_responses_websocket = (
+            settings.codex_disable_responses_websocket
+            if disable_responses_websocket is None
+            else bool(disable_responses_websocket)
+        )
         self.codex_path_override = _first_non_empty(codex_path_override, settings.codex_path_override)
         self.extra_env = extra_env or {}
 
@@ -192,6 +198,8 @@ class CodexBridgeClient:
         for key, value in optional_string_values.items():
             if value:
                 request[key] = value
+        if self.disable_responses_websocket:
+            request["disable_responses_websocket"] = True
 
         if output_schema is not None:
             request["output_schema"] = output_schema
