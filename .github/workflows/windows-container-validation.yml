@@ -64,7 +64,7 @@ jobs:
         run: |
           $sourceImage = '${{ steps.config.outputs.runtime_base_image }}'
           $sourceTag = $sourceImage.Split(':')[-1]
-          $cacheImage = "ghcr.io/liuchangfreeman/shotwright/base_image:$sourceTag"
+          $cacheImage = "ghcr.io/machinepulse-ai/shotwright/base_image:$sourceTag"
           $resolvedImage = $sourceImage
           $cacheHit = $false
 

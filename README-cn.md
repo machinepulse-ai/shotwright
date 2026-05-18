@@ -166,7 +166,7 @@ flowchart LR
 | 步骤 | 执行方 | 发生了什么 |
 | --- | --- | --- |
 | **1. 上传** | 人 | 丢入源视频，在对话框里描述创意需求 |
-| **2. 分镜抽帧** | Agent | ffmpeg 按场景切点采样帧，agent 分析视觉结构 |
+| **2. 分镜抽帧** | Agent | ffmpeg 按固定时间间隔采样帧，agent 分析视觉结构 |
 | **3. ASR** | Agent | 对音轨跑语音识别，提取旁白或对话文本 |
 | **4. TTS** | Agent + 人 | agent 生成候选配音；人选定偏好的版本 |
 | **5. 素材生成** | Agent | Python + Pillow 批量生成字幕条、下三分之一、数据图表等图层素材 |
@@ -190,12 +190,12 @@ Shotwright 接走的是配机器、写脚本、跑渲染、逐帧验证这些杂
 ### A. 整套平台（Docker Compose）
 
 ```powershell
+# 工作容器镜像构建一次（默认 target = shotwright:allinone）
+docker build --target shotwright -t shotwright:allinone .
+
 cd src
 copy .env.example .env
 # 编辑 .env —— 至少设置 SHOTWRIGHT_SECRET_KEY 和 SHOTWRIGHT_ADMIN_PASSWORD
-
-# 工作容器镜像构建一次（默认 target = shotwright:allinone）
-docker build --target shotwright -t shotwright:allinone .
 
 # 拉起平台：mongo + backend + frontend
 .\scripts\deploy.ps1 -Build -Detach
@@ -248,7 +248,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -
 | Stage | 用途 | 典型 tag |
 | --- | --- | --- |
 | `base` | 共享工具链 —— Chocolatey（Windows 包管理器）、Node 20、Python 3.13、ffmpeg、Git、Visual C++ 运行库 | — |
-| `after-effects-setup` | 引用 `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` | （拉取，非构建） |
+| `after-effects-setup` | 引用 `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2` | （拉取，非构建） |
 | `shotwright` | All-in-one AE 工作容器 —— 构建期安装 AE，启动时执行 `runtime_entrypoint.ps1` | `shotwright:allinone` |
 | `backend` | FastAPI + codex-bridge + uv 依赖 | `shotwright:backend` |
 | `frontend-build` → `frontend` | Webpack 生产构建 + 静态服务 | `shotwright:frontend` |
@@ -298,7 +298,7 @@ docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t sho
 
 | 工作流 | 触发条件 | 用途 |
 | --- | --- | --- |
-| `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装包、给辅助 `Setup.exe` 打补丁、发布到 `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:<version>` |
+| `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装包、给辅助 `Setup.exe` 打补丁、发布到 `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:<version>` |
 | `windows-container-validation` — `dockerfile-build` | 推送或 PR 改动 `Dockerfile` | 确认 `shotwright:allinone` 能正常构建 |
 | `windows-container-validation` — `validation-render` | 手动 `workflow_dispatch` | 从 GHCR 拉取安装载荷并跑完整验证渲染 |
 

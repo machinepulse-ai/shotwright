@@ -166,7 +166,7 @@ A complete run from raw footage to a finished mp4, as the agent executes it:
 | Step | Who | What happens |
 | --- | --- | --- |
 | **1. Upload** | Human | Drop in the source video and describe the creative brief in the chat |
-| **2. Storyboard extraction** | Agent | ffmpeg samples frames at scene cuts; the agent inspects the visual structure |
+| **2. Storyboard extraction** | Agent | ffmpeg samples frames at a fixed interval; the agent inspects the visual structure |
 | **3. ASR** | Agent | Speech-to-text runs on the audio track to capture narration or dialogue |
 | **4. TTS** | Agent + Human | Agent generates candidate voice-over audio; human selects the preferred take |
 | **5. Asset generation** | Agent | Python + Pillow builds text overlays, lower-thirds, and data-driven graphics |
@@ -190,12 +190,12 @@ Shotwright takes configuration, scripting, rendering, and frame-by-frame QA off 
 ### A. Run the platform (Docker Compose)
 
 ```powershell
+# build worker image once (default target = shotwright:allinone)
+docker build --target shotwright -t shotwright:allinone .
+
 cd src
 copy .env.example .env
 # edit .env — set SHOTWRIGHT_SECRET_KEY and SHOTWRIGHT_ADMIN_PASSWORD
-
-# build worker image once (default target = shotwright:allinone)
-docker build --target shotwright -t shotwright:allinone .
 
 # start the platform: mongo + backend + frontend
 .\scripts\deploy.ps1 -Build -Detach
@@ -248,7 +248,7 @@ The root [Dockerfile](Dockerfile) is multi-stage. The default `shotwright` targe
 | Stage | Purpose | Typical tag |
 | --- | --- | --- |
 | `base` | Shared toolchain — Chocolatey, Node 20, Python 3.13, ffmpeg, Git, Visual C++ runtime | — |
-| `after-effects-setup` | Reference to `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` | (pulled, not built) |
+| `after-effects-setup` | Reference to `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2` | (pulled, not built) |
 | `shotwright` | All-in-one AE worker — installs AE during build, runs `runtime_entrypoint.ps1` at startup | `shotwright:allinone` |
 | `backend` | FastAPI + codex-bridge + uv dependencies | `shotwright:backend` |
 | `frontend-build` → `frontend` | Webpack production build + static server | `shotwright:frontend` |
@@ -298,7 +298,7 @@ Workflows in `.github/workflows/` target `windows-2025` runners.
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
-| `ae-setup-publish` | Push to `setup-versions.yml` or manual dispatch | Download AE installer from Adobe, patch helper `Setup.exe`, publish to `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:<version>` |
+| `ae-setup-publish` | Push to `setup-versions.yml` or manual dispatch | Download AE installer from Adobe, patch helper `Setup.exe`, publish to `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:<version>` |
 | `windows-container-validation` — `dockerfile-build` | Push or PR touching `Dockerfile` | Build verification for `shotwright:allinone` |
 | `windows-container-validation` — `validation-render` | Manual `workflow_dispatch` | Pull installer payload from GHCR and run the full validation render |
 
