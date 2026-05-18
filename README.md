@@ -40,6 +40,7 @@ A chat-driven product where a Copilot or Codex agent operates real Adobe After E
 
 - [Validation Demo](#-validation-demo)
 - [Why Shotwright](#-why-shotwright)
+- [AE-operation-benchmark (draft)](#-ae-operation-benchmark-draft--not-yet-implemented)
 - [What's Inside](#-whats-inside)
 - [Architecture](#-architecture)
 - [Agent Tools](#-agent-tools)
@@ -75,6 +76,24 @@ Most AI video products shrink the creative surface area: fewer decisions, fewer 
 - Keep renders reproducible, replayable, and auditable — JSX, nexrender job specs, and mp4 outputs are first-class artifacts.
 - Push infrastructure into the background. Creative judgment stays with the human; the loop is `intent → agent → JSX → render → review`.
 - Treat After Effects as a serious runtime foundation, not a thin wrapper around a panel script.
+
+## 🧪 AE-operation-benchmark *(draft — not yet implemented)*
+
+Motion-graphics agents have no public yardstick. Coding got `SWE-bench` and `HumanEval`; web automation got `WebArena`; math got `AIME`. After Effects, 3D, industrial design — anything where the judging signal isn't a clean unit test — has nothing comparable. Without a public leaderboard, frontier model teams have no reason to RL-train against AE, and Shotwright's leverage compounds slowly.
+
+**Proposed shape:** build the leaderboard first. Ship a reproducible task set + automated scoring + public dashboard, then invite OpenAI / Anthropic / Google to run their agents on it. Shotwright contributes the runtime so model teams never have to install Windows containers + AE themselves — the infrastructure barrier is removed, the rest is pure model-capability competition.
+
+| Design pillar | Sketch |
+| --- | --- |
+| **Task set** | ~500 tasks across 5 categories — *keyframe · mask · expression · comp-build · render-export*. Each task = natural-language prompt + reference video + ground-truth `.aep`. |
+| **4-axis scoring** | Visual similarity (LPIPS / DreamSim vs reference render) + structural similarity (comp / layer / keyframe count match) + wall-time & token cost + completion rate → single weighted 0–100 score. |
+| **Ground truth** | 3–5 senior motion designers each solve the same task; team picks best-of. **Multiple references**, not a single answer — sidesteps the "creative is subjective" trap by treating "industry-grade good" as a set, not a point. |
+| **Public leaderboard** | GitHub Pages. Each submission ships score + `.aep` + rendered mp4 + repro command. Monthly rolling + season totals. |
+
+**Three-year ambition:** AE-operation-benchmark becomes to motion-graphics agents what SWE-bench became to coding agents. If frontier teams start disclosing AE-bench scores in their model cards, pro creative software moves from the fringe of evaluation into the main capability table.
+
+> [!WARNING]
+> **Status — draft. Nothing here is implemented in this repository yet.** No task set is published, no scoring pipeline exists, no leaderboard is live. This section documents the project's longer-term ambition. Concrete work will be tracked once the platform stabilises; see also the [Roadmap](#-roadmap) for the platform items being built today.
 
 ## 🧭 What's Inside
 
