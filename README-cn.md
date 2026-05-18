@@ -316,13 +316,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -
 
 ## 🔁 CI 与 GHCR 安装镜像
 
-`.github/workflows/` 下的工作流默认跑在组织的 `windows-latest-8-cores` Windows larger runner 标签上。
+`.github/workflows/` 里的完整 AE 构建/渲染任务默认跑在组织的 `windows-latest-8-cores` Windows larger runner 标签上。PR 上只跑轻量级元数据校验，使用 GitHub 托管的 Linux runner，避免 Windows 容器 runner 暂时不可用时阻塞文档或配置审查。
 
 | 工作流 | 触发条件 | 用途 |
 | --- | --- | --- |
 | `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装包、给辅助 `Setup.exe` 打补丁、发布到 `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:<version>` |
-| `windows-container-validation` — `dockerfile-build` | 推送或 PR 改动 `Dockerfile` | 确认 `shotwright:allinone` 能正常构建 |
-| `windows-container-validation` — `validation-render` | 手动 `workflow_dispatch` | 从 GHCR 拉取安装载荷并跑完整验证渲染 |
+| `windows-container-validation` — `build-and-validate` | 推送或 PR 改动 Docker / setup 元数据 | 校验 setup 元数据、基础镜像标签和 GHCR 镜像命名 |
+| `windows-container-validation` — `full-windows-validation` | 手动 `workflow_dispatch` | 构建 `shotwright:allinone`、从 GHCR 拉取安装载荷并跑完整验证渲染 |
 
 `ae-setup-publish` 把 AE 安装包打包成一个极简 Windows Nano Server 镜像（`nanoserver:ltsc2025`）；`shotwright:allinone` 在构建期会拉这个镜像。CI 会先用默认 `GITHUB_TOKEN` 执行 `docker login ghcr.io`，再拉取组织内部 GHCR 包。
 

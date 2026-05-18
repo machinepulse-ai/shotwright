@@ -5,14 +5,68 @@ on:
     paths:
       - Dockerfile
       - setup-versions.yml
+      - shotwright-config.json
+      - scripts/install/**
+      - scripts/validate/**
+      - .github/workflows/windows-container-validation.yml
   pull_request:
     paths:
       - Dockerfile
       - setup-versions.yml
+      - shotwright-config.json
+      - scripts/install/**
+      - scripts/validate/**
+      - .github/workflows/windows-container-validation.yml
   workflow_dispatch:
 
 jobs:
   build-and-validate:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Shotwright setup metadata
+        shell: bash
+        run: |
+          python3 -m json.tool shotwright-config.json >/dev/null
+          python3 scripts/shotwright_config.py --workspace-root "$PWD" --runner-temp "$RUNNER_TEMP" >/tmp/shotwright-config.resolved.json
+          python3 scripts/install/setup_versions.py >/tmp/setup-versions.resolved.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          setup = json.loads(Path("/tmp/setup-versions.resolved.json").read_text(encoding="utf-8"))
+          config = json.loads(Path("/tmp/shotwright-config.resolved.json").read_text(encoding="utf-8"))
+
+          expected_prefix = "ghcr.io/machinepulse-ai/shotwright/after-effects-setup:"
+          if not setup["ghcr_image"].startswith(expected_prefix):
+              raise SystemExit(f"Unexpected setup image: {setup['ghcr_image']}")
+          if setup["platform"] != "win64":
+              raise SystemExit(f"Expected win64 setup platform, got {setup['platform']}")
+
+          docker_config = config["raw"]["tooling"]["docker"]
+          for key in ("runtime_base_image", "setup_base_image"):
+              image = docker_config[key]
+              if "ltsc2025" not in image.lower():
+                  raise SystemExit(f"Expected LTSC 2025 base image for {key}, got {image}")
+
+          print(f"Resolved AE setup image: {setup['ghcr_image']}")
+          print(f"Runtime base image: {docker_config['runtime_base_image']}")
+          print(f"Setup base image: {docker_config['setup_base_image']}")
+          PY
+
+      - name: Note full Windows validation path
+        shell: bash
+        run: |
+          echo "PR validation checks setup metadata only."
+          echo "Run workflow_dispatch for the full Windows container build and AE render validation."
+
+  full-windows-validation:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ vars.SHOTWRIGHT_WINDOWS_RUNNER || 'windows-latest-8-cores' }}
     permissions:
       contents: read
