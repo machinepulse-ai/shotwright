@@ -102,7 +102,7 @@ An AE designer with no Docker background can get the full stack running in an af
 Shotwright uses **process-level Windows containers** — the same isolation model as Linux `docker run`. No bare-metal server or nested virtualization is required.
 
 > [!NOTE]
-> **Why Windows containers?** `aerender.exe` — After Effects' command-line renderer — is Windows-only, so Linux containers are not an option. The container model adds two production-critical properties on top of that: each render session gets a fresh isolated container (one crash cannot affect the next), and the image pins every dependency — AE version, nexrender, ffmpeg, Python, Node — so every render runs against the same baseline on a developer's machine, in CI, or in production. The container turns "works on my machine" into "works in the image."
+> **Why Windows containers?** After Effects has command-line rendering on both Windows and macOS, but Shotwright needs AE to run as a containerized workload. Linux containers cannot run AE, and macOS does not support running AE inside a Docker/OCI container, so Shotwright uses Windows containers. The container model adds two production-critical properties: each render session gets a fresh isolated container (one crash cannot affect the next), and the image pins every dependency — AE version, nexrender, ffmpeg, Python, Node — so every render runs against the same baseline on a developer's machine, in CI, or in production. The container turns "works on my machine" into "works in the image."
 
 ### Host requirements
 
