@@ -85,6 +85,7 @@ jobs:
             docker tag $sourceImage $cacheImage
             if ($LASTEXITCODE -ne 0) {
               Write-Warning "Failed to retag $sourceImage as $cacheImage. Continuing with the MCR image already pulled locally."
+              $global:LASTEXITCODE = 0
             }
             else {
               docker push $cacheImage
@@ -94,6 +95,7 @@ jobs:
               }
               else {
                 Write-Warning "Failed to push $cacheImage to GHCR. Continuing with the MCR image already pulled locally."
+                $global:LASTEXITCODE = 0
               }
             }
           }
@@ -147,6 +149,7 @@ jobs:
           else {
             "available=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
             Write-Warning "Setup image ${{ steps.versions.outputs.ghcr_image }} not available in GHCR. Falling back to local payload download."
+            $global:LASTEXITCODE = 0
           }
 
       - name: Resolve installer payload on runner
