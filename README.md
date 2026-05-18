@@ -111,7 +111,7 @@ Shotwright uses **process-level Windows containers** — the same isolation mode
 | **CPU** | 4 cores | 8 cores |
 | **RAM** | 16 GB | 32 GB |
 | **Disk** | 60 GB | 128 GB SSD |
-| **OS** | Windows 11 Pro or Windows Server LTSC 2025 | Same |
+| **OS** | Windows 11 25H2 or Windows Server LTSC 2025 | Same |
 
 Docker Desktop must be running in Windows-container mode (`docker info --format '{{.OSType}}'` returns `windows`). For the host-mount mode only, a matching AE install is also required on the host.
 

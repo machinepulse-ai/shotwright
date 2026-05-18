@@ -111,7 +111,7 @@ Shotwright 使用**进程级 Windows 容器**——与 Linux `docker run` 完全
 | **CPU** | 4 核 | 8 核 |
 | **内存** | 16 GB | 32 GB |
 | **硬盘** | 60 GB | 128 GB SSD |
-| **操作系统** | Windows 11 Pro 或 Windows Server LTSC 2025 | 同左 |
+| **操作系统** | Windows 11 25H2 或 Windows Server LTSC 2025 | 同左 |
 
 Docker Desktop 需处于 Windows 容器模式（`docker info --format '{{.OSType}}'` 返回 `windows`）。仅"宿主机挂载"模式需要在宿主机上额外安装与 `setup-versions.yml` 匹配的 AE。
 
