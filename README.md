@@ -41,13 +41,13 @@ A chat-driven product where a Copilot or Codex agent operates real Adobe After E
 - [Validation Demo](#-validation-demo)
 - [Why Shotwright](#-why-shotwright)
 - [Who is this for](#-who-is-this-for)
+- [AE Runtime Container](#-ae-runtime-container)
 - [AE-operation-benchmark (draft)](#-ae-operation-benchmark-draft--not-yet-implemented)
 - [What's Inside](#-whats-inside)
 - [Architecture](#-architecture)
 - [Agent Tools](#-agent-tools)
 - [Production Workflow](#-production-workflow)
-- [Quick Start](#-quick-start)
-- [AE Runtime Container](#-ae-runtime-container)
+- [Getting Started](#-getting-started)
 - [CI and GHCR Setup Images](#-ci-and-ghcr-setup-images)
 - [Project Layout](#-project-layout)
 - [Skills Bundle](#-skills-bundle)
@@ -86,7 +86,7 @@ Shotwright targets **After Effects designers** who want to offload repetitive pr
 | | What you need | Notes |
 | --- | --- | --- |
 | **Must have** | Adobe After Effects (proficient) | You judge the output. The agent writes JSX scripts, but whether the comp looks right is your call. |
-| | Windows 11 Pro or Windows Server LTSC 2025 | `aerender.exe` is Windows-only. No macOS or Linux path currently. |
+| | Windows host — see [host requirements](#host-requirements) below | Min 4 cores / 16 GB RAM. No bare-metal or nested virtualization needed. |
 | | GitHub Copilot subscription *or* OpenAI API key | One agent backend is required. Copilot is the default; Codex is the alternative. |
 | **Basic familiarity** | Docker Desktop | Install and switch to Windows-container mode. No Dockerfile writing required. |
 | | PowerShell | A handful of commands to start the platform and run validation. |
@@ -96,6 +96,69 @@ Shotwright targets **After Effects designers** who want to offload repetitive pr
 | | Cloud infrastructure | Everything runs on a single Windows host. |
 
 An AE designer with no Docker background can get the full stack running in an afternoon. The infrastructure knowledge normally required to stand up a render farm stays inside Shotwright.
+
+## 🪟 AE Runtime Container
+
+Shotwright uses **process-level Windows containers** — the same isolation model as Linux `docker run`. No bare-metal server or nested virtualization is required.
+
+> [!NOTE]
+> **Why Windows containers?** `aerender.exe` — After Effects' command-line renderer — is Windows-only, so Linux containers are not an option. The container model adds two production-critical properties on top of that: each render session gets a fresh isolated container (one crash cannot affect the next), and the image pins every dependency — AE version, nexrender, ffmpeg, Python, Node — so every render runs against the same baseline on a developer's machine, in CI, or in production. The container turns "works on my machine" into "works in the image."
+
+### Host requirements
+
+| | Minimum | Recommended |
+| --- | --- | --- |
+| **CPU** | 4 cores | 8 cores |
+| **RAM** | 16 GB | 32 GB |
+| **Disk** | 60 GB | 128 GB SSD |
+| **OS** | Windows 11 Pro or Windows Server LTSC 2025 | Same |
+
+Docker Desktop must be running in Windows-container mode (`docker info --format '{{.OSType}}'` returns `windows`). For the host-mount mode only, a matching AE install is also required on the host.
+
+### Image stages
+
+The root [Dockerfile](Dockerfile) is multi-stage. The default `shotwright` target bakes the AE installer payload (pulled from GHCR at build time) directly into the image.
+
+| Stage | Purpose | Typical tag |
+| --- | --- | --- |
+| `base` | Shared toolchain — Chocolatey, Node 20, Python 3.13, ffmpeg, Git, Visual C++ runtime | — |
+| `after-effects-setup` | Reference to `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2` | (pulled, not built) |
+| `shotwright` | All-in-one AE worker — installs AE during build, runs `runtime_entrypoint.ps1` at startup | `shotwright:allinone` |
+| `backend` | FastAPI + codex-bridge + uv dependencies | `shotwright:backend` |
+| `frontend-build` → `frontend` | Webpack production build + static server | `shotwright:frontend` |
+
+### Three runtime modes for AE
+
+| Mode | When to use | How |
+| --- | --- | --- |
+| **All-in-one (default)** | Most users; service-spawned worker containers | `docker build --target shotwright -t shotwright:allinone .` — AE is baked in at build time |
+| **Host-mount** | You already have AE installed on the Windows host and want a thinner image | Pass `-AfterEffectsPayloadRoot $null` to `run_validation.ps1`; the script mounts the host install resolved from `setup-versions.yml` |
+| **Installer-cache** | Air-gapped or proxy-restricted builds; want to control payload provenance | Pull or build a payload directory, then pass `-AfterEffectsPayloadRoot` and `-CreativeCloudHelperRoot` to `run_validation.ps1`. Detailed walkthrough in [setup.md](setup.md) |
+
+<details>
+<summary><strong>Proxy-friendly build example</strong></summary>
+
+```powershell
+$proxy = 'http://proxy.example.com:8080'
+docker build `
+	--build-arg http_proxy=$proxy `
+	--build-arg https_proxy=$proxy `
+	--build-arg HTTP_PROXY=$proxy `
+	--build-arg HTTPS_PROXY=$proxy `
+	--target shotwright `
+	-t shotwright:allinone .
+```
+
+</details>
+
+<details>
+<summary><strong>Disable the AE re-check at container startup</strong></summary>
+
+```powershell
+docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:allinone .
+```
+
+</details>
 
 ## 🧪 AE-operation-benchmark *(draft — not yet implemented)*
 
@@ -185,9 +248,21 @@ The pipeline is not fully autonomous. Shotwright routes **repeatable, machine-ve
 
 Shotwright takes configuration, scripting, rendering, and frame-by-frame QA off the designer's plate — not the taste.
 
-## 🚀 Quick Start
+## 🚀 Getting Started
 
-### A. Run the platform (Docker Compose)
+Shotwright is AI-native. The recommended setup path is to delegate host configuration entirely to a Claude Code or Codex agent rather than following each step manually. Provide a fresh Windows VM with SSH access and any proxy settings; the agent handles Docker installation, Windows-container mode, image build, `.env` configuration, and service startup.
+
+### Agent-driven setup (recommended)
+
+1. Provision a Windows VM meeting the [host requirements](#host-requirements) and open the SSH port.
+2. Clone this repo and open it in a Claude Code or Codex session on your local machine.
+3. Tell the agent your host IP, SSH credentials, proxy URL if needed, and your Copilot or OpenAI API key.
+4. The agent installs Docker Desktop, switches it to Windows-container mode, builds `shotwright:allinone`, configures `.env`, and starts the stack.
+5. When the agent reports done, open `http://<host-ip>:3000`.
+
+### Manual setup
+
+#### A. Run the platform (Docker Compose)
 
 ```powershell
 # build worker image once (default target = shotwright:allinone)
@@ -210,7 +285,7 @@ copy .env.example .env
 | Backend API | http://localhost:8000/api |
 | Swagger | http://localhost:8000/api/docs |
 
-### B. Local dev without Docker
+#### B. Local dev without Docker
 
 Requires a local MongoDB on `localhost:27017` and an AE-capable Windows host if you want to exercise the worker container.
 
@@ -228,7 +303,7 @@ npm run dev
 
 Or the convenience one-shot: `.\src\scripts\dev.ps1`.
 
-### C. Validate the AE runtime container only
+#### C. Validate the AE runtime container only
 
 Useful when you only want to verify the Windows container, AE install, and nexrender round-trip — no platform required.
 
@@ -236,61 +311,7 @@ Useful when you only want to verify the Windows container, AE install, and nexre
 powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:allinone
 ```
 
-Produces `validation-data/output/validation.mp4`. See [AE Runtime Container](#-ae-runtime-container) below for host-mount and installer-cache variants, plus [setup.md](setup.md) for the full installer-cache walkthrough.
-
-## 🪟 AE Runtime Container
-
-> [!NOTE]
-> **Why Windows containers?** `aerender.exe` — After Effects' command-line renderer — is Windows-only, so Linux containers are not an option. Beyond that constraint, containers give Shotwright two properties that matter for production use: each session gets a fresh isolated container (one crashed render cannot affect the next), and the image pins every dependency — AE version, nexrender, ffmpeg, Python, Node — so every render runs against the same baseline whether it's on a developer's machine, in CI, or in production. The container turns "works on my machine" into "works in the image."
-
-The root [Dockerfile](Dockerfile) is multi-stage. The default `shotwright` target bakes the AE installer payload (pulled from GHCR at build time) directly into the image.
-
-| Stage | Purpose | Typical tag |
-| --- | --- | --- |
-| `base` | Shared toolchain — Chocolatey, Node 20, Python 3.13, ffmpeg, Git, Visual C++ runtime | — |
-| `after-effects-setup` | Reference to `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2` | (pulled, not built) |
-| `shotwright` | All-in-one AE worker — installs AE during build, runs `runtime_entrypoint.ps1` at startup | `shotwright:allinone` |
-| `backend` | FastAPI + codex-bridge + uv dependencies | `shotwright:backend` |
-| `frontend-build` → `frontend` | Webpack production build + static server | `shotwright:frontend` |
-
-### Three runtime modes for AE
-
-| Mode | When to use | How |
-| --- | --- | --- |
-| **All-in-one (default)** | Most users; service-spawned worker containers | `docker build --target shotwright -t shotwright:allinone .` — AE is baked in at build time |
-| **Host-mount** | You already have AE installed on the Windows host and want a thinner image | Pass `-AfterEffectsPayloadRoot $null` to `run_validation.ps1`; the script mounts the host install resolved from `setup-versions.yml` |
-| **Installer-cache** | Air-gapped or proxy-restricted builds; want to control payload provenance | Pull or build a payload directory, then pass `-AfterEffectsPayloadRoot` and `-CreativeCloudHelperRoot` to `run_validation.ps1`. Detailed walkthrough in [setup.md](setup.md) |
-
-<details>
-<summary><strong>Proxy-friendly build example</strong></summary>
-
-```powershell
-$proxy = 'http://proxy.example.com:8080'
-docker build `
-	--build-arg http_proxy=$proxy `
-	--build-arg https_proxy=$proxy `
-	--build-arg HTTP_PROXY=$proxy `
-	--build-arg HTTPS_PROXY=$proxy `
-	--target shotwright `
-	-t shotwright:allinone .
-```
-
-</details>
-
-<details>
-<summary><strong>Disable the AE re-check at container startup</strong></summary>
-
-```powershell
-docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:allinone .
-```
-
-</details>
-
-### Requirements
-
-- Windows host (Windows 11 Pro or Windows Server LTSC 2025)
-- Docker Desktop in Windows-container mode (`docker info --format '{{.OSType}}'` returns `windows`)
-- For the host-mount path only: a real AE install matching the `setup-versions.yml` selection
+Produces `validation-data/output/validation.mp4`. See [setup.md](setup.md) for the installer-cache walkthrough.
 
 ## 🔁 CI and GHCR Setup Images
 
