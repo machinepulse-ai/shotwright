@@ -165,7 +165,15 @@ async def main() -> None:
         await manager.handle_custom_download(task, task.dependencies_to_download)
     finally:
         stop_progress.set()
-        await progress_task
+        try:
+            await progress_task
+        except Exception as error:
+            print(f"[download] progress reporter failed: {error}", file=sys.stderr, flush=True)
+
+    if task.status.phase != "completed":
+        message = getattr(task.status.info, "message", "")
+        detail = f": {message}" if message else ""
+        raise RuntimeError(f"After Effects payload download ended as {task.status.phase}{detail}")
 
     print(
         "[download] "

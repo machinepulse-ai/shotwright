@@ -294,7 +294,7 @@ docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t sho
 
 ## 🔁 CI and GHCR Setup Images
 
-Workflows in `.github/workflows/` target `windows-2025` runners.
+Workflows in `.github/workflows/` target the organization `LargeRunner` Windows runner label by default.
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
@@ -302,7 +302,7 @@ Workflows in `.github/workflows/` target `windows-2025` runners.
 | `windows-container-validation` — `dockerfile-build` | Push or PR touching `Dockerfile` | Build verification for `shotwright:allinone` |
 | `windows-container-validation` — `validation-render` | Manual `workflow_dispatch` | Pull installer payload from GHCR and run the full validation render |
 
-`ae-setup-publish` packages the AE installer into a minimal Windows Nano Server image (`nanoserver:ltsc2025`), which `shotwright:allinone` pulls from at build time. No private secrets are needed beyond the default `GITHUB_TOKEN`.
+`ae-setup-publish` packages the AE installer into a minimal Windows Nano Server image (`nanoserver:ltsc2025`), which `shotwright:allinone` pulls from at build time. CI pulls the internal GHCR packages after `docker login ghcr.io` with the default `GITHUB_TOKEN`.
 
 ## 📁 Project Layout
 

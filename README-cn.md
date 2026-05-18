@@ -294,7 +294,7 @@ docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t sho
 
 ## 🔁 CI 与 GHCR 安装镜像
 
-`.github/workflows/` 下的工作流跑在 `windows-2025` runner 上。
+`.github/workflows/` 下的工作流默认跑在组织的 `LargeRunner` Windows runner 标签上。
 
 | 工作流 | 触发条件 | 用途 |
 | --- | --- | --- |
@@ -302,7 +302,7 @@ docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t sho
 | `windows-container-validation` — `dockerfile-build` | 推送或 PR 改动 `Dockerfile` | 确认 `shotwright:allinone` 能正常构建 |
 | `windows-container-validation` — `validation-render` | 手动 `workflow_dispatch` | 从 GHCR 拉取安装载荷并跑完整验证渲染 |
 
-`ae-setup-publish` 把 AE 安装包打包成一个极简 Windows Nano Server 镜像（`nanoserver:ltsc2025`）；`shotwright:allinone` 在构建期会拉这个镜像。除默认的 `GITHUB_TOKEN` 外不需要任何额外密钥。
+`ae-setup-publish` 把 AE 安装包打包成一个极简 Windows Nano Server 镜像（`nanoserver:ltsc2025`）；`shotwright:allinone` 在构建期会拉这个镜像。CI 会先用默认 `GITHUB_TOKEN` 执行 `docker login ghcr.io`，再拉取组织内部 GHCR 包。
 
 ## 📁 项目结构
 
