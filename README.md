@@ -40,10 +40,12 @@ A chat-driven product where a Copilot or Codex agent operates real Adobe After E
 
 - [Validation Demo](#-validation-demo)
 - [Why Shotwright](#-why-shotwright)
+- [Who is this for](#-who-is-this-for)
 - [AE-operation-benchmark (draft)](#-ae-operation-benchmark-draft--not-yet-implemented)
 - [What's Inside](#-whats-inside)
 - [Architecture](#-architecture)
 - [Agent Tools](#-agent-tools)
+- [Production Workflow](#-production-workflow)
 - [Quick Start](#-quick-start)
 - [AE Runtime Container](#-ae-runtime-container)
 - [CI and GHCR Setup Images](#-ci-and-ghcr-setup-images)
@@ -76,6 +78,24 @@ Most AI video products shrink the creative surface area: fewer decisions, fewer 
 - Keep renders reproducible, replayable, and auditable — JSX, nexrender job specs, and mp4 outputs are first-class artifacts.
 - Push infrastructure into the background. Creative judgment stays with the human; the loop is `intent → agent → JSX → render → review`.
 - Treat After Effects as a serious runtime foundation, not a thin wrapper around a panel script.
+
+## 🎯 Who is this for
+
+Shotwright targets **After Effects designers** who want to offload repetitive production work to an AI agent without becoming Windows infrastructure operators.
+
+| | What you need | Notes |
+| --- | --- | --- |
+| **Must have** | Adobe After Effects (proficient) | You judge the output. The agent writes JSX scripts, but whether the comp looks right is your call. |
+| | Windows 11 Pro or Windows Server LTSC 2025 | `aerender.exe` is Windows-only. No macOS or Linux path currently. |
+| | GitHub Copilot subscription *or* OpenAI API key | One agent backend is required. Copilot is the default; Codex is the alternative. |
+| **Basic familiarity** | Docker Desktop | Install and switch to Windows-container mode. No Dockerfile writing required. |
+| | PowerShell | A handful of commands to start the platform and run validation. |
+| **Not required** | JSX / AE scripting | The agent writes the scripts. You review the render. |
+| | Python or Node.js | Both are bundled inside the worker container. |
+| | nexrender / aerender internals | Shotwright wraps both. They are implementation details. |
+| | Cloud infrastructure | Everything runs on a single Windows host. |
+
+An AE designer with no Docker background can get the full stack running in an afternoon. The infrastructure knowledge normally required to stand up a render farm stays inside Shotwright.
 
 ## 🧪 AE-operation-benchmark *(draft — not yet implemented)*
 
@@ -139,6 +159,32 @@ The agent has 16 custom tools registered in [`agent_tools.py`](src/backend/app/s
 
 `run_python_code` runs in an isolated Python environment built from `src/backend-config/requirements-aigc.txt`, so the agent can generate images and run data-processing scripts with Pillow without touching the system Python install.
 
+## 🔄 Production Workflow
+
+A complete run from raw footage to a finished mp4, as the agent executes it:
+
+| Step | Who | What happens |
+| --- | --- | --- |
+| **1. Upload** | Human | Drop in the source video and describe the creative brief in the chat |
+| **2. Storyboard extraction** | Agent | ffmpeg samples frames at scene cuts; the agent inspects the visual structure |
+| **3. ASR** | Agent | Speech-to-text runs on the audio track to capture narration or dialogue |
+| **4. TTS** | Agent + Human | Agent generates candidate voice-over audio; human selects the preferred take |
+| **5. Asset generation** | Agent | Python + Pillow builds text overlays, lower-thirds, and data-driven graphics |
+| **6. AE composition + render** | Agent | Agent writes JSX patches for the AE project, nexrender executes the render, mp4 streams back to the browser |
+| **7. Visual QA loop** | Human | Designer reviews the mp4 and either approves or narrates corrections; the loop repeats until the comp passes |
+
+### Human-in-the-loop
+
+The pipeline is not fully autonomous. Shotwright routes **repeatable, machine-verifiable steps to the agent** and **reserves judgment calls for the designer**:
+
+| | What | Who decides |
+| --- | --- | --- |
+| **Fully automated** | Upload, storyboard extraction, ASR, batch image generation | Agent — objective criteria, no human sign-off needed |
+| **Agent proposes, human approves** | TTS voice selection, JSX script review, flagged QA samples | Human — seconds to a few minutes per call; the most common handoff point |
+| **Human judgment only** | Creative aesthetics, brand consistency, final go/no-go | Designer — no automated scoring applies |
+
+Shotwright takes configuration, scripting, rendering, and frame-by-frame QA off the designer's plate — not the taste.
+
 ## 🚀 Quick Start
 
 ### A. Run the platform (Docker Compose)
@@ -193,6 +239,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -
 Produces `validation-data/output/validation.mp4`. See [AE Runtime Container](#-ae-runtime-container) below for host-mount and installer-cache variants, plus [setup.md](setup.md) for the full installer-cache walkthrough.
 
 ## 🪟 AE Runtime Container
+
+> [!NOTE]
+> **Why Windows containers?** `aerender.exe` — After Effects' command-line renderer — is Windows-only, so Linux containers are not an option. Beyond that constraint, containers give Shotwright two properties that matter for production use: each session gets a fresh isolated container (one crashed render cannot affect the next), and the image pins every dependency — AE version, nexrender, ffmpeg, Python, Node — so every render runs against the same baseline whether it's on a developer's machine, in CI, or in production. The container turns "works on my machine" into "works in the image."
 
 The root [Dockerfile](Dockerfile) is multi-stage. The default `shotwright` target bakes the AE installer payload (pulled from GHCR at build time) directly into the image.
 
