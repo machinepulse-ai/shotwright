@@ -238,7 +238,7 @@ def load_config(config_path: Path) -> ShotwrightConfig:
             ),
             skills=SkillsBundleDefaults(
                 artifact_version=skills.get("artifactVersion", "0.0.1"),
-                release_repo=skills.get("releaseRepo", "LiuChangFreeman/shotwright"),
+                release_repo=skills.get("releaseRepo", "machinepulse-ai/shotwright"),
             ),
         ),
     )

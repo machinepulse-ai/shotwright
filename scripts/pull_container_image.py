@@ -72,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download a container image through an HTTP proxy, package it as a docker archive, and optionally docker load it locally."
     )
-    parser.add_argument("--image", required=True, help="Full image reference, for example ghcr.io/liuchangfreeman/shotwright/after-effects-setup:<VER>")
+    parser.add_argument("--image", required=True, help="Full image reference, for example ghcr.io/machinepulse-ai/shotwright/after-effects-setup:<VER>")
     parser.add_argument("--proxy", default=DEFAULT_PROXY)
     parser.add_argument("--platform-os", default="windows")
     parser.add_argument("--platform-arch", default="amd64")
