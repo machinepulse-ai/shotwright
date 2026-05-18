@@ -8,7 +8,7 @@ on:
 
 jobs:
   publish:
-    runs-on: ${{ vars.SHOTWRIGHT_WINDOWS_RUNNER || 'LargeRunner' }}
+    runs-on: ${{ vars.SHOTWRIGHT_WINDOWS_RUNNER || 'windows-latest-8-cores' }}
     permissions:
       contents: read
       packages: write

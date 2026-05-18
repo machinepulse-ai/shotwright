@@ -294,7 +294,7 @@ docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t sho
 
 ## 🔁 CI 与 GHCR 安装镜像
 
-`.github/workflows/` 下的工作流默认跑在组织的 `LargeRunner` Windows runner 标签上。
+`.github/workflows/` 下的工作流默认跑在组织的 `windows-latest-8-cores` Windows larger runner 标签上。
 
 | 工作流 | 触发条件 | 用途 |
 | --- | --- | --- |

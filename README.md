@@ -294,7 +294,7 @@ docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t sho
 
 ## 🔁 CI and GHCR Setup Images
 
-Workflows in `.github/workflows/` target the organization `LargeRunner` Windows runner label by default.
+Workflows in `.github/workflows/` target the organization `windows-latest-8-cores` Windows larger runner label by default.
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
