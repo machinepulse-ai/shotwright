@@ -79,21 +79,21 @@ Most AI video products shrink the creative surface area: fewer decisions, fewer 
 
 ## 🧪 AE-operation-benchmark *(draft — not yet implemented)*
 
-Motion-graphics agents have no public yardstick. Coding got `SWE-bench` and `HumanEval`; web automation got `WebArena`; math got `AIME`. After Effects, 3D, industrial design — anything where the judging signal isn't a clean unit test — has nothing comparable. Without a public leaderboard, frontier model teams have no reason to RL-train against AE, and Shotwright's leverage compounds slowly.
+We've noticed that motion-graphics agents don't yet have a shared yardstick the way other domains do. Coding has `SWE-bench` and `HumanEval`; web automation has `WebArena`; math has `AIME`. After Effects and adjacent pro creative tools don't have an obvious counterpart — partly because the judging signal is harder to automate, partly because the community working on this is smaller. This section sketches one approach we'd like to try: a small, reproducible task set with automated scoring, so anyone building an agent for AE can compare results on the same ground.
 
-**Proposed shape:** build the leaderboard first. Ship a reproducible task set + automated scoring + public dashboard, then invite OpenAI / Anthropic / Google to run their agents on it. Shotwright contributes the runtime so model teams never have to install Windows containers + AE themselves — the infrastructure barrier is removed, the rest is pure model-capability competition.
+Early-stage design sketch:
 
-| Design pillar | Sketch |
+| Aspect | Initial thinking |
 | --- | --- |
-| **Task set** | ~500 tasks across 5 categories — *keyframe · mask · expression · comp-build · render-export*. Each task = natural-language prompt + reference video + ground-truth `.aep`. |
-| **4-axis scoring** | Visual similarity (LPIPS / DreamSim vs reference render) + structural similarity (comp / layer / keyframe count match) + wall-time & token cost + completion rate → single weighted 0–100 score. |
-| **Ground truth** | 3–5 senior motion designers each solve the same task; team picks best-of. **Multiple references**, not a single answer — sidesteps the "creative is subjective" trap by treating "industry-grade good" as a set, not a point. |
-| **Public leaderboard** | GitHub Pages. Each submission ships score + `.aep` + rendered mp4 + repro command. Monthly rolling + season totals. |
+| **Task set** | Around 500 tasks across 5 categories — *keyframe · mask · expression · comp-build · render-export*. Each task = natural-language prompt + reference video + a ground-truth `.aep`. |
+| **Scoring** | Visual similarity (LPIPS / DreamSim against a reference render) + structural match (comp, layer, and keyframe counts) + wall-time and token cost + completion rate, combined into a single 0–100 score. |
+| **Ground truth** | Several senior motion designers solve each task; we'd keep multiple solutions rather than picking one "correct" answer, to avoid pretending creative work has a unique right answer. |
+| **Distribution** | A GitHub Pages leaderboard. Each submission would ship the score, the `.aep`, a rendered mp4, and a repro command — so results stay inspectable. |
 
-**Three-year ambition:** AE-operation-benchmark becomes to motion-graphics agents what SWE-bench became to coding agents. If frontier teams start disclosing AE-bench scores in their model cards, pro creative software moves from the fringe of evaluation into the main capability table.
+A lot of this is genuinely uncertain. We don't yet know whether the visual-similarity metrics correlate with what designers call "good", whether 500 is the right number of tasks, or whether anyone outside the team will find the format useful. We're putting the section in the README mostly because the rest of the repo makes more sense once you know we're aiming for a shared evaluation surface over time, not just better tooling for a single studio.
 
-> [!WARNING]
-> **Status — draft. Nothing here is implemented in this repository yet.** No task set is published, no scoring pipeline exists, no leaderboard is live. This section documents the project's longer-term ambition. Concrete work will be tracked once the platform stabilises; see also the [Roadmap](#-roadmap) for the platform items being built today.
+> [!NOTE]
+> **Status — draft.** None of this is implemented in the repo today: no task set, no scoring pipeline, no leaderboard. If you'd like to talk through the design — particularly the scoring side, which is where we're least confident — please open an issue or a discussion. The [Roadmap](#-roadmap) covers the platform work that's actually being built right now.
 
 ## 🧭 What's Inside
 
