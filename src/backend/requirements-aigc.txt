@@ -1,7 +1,7 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 numpy==2.4.4
-pillow==11.3.0
+pillow==12.2.0
 opencv-python==4.13.0.92
 imageio==2.37.3
 imageio-ffmpeg==0.6.0
