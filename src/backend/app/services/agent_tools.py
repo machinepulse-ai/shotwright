@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -37,6 +39,7 @@ _PYTHON_TOOL_SNAPSHOT_LIMIT = 5_000
 _PYTHON_TOOL_ENV_STATE_FILENAME = ".shotwright-python-runtime.json"
 _PYTHON_TOOL_DEFAULT_REQUIREMENTS_NAME = "requirements-aigc.txt"
 _PYTHON_TOOL_ENV_LOCK = threading.Lock()
+_AFTER_EFFECTS_SCRIPT_EXTENSIONS = {".js", ".jsx", ".jsxinc"}
 _SENSITIVE_ENV_NAMES = (
     "GITHUB_TOKEN",
     "SHOTWRIGHT_GITHUB_TOKEN",
@@ -1070,6 +1073,284 @@ def _build_reference_composition_jsx(
     )
 
 
+def _coerce_timecode_seconds(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    if ":" not in text:
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+    parts = text.split(":")
+    try:
+        seconds = float(parts[-1])
+        minutes = int(parts[-2]) if len(parts) >= 2 else 0
+        hours = int(parts[-3]) if len(parts) >= 3 else 0
+    except ValueError:
+        return 0.0
+    return hours * 3600 + minutes * 60 + seconds
+
+
+_LRC_LINE_RE = re.compile(r"^\s*\[(?P<time>\d{1,2}:\d{2}(?:\.\d+)?)\]\s*(?P<text>.*?)\s*$")
+
+
+def _segment_lyric_line(text: str) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return []
+    spaced_chunks = [chunk.strip() for chunk in cleaned.split(" ") if chunk.strip()]
+    if len(spaced_chunks) > 1:
+        return spaced_chunks
+
+    punctuation_chunks = [
+        chunk.strip()
+        for chunk in re.split(r"[，,。.!！?？、;；:：]+", cleaned)
+        if chunk.strip()
+    ]
+    if len(punctuation_chunks) > 1:
+        return punctuation_chunks
+    if len(cleaned) <= 6:
+        return [cleaned]
+
+    midpoint = max(2, min(len(cleaned) - 2, len(cleaned) // 2))
+    return [cleaned[:midpoint], cleaned[midpoint:]]
+
+
+def _build_lyrics_mapping_from_lrc(
+    lyrics_lrc: str,
+    *,
+    source_start_timecode: str,
+    duration_seconds: float,
+) -> dict:
+    base_seconds = _coerce_timecode_seconds(source_start_timecode)
+    lines: list[tuple[str, float, str]] = []
+    for raw_line in str(lyrics_lrc or "").splitlines():
+        match = _LRC_LINE_RE.match(raw_line)
+        if not match:
+            continue
+        text = match.group("text").strip()
+        if not text:
+            continue
+        source_timecode = match.group("time")
+        lines.append((source_timecode, _coerce_timecode_seconds(source_timecode), text))
+
+    if not lines:
+        return {
+            "base_source_timecode": source_start_timecode,
+            "duration_seconds": duration_seconds,
+            "entries": [],
+        }
+
+    if base_seconds <= 0:
+        base_seconds = lines[0][1]
+        source_start_timecode = lines[0][0]
+
+    entries: list[dict] = []
+    for line_index, (source_timecode, source_seconds, text) in enumerate(lines, start=1):
+        chunks = _segment_lyric_line(text)
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            entries.append(
+                {
+                    "line_index": line_index,
+                    "chunk_index": chunk_index,
+                    "text": chunk,
+                    "summary": chunk[:8],
+                    "source_timecode": source_timecode,
+                    "source_seconds": round(source_seconds, 2),
+                    "comp_time_seconds": round(source_seconds - base_seconds + (chunk_index - 1) * 0.42, 2),
+                }
+            )
+
+    return {
+        "base_source_timecode": source_start_timecode,
+        "duration_seconds": duration_seconds,
+        "entries": entries,
+    }
+
+
+async def _find_recent_lrc_text(session_id: str, *, min_lines: int = 2) -> str:
+    try:
+        cursor = (
+            get_message_collection()
+            .find({"session_id": session_id}, {"content": 1, "created_at": 1})
+            .sort("created_at", -1)
+        )
+        scanned = 0
+        async for message_doc in cursor:
+            scanned += 1
+            text = str(message_doc.get("content") or "")
+            if len(_LRC_LINE_RE.findall(text)) >= min_lines:
+                return text
+            if scanned >= 24:
+                break
+    except Exception:
+        return ""
+    return ""
+
+
+def _write_lyrics_mv_placeholder_audio(audio_path: Path, *, duration_seconds: float, sample_rate: int = 44100) -> None:
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    total_frames = max(1, int(float(duration_seconds) * sample_rate))
+    frames = bytearray()
+    for index in range(total_frames):
+        t = index / sample_rate
+        pad = (
+            0.08 * math.sin(2 * math.pi * 110.0 * t)
+            + 0.045 * math.sin(2 * math.pi * 146.83 * t + 0.35)
+            + 0.028 * math.sin(2 * math.pi * 196.0 * t + 0.9)
+        )
+        shimmer = 0.018 * math.sin(2 * math.pi * 523.25 * t) * math.exp(-((t % 3.2) * 2.2))
+        pulse = 0.045 * math.sin(2 * math.pi * 68.0 * t) * math.exp(-((t % 1.6) * 5.6))
+        value = max(-0.92, min(0.92, pad + shimmer + pulse))
+        frames.extend(int(value * 32767).to_bytes(2, byteorder="little", signed=True))
+
+    with wave.open(str(audio_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(bytes(frames))
+
+
+def _load_lyrics_mapping_from_payload(payload: object, *, source_start_timecode: str) -> list[dict]:
+    raw_entries = payload.get("entries") if isinstance(payload, dict) else []
+    if not isinstance(raw_entries, list):
+        return []
+
+    base_seconds = _coerce_timecode_seconds(
+        payload.get("base_source_timecode") if isinstance(payload, dict) else source_start_timecode
+    ) or _coerce_timecode_seconds(source_start_timecode)
+    entries: list[dict] = []
+    for index, item in enumerate(raw_entries):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("summary") or "").strip()
+        if not text:
+            continue
+        source_timecode = str(item.get("source_timecode") or "").strip()
+        source_seconds = item.get("source_seconds")
+        if not isinstance(source_seconds, (int, float)):
+            source_seconds = _coerce_timecode_seconds(source_timecode)
+        comp_time = item.get("comp_time_seconds")
+        if not isinstance(comp_time, (int, float)):
+            comp_time = float(source_seconds) - base_seconds
+        entries.append(
+            {
+                "index": index,
+                "line_index": item.get("line_index"),
+                "chunk_index": item.get("chunk_index"),
+                "text": text,
+                "summary": str(item.get("summary") or text[:8]),
+                "source_timecode": source_timecode,
+                "source_seconds": round(float(source_seconds), 2),
+                "comp_time_seconds": round(float(comp_time), 2),
+            }
+        )
+    return entries
+
+
+def _load_lyrics_mapping(mapping_path: Path, *, source_start_timecode: str) -> list[dict]:
+    payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+    return _load_lyrics_mapping_from_payload(payload, source_start_timecode=source_start_timecode)
+
+
+def _select_lyrics_mv_preview_entries(entries: list[dict], duration_seconds: float) -> list[dict]:
+    if not entries:
+        return []
+    if len(entries) <= 30:
+        selected = list(entries)
+    else:
+        middle_start = max(12, (len(entries) // 2) - 6)
+        selected = []
+        seen: set[int] = set()
+        for item in [*entries[:12], *entries[middle_start : middle_start + 10], *entries[-12:]]:
+            index = int(item.get("index") or 0)
+            if index in seen:
+                continue
+            seen.add(index)
+            selected.append(item)
+
+    usable_duration = max(12.0, float(duration_seconds) - 4.0)
+    spacing = usable_duration / max(1, len(selected))
+    normalized: list[dict] = []
+    for index, item in enumerate(selected):
+        normalized_item = dict(item)
+        normalized_item["preview_time_seconds"] = round(1.2 + index * spacing + (index % 2) * 0.18, 2)
+        normalized_item["preview_duration_seconds"] = 2.65 if index % 3 else 3.1
+        normalized.append(normalized_item)
+    return normalized
+
+
+def _build_lyrics_mv_project_jsx(
+    *,
+    project_root: Path,
+    aep_path: Path,
+    mapping_entries: list[dict],
+    audio_path: Path | None,
+    image_paths: dict[str, Path],
+    composition_name: str,
+    width: int,
+    height: int,
+    duration_seconds: float,
+    frame_rate: float,
+    measurement_report_path: Path,
+) -> str:
+    entries_json = json.dumps(mapping_entries, ensure_ascii=False)
+    images_json = json.dumps({key: path.as_posix() for key, path in image_paths.items() if path.is_file()})
+    audio_json = json.dumps(audio_path.as_posix() if audio_path and audio_path.is_file() else "")
+    positions_json = json.dumps(
+        [
+            {"x": int(width * 0.50), "y": int(height * 0.36), "boxW": int(width * 0.78), "boxH": 150, "size": 54, "tone": "blue"},
+            {"x": int(width * 0.34), "y": int(height * 0.50), "boxW": int(width * 0.70), "boxH": 150, "size": 56, "tone": "ink"},
+            {"x": int(width * 0.64), "y": int(height * 0.61), "boxW": int(width * 0.70), "boxH": 150, "size": 58, "tone": "blue"},
+            {"x": int(width * 0.50), "y": int(height * 0.72), "boxW": int(width * 0.82), "boxH": 160, "size": 60, "tone": "jade"},
+            {"x": int(width * 0.36), "y": int(height * 0.81), "boxW": int(width * 0.68), "boxH": 150, "size": 52, "tone": "ink"},
+            {"x": int(width * 0.64), "y": int(height * 0.43), "boxW": int(width * 0.64), "boxH": 140, "size": 50, "tone": "blue"},
+        ]
+    )
+    return "\n".join(
+        [
+            "app.beginSuppressDialogs();",
+            "app.beginUndoGroup('Shotwright lyric motion MV');",
+            f"var W = {int(width)};",
+            f"var H = {int(height)};",
+            f"var DUR = {float(duration_seconds):.3f};",
+            f"var FPS = {float(frame_rate):.3f};",
+            f"var compName = {json.dumps(composition_name)};",
+            f"var saveFile = new File({_jsx_string(str(aep_path))});",
+            f"var measurementReportFile = new File({_jsx_string(str(measurement_report_path))});",
+            f"var entries = {entries_json};",
+            f"var positions = {positions_json};",
+            f"var imagePaths = {images_json};",
+            f"var audioPath = {audio_json};",
+            "function normalizePath(value) { return value ? value.toString().replace(/\\\\/g, '/').toLowerCase() : ''; }",
+            "function findCompByName(name) { for (var i = 1; i <= app.project.items.length; i += 1) { var item = app.project.items[i]; if (item instanceof CompItem && item.name === name) { return item; } } return null; }",
+            "function findFootageByPath(path) { var target = normalizePath(path); for (var i = 1; i <= app.project.items.length; i += 1) { var item = app.project.items[i]; if (item instanceof FootageItem && item.file && normalizePath(item.file.fsName) === target) { return item; } } return null; }",
+            "function importFootage(path) { if (!path) { return null; } var file = new File(path); if (!file.exists) { return null; } var existing = findFootageByPath(file.fsName); return existing || app.project.importFile(new ImportOptions(file)); }",
+            "function fitLayer(layer, mode) { if (!layer || !layer.source) { return; } var sx = W / layer.source.width * 100; var sy = H / layer.source.height * 100; var s = mode === 'contain' ? Math.min(sx, sy) : Math.max(sx, sy); layer.property('Anchor Point').setValue([layer.source.width / 2, layer.source.height / 2]); layer.property('Scale').setValue([s, s]); layer.property('Position').setValue([W / 2, H / 2]); }",
+            "function jsonEscape(value) { var text = value === null || typeof value === 'undefined' ? '' : value.toString(); return text.replace(/\\\\/g, '\\\\\\\\').replace(/\"/g, '\\\\\"').replace(/\\r/g, '\\\\r').replace(/\\n/g, '\\\\n').replace(/\\t/g, '\\\\t'); }",
+            "function isArray(value) { return Object.prototype.toString.call(value) === '[object Array]'; }",
+            "function jsonStringify(value) { var valueType = typeof value; if (value === null || valueType === 'undefined') { return 'null'; } if (valueType === 'string') { return '\"' + jsonEscape(value) + '\"'; } if (valueType === 'number') { return isFinite(value) ? String(value) : 'null'; } if (valueType === 'boolean') { return value ? 'true' : 'false'; } if (isArray(value)) { var arrayParts = []; for (var ai = 0; ai < value.length; ai += 1) { arrayParts.push(jsonStringify(value[ai])); } return '[' + arrayParts.join(',') + ']'; } if (valueType === 'object') { var objectParts = []; for (var key in value) { if (!value.hasOwnProperty || value.hasOwnProperty(key)) { objectParts.push('\"' + jsonEscape(key) + '\":' + jsonStringify(value[key])); } } return '{' + objectParts.join(',') + '}'; } return 'null'; }",
+            "function chooseFont(preferred) { var fonts = app.fonts && app.fonts.allFonts ? app.fonts.allFonts : []; for (var p = 0; p < preferred.length; p += 1) { for (var i = 0; i < fonts.length; i += 1) { var ps = fonts[i].postScriptName || fonts[i].name || ''; if (ps === preferred[p]) { return preferred[p]; } } } return preferred[preferred.length - 1]; }",
+            "function setEase(prop) { try { var easeIn = new KeyframeEase(0, 60); var easeOut = new KeyframeEase(0, 70); for (var k = 1; k <= prop.numKeys; k += 1) { prop.setTemporalEaseAtKey(k, [easeIn], [easeOut]); } } catch (err) {} }",
+            "function applyTextStyle(layer, text, slot, index) { var textProp = layer.property('Source Text'); var doc = textProp.value; doc.text = text; try { doc.font = chooseFont(index % 4 === 0 ? ['NotoSerifSC-Bold','NotoSerifSC-Medium','NotoSansSC-Bold','SimSun'] : ['NotoSansSC-Bold','NotoSansSC-Medium','MicrosoftYaHei-Bold','SimHei']); } catch (fontErr) {} doc.fontSize = slot.size; doc.leading = slot.size * 1.12; doc.applyFill = true; doc.applyStroke = true; doc.strokeWidth = 1.6; if (slot.tone === 'jade') { doc.fillColor = [0.00, 0.35, 0.34]; } else if (slot.tone === 'blue') { doc.fillColor = [0.02, 0.22, 0.43]; } else { doc.fillColor = [0.07, 0.11, 0.16]; } doc.strokeColor = [0.98, 0.99, 0.96]; doc.justification = ParagraphJustification.CENTER_JUSTIFY; textProp.setValue(doc); }",
+            "var oldComp = findCompByName(compName); if (oldComp) { oldComp.remove(); }",
+            "var comp = app.project.items.addComp(compName, W, H, 1, DUR, FPS); comp.bgColor = [0.95, 0.97, 0.95]; comp.motionBlur = true; comp.shutterAngle = 180;",
+            "var bg = comp.layers.addSolid([0.95, 0.97, 0.95], 'bright_porcelain_base', W, H, 1, DUR); try { var bgNoise = bg.property('Effects').addProperty('ADBE Fractal Noise'); bgNoise.property('Contrast').setValue(30); bgNoise.property('Brightness').setValue(8); bgNoise.property('Transform').property('Scale').setValue(210); } catch (noiseErr) {}",
+            "var glowA = comp.layers.addSolid([0.78, 0.91, 0.92], 'cyan_porcelain_light_sweep', W, H, 1, DUR); glowA.property('Opacity').setValueAtTime(0, 34); glowA.property('Opacity').setValueAtTime(DUR * 0.45, 58); glowA.property('Opacity').setValueAtTime(DUR, 32); try { glowA.blendingMode = BlendingMode.SOFT_LIGHT; var rampA = glowA.property('Effects').addProperty('ADBE Ramp'); rampA.property('Start of Ramp').setValue([W*0.2, H*0.1]); rampA.property('End of Ramp').setValue([W*0.9, H*0.9]); rampA.property('Start Color').setValue([0.96, 1.0, 0.98]); rampA.property('End Color').setValue([0.55, 0.78, 0.86]); } catch (glowErr) {}",
+            "var washItem = importFootage(imagePaths.porcelain || ''); if (washItem) { var wash = comp.layers.add(washItem); wash.name = 'porcelain_rain_wash_light'; fitLayer(wash, 'cover'); wash.property('Opacity').setValue(34); try { wash.blendingMode = BlendingMode.SOFT_LIGHT; } catch (blendErr) {} }",
+            "var inkItem = importFootage(imagePaths.ink || ''); if (inkItem) { var ink = comp.layers.add(inkItem); ink.name = 'pale_ink_diffusion_depth'; fitLayer(ink, 'cover'); ink.property('Opacity').setValueAtTime(0, 10); ink.property('Opacity').setValueAtTime(DUR * 0.55, 22); ink.property('Opacity').setValueAtTime(DUR, 16); try { ink.blendingMode = BlendingMode.MULTIPLY; } catch (blendErr2) {} }",
+            "var crackItem = importFootage(imagePaths.crack || ''); if (crackItem) { var crack = comp.layers.add(crackItem); crack.name = 'subtle_ceramic_memory_overlay'; fitLayer(crack, 'cover'); crack.property('Opacity').setValueAtTime(0, 0); crack.property('Opacity').setValueAtTime(DUR * 0.78, 18); crack.property('Opacity').setValueAtTime(DUR, 8); try { crack.blendingMode = BlendingMode.SOFT_LIGHT; } catch (crackBlendErr) {} }",
+            "for (var r = 0; r < 11; r += 1) { var ring = comp.layers.addShape(); ring.name = 'porcelain_water_ring_' + (r + 1); var root = ring.property('Contents'); var ellipse = root.addProperty('ADBE Vector Shape - Ellipse'); ellipse.property('Size').setValue([130 + r * 62, 46 + r * 24]); var stroke = root.addProperty('ADBE Vector Graphic - Stroke'); stroke.property('Color').setValue([0.03, 0.32, 0.48]); stroke.property('Opacity').setValue(32); stroke.property('Stroke Width').setValue(2.5); ring.property('Position').setValue([W * (0.16 + (r % 3) * 0.32), H * (0.20 + (r % 4) * 0.18)]); ring.property('Opacity').setValueAtTime(Math.max(0, r * 3.6 - 1), 0); ring.property('Opacity').setValueAtTime(r * 3.6, 38); ring.property('Opacity').setValueAtTime(Math.min(DUR, r * 3.6 + 2.9), 0); ring.motionBlur = true; }",
+            "var measurements = [];",
+            "for (var i = 0; i < entries.length; i += 1) { var entry = entries[i]; var slot = positions[i % positions.length]; var layer = comp.layers.addBoxText([slot.boxW, slot.boxH]); layer.name = 'lyric_word_' + (i + 1) + '_src_' + (entry.source_timecode || '').replace(/[^0-9.]/g, '_'); applyTextStyle(layer, entry.text, slot, i); var rect = layer.sourceRectAtTime(0, false); var anchor = [rect.left + rect.width / 2, rect.top + rect.height / 2]; layer.property('Anchor Point').setValue(anchor); var st = Math.max(0, Math.min(DUR - 1.1, entry.preview_time_seconds || (1 + i * 1.2))); var len = Math.max(1.7, Math.min(3.6, entry.preview_duration_seconds || 2.6)); var driftX = (i % 2 === 0 ? -44 : 44); var driftY = (i % 3 - 1) * 24; var pos = layer.property('Position'); pos.setValueAtTime(Math.max(0, st - 0.18), [slot.x + driftX, slot.y + driftY + 18]); pos.setValueAtTime(st + 0.42, [slot.x, slot.y]); pos.setValueAtTime(Math.min(DUR, st + len), [slot.x - driftX * 0.45, slot.y - driftY - 14]); setEase(pos); var opacity = layer.property('Opacity'); opacity.setValueAtTime(Math.max(0, st - 0.22), 0); opacity.setValueAtTime(st + 0.32, 100); opacity.setValueAtTime(Math.min(DUR, st + len - 0.42), 96); opacity.setValueAtTime(Math.min(DUR, st + len), 0); setEase(opacity); var scale = layer.property('Scale'); scale.setValueAtTime(Math.max(0, st - 0.15), [94, 94]); scale.setValueAtTime(st + 0.45, [100, 100]); scale.setValueAtTime(Math.min(DUR, st + len), [103, 103]); setEase(scale); layer.property('Rotation').setValueAtTime(st, (i % 5 - 2) * 1.8); layer.property('Rotation').setValueAtTime(Math.min(DUR, st + len), (2 - i % 5) * 1.2); layer.inPoint = Math.max(0, st - 0.3); layer.outPoint = Math.min(DUR, st + len + 0.2); layer.motionBlur = true; try { var blur = layer.property('Effects').addProperty('ADBE Gaussian Blur 2'); blur.property('Blurriness').setValueAtTime(Math.max(0, st - 0.18), 8); blur.property('Blurriness').setValueAtTime(st + 0.35, 0); blur.property('Blurriness').setValueAtTime(Math.min(DUR, st + len), 5); } catch (blurErr) {} layer.comment = 'source_timecode=' + (entry.source_timecode || '') + '; comp_time=' + (entry.comp_time_seconds || '') + '; preview_time=' + st.toFixed(2) + '; sourceRect=' + [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)].join(','); measurements.push({name: layer.name, summary: entry.summary || entry.text, source_timecode: entry.source_timecode || '', comp_time_seconds: entry.comp_time_seconds || 0, preview_time_seconds: st, sourceRect: {left: rect.left, top: rect.top, width: rect.width, height: rect.height}, anchorPoint: anchor, position: [slot.x, slot.y], boxSize: [slot.boxW, slot.boxH], motionBlur: true}); }",
+            "var audioItem = importFootage(audioPath); if (audioItem) { var aud = comp.layers.add(audioItem); aud.name = 'placeholder_audio_qinghua_rain_pad'; aud.startTime = 0; aud.inPoint = 0; aud.outPoint = DUR; }",
+            "if (!measurementReportFile.parent.exists) { measurementReportFile.parent.create(); } measurementReportFile.encoding = 'UTF-8'; measurementReportFile.open('w'); measurementReportFile.write(jsonStringify({composition: compName, duration_seconds: DUR, text_layer_count: measurements.length, measurements: measurements})); measurementReportFile.close();",
+            "comp.openInViewer(); app.project.save(saveFile); app.endUndoGroup();",
+        ]
+    )
+
+
 def build_shotwright_tools(app_session_id: str) -> list[Tool]:
     """Build session-scoped tools for the Copilot runtime."""
 
@@ -1137,6 +1418,36 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         work_dir.mkdir(parents=True, exist_ok=True)
         entry_aep_file = str(project.get("entry_aep_file") or project.get("filename") or "").strip() if project else ""
         return work_dir, project, project_id, entry_aep_file or None
+
+    def _resolve_session_workspace_path(
+        raw_path: object,
+        *,
+        project: dict | None = None,
+        default_root: Path | None = None,
+    ) -> Path:
+        normalized = str(raw_path or "").strip()
+        if not normalized:
+            raise ValueError("script_path is required.")
+
+        session_upload_dir = (pm.UPLOAD_DIR / app_session_id).resolve()
+        session_export_dir = (pm.EXPORT_DIR / app_session_id).resolve()
+        allowed_roots = [session_upload_dir, session_export_dir]
+
+        project_root: Path | None = None
+        if project:
+            project_root = Path(project["workspace_dir"]).resolve()
+            allowed_roots.append(project_root)
+
+        base_root = default_root or project_root or session_upload_dir
+        requested_path = Path(normalized)
+        if not requested_path.is_absolute():
+            requested_path = base_root / requested_path
+        resolved_path = requested_path.resolve()
+
+        if not any(_path_is_inside(resolved_path, root) for root in allowed_roots):
+            allowed_text = ", ".join(str(root) for root in allowed_roots)
+            raise ValueError(f"script_path must stay inside this session workspace. Allowed roots: {allowed_text}")
+        return resolved_path
 
     async def _create_project_from_script(
         *,
@@ -1607,6 +1918,187 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             session_log=args.get("description") or f"Created or updated composition {composition_name}",
         )
 
+    async def create_lyrics_mv_project(invocation: ToolInvocation) -> ToolResult:
+        args = invocation.arguments or {}
+        session_col = get_session_collection()
+        session_doc = await session_col.find_one({"_id": app_session_id})
+        if not session_doc:
+            return _tool_failure("Shotwright session not found.")
+
+        container_id = str(session_doc.get("container_id") or "").strip()
+        if container_id:
+            container_doc = await cm.get_container(container_id)
+            if not container_doc or container_doc.get("status") != "running":
+                container_id = ""
+        if not container_id:
+            created_container = await cm.create_container(app_session_id, args.get("image"))
+            container_id = created_container["_id"]
+
+        project_id = str(args.get("project_id") or session_doc.get("active_project_id") or "").strip()
+        project = await pm.get_project(app_session_id, project_id) if project_id else None
+        if project_id and not project:
+            return _tool_failure(f"Project {project_id} not found.")
+        if project is None:
+            project = await pm.create_project_workspace(
+                app_session_id,
+                project_name=args.get("project_name") or "lyrics_mv_preview",
+                aep_filename=args.get("aep_filename") or "lyrics_mv_preview.aep",
+                set_active=False,
+            )
+            project_id = project["_id"]
+
+        project_root = Path(project["workspace_dir"]).resolve()
+        project_root.mkdir(parents=True, exist_ok=True)
+        entry_aep_file = str(project.get("entry_aep_file") or project.get("filename") or "lyrics_mv_preview.aep").strip()
+        target_aep_path = project_root / entry_aep_file
+        if not target_aep_path.exists():
+            bootstrap_template_path = nr._resolve_nexrender_bootstrap_template()
+            if not bootstrap_template_path.exists():
+                return _tool_failure(f"Bootstrap template not found at {bootstrap_template_path}")
+            target_aep_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bootstrap_template_path, target_aep_path)
+
+        def resolve_project_path(raw_path: object, default_path: Path, *, label: str) -> Path:
+            normalized = str(raw_path or "").strip()
+            requested_path = Path(normalized) if normalized else default_path
+            if not requested_path.is_absolute():
+                requested_path = project_root / requested_path
+            resolved_path = requested_path.resolve()
+            if not _path_is_inside(resolved_path, project_root):
+                raise ValueError(f"{label} must stay inside the active project workspace.")
+            return resolved_path
+
+        source_start_timecode = str(args.get("source_start_timecode") or "02:07.00").strip() or "02:07.00"
+        duration_seconds = max(40.0, min(55.0, float(args.get("duration_seconds") or 45.0)))
+        frame_rate = max(1.0, float(args.get("frame_rate") or 30.0))
+        width = max(320, int(args.get("width") or 1080))
+        height = max(320, int(args.get("height") or 1920))
+        composition_name = str(args.get("composition_name") or "Main").strip() or "Main"
+
+        try:
+            mapping_path = resolve_project_path(
+                args.get("mapping_path"),
+                project_root / "assets" / "data" / "lyric_mapping.json",
+                label="mapping_path",
+            )
+            audio_path = resolve_project_path(
+                args.get("audio_path"),
+                project_root / "assets" / "audio" / "placeholder_audio_qinghua_rain_pad.wav",
+                label="audio_path",
+            )
+            script_path = resolve_project_path(
+                args.get("script_path"),
+                project_root / "scripts" / "qinghua_mv_preview.jsx",
+                label="script_path",
+            )
+            measurement_report_path = resolve_project_path(
+                args.get("measurement_report_path"),
+                project_root / "reports" / "qinghua_mv_measurements.json",
+                label="measurement_report_path",
+            )
+        except ValueError as exc:
+            return _tool_failure(str(exc))
+
+        mapping_created_from_lrc = False
+        if mapping_path.is_file():
+            mapping_entries = _load_lyrics_mapping(mapping_path, source_start_timecode=source_start_timecode)
+        else:
+            lyrics_lrc = str(args.get("lyrics_lrc") or "").strip() or await _find_recent_lrc_text(app_session_id)
+            mapping_payload = _build_lyrics_mapping_from_lrc(
+                lyrics_lrc,
+                source_start_timecode=source_start_timecode,
+                duration_seconds=duration_seconds,
+            )
+            mapping_entries = _load_lyrics_mapping_from_payload(mapping_payload, source_start_timecode=source_start_timecode)
+            if mapping_entries:
+                mapping_path.parent.mkdir(parents=True, exist_ok=True)
+                mapping_path.write_text(json.dumps(mapping_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                mapping_created_from_lrc = True
+
+        if not mapping_entries:
+            return _tool_failure(
+                "No lyric mapping is available. Provide lyrics_lrc with [mm:ss.xx] time tags or create assets/data/lyric_mapping.json first."
+            )
+
+        selected_entries = _select_lyrics_mv_preview_entries(mapping_entries, duration_seconds)
+        if not selected_entries:
+            return _tool_failure("Lyric mapping did not contain usable text entries.")
+
+        placeholder_audio_note = ""
+        if not audio_path.is_file():
+            _write_lyrics_mv_placeholder_audio(audio_path, duration_seconds=duration_seconds)
+            placeholder_audio_note = (
+                "Generated an original placeholder atmosphere track. No copyrighted song audio was downloaded or embedded."
+            )
+
+        image_dir = project_root / "assets" / "images"
+        image_paths = {
+            "porcelain": image_dir / "porcelain_rain_wash.png",
+            "crack": image_dir / "ceramic_cracks_overlay.png",
+            "ink": image_dir / "ink_diffusion_overlay.png",
+        }
+        script_path.parent.mkdir(parents=True, exist_ok=True)
+        measurement_report_path.parent.mkdir(parents=True, exist_ok=True)
+        script_content = _build_lyrics_mv_project_jsx(
+            project_root=project_root,
+            aep_path=target_aep_path,
+            mapping_entries=selected_entries,
+            audio_path=audio_path,
+            image_paths=image_paths,
+            composition_name=composition_name,
+            width=width,
+            height=height,
+            duration_seconds=duration_seconds,
+            frame_rate=frame_rate,
+            measurement_report_path=measurement_report_path,
+        )
+        script_path.write_text(script_content, encoding="utf-8")
+
+        await pm.set_active_project(app_session_id, project_id)
+        result = await nr.run_jsx_script(
+            container_id,
+            script_content,
+            project=project,
+            timeout_seconds=_coerce_timeout_seconds(args.get("timeout_seconds"), default=240),
+        )
+        refreshed_project = await pm.refresh_project_files(app_session_id, project_id) or project
+        entry_aep_file = refreshed_project.get("entry_aep_file") or (refreshed_project.get("aep_files") or [None])[0]
+        payload = {
+            **result,
+            "project_id": project_id,
+            "workspace_dir": refreshed_project["workspace_dir"],
+            "entry_aep_file": entry_aep_file,
+            "entry_aep_path": str(Path(refreshed_project["workspace_dir"]) / entry_aep_file) if entry_aep_file else None,
+            "aep_files": refreshed_project.get("aep_files", []),
+            "compositions": refreshed_project.get("compositions", []),
+            "composition_catalog_updated_at": refreshed_project.get("composition_catalog_updated_at"),
+            "composition_name": composition_name,
+            "duration_seconds": duration_seconds,
+            "width": width,
+            "height": height,
+            "frame_rate": frame_rate,
+            "script_path": str(script_path),
+            "script_relative_path": script_path.relative_to(project_root).as_posix(),
+            "script_source": "generated_backend_template",
+            "mapping_path": str(mapping_path),
+            "mapping_created_from_lrc": mapping_created_from_lrc,
+            "selected_lyric_count": len(selected_entries),
+            "measurement_report_path": str(measurement_report_path),
+            "audio_path": str(audio_path),
+            "placeholder_audio_note": placeholder_audio_note,
+            "next_steps": [
+                "Render this project with render_after_effects_project.",
+                "Generate a storyboard from the render and review text layout before finalizing.",
+            ],
+        }
+        result_type = "success" if result.get("success", result.get("exit_code") == 0) else "failure"
+        return ToolResult(
+            text_result_for_llm=_serialize_tool_payload(payload),
+            result_type=result_type,
+            error=result.get("output") if result_type == "failure" else None,
+            session_log=args.get("description") or "Created a lyric MV After Effects project with measured paragraph text",
+        )
+
     async def generate_storyboard_from_reference_video(invocation: ToolInvocation) -> ToolResult:
         args = invocation.arguments or {}
         try:
@@ -1858,9 +2350,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
 
     async def run_after_effects_jsx(invocation: ToolInvocation) -> ToolResult:
         args = invocation.arguments or {}
-        script_content = (args.get("script_content") or "").strip()
-        if not script_content:
-            return _tool_failure("script_content is required.")
+        inline_script_content = str(args.get("script_content") or "").strip()
+        raw_script_path = str(args.get("script_path") or "").strip()
+        if not inline_script_content and not raw_script_path:
+            return _tool_failure("script_content or script_path is required.")
 
         session_col = get_session_collection()
         session_doc = await session_col.find_one({"_id": app_session_id})
@@ -1874,6 +2367,28 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             if not project:
                 return _tool_failure(f"Project {project_id} not found.")
 
+        script_source = "inline"
+        script_path: Path | None = None
+        script_content = inline_script_content
+        if raw_script_path:
+            try:
+                script_path = _resolve_session_workspace_path(raw_script_path, project=project)
+            except ValueError as exc:
+                return _tool_failure(str(exc))
+            if script_path.suffix.lower() not in _AFTER_EFFECTS_SCRIPT_EXTENSIONS:
+                return _tool_failure(
+                    "script_path must point to an After Effects script file with extension .jsx, .jsxinc, or .js."
+                )
+            if not script_path.is_file():
+                return _tool_failure(f"script_path not found: {script_path}")
+            try:
+                script_content = script_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                script_content = script_path.read_text(encoding="utf-8-sig")
+            script_source = "script_path"
+            if not script_content.strip():
+                return _tool_failure(f"script_path is empty: {script_path}")
+
         result = await nr.run_jsx_script(
             session_doc["container_id"],
             script_content,
@@ -1881,6 +2396,9 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             timeout_seconds=_coerce_timeout_seconds(args.get("timeout_seconds")),
         )
         payload = dict(result)
+        payload["script_source"] = script_source
+        if script_path is not None:
+            payload["script_path"] = str(script_path)
         if project:
             refreshed_project = await pm.refresh_project_files(app_session_id, project["_id"])
             if refreshed_project:
@@ -1903,6 +2421,39 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             session_log=args.get("description") or "Executed After Effects JSX script",
         )
 
+    def _generated_project_looks_renderable(project: dict, composition_name: str) -> tuple[bool, str]:
+        if str(project.get("origin") or "").strip().lower() != "generated":
+            return True, ""
+
+        compositions = project.get("compositions") if isinstance(project.get("compositions"), list) else []
+        requested = (composition_name or "Main").strip() or "Main"
+        matching = [
+            item
+            for item in compositions
+            if isinstance(item, dict) and str(item.get("name") or "").strip().lower() == requested.lower()
+        ]
+        if not matching:
+            return (
+                False,
+                f"Generated project has no recorded composition named {requested!r}. "
+                "Run run_after_effects_jsx or create_after_effects_project to create and save the requested composition before rendering.",
+            )
+
+        comp = matching[0]
+        width = comp.get("width")
+        height = comp.get("height")
+        duration_seconds = comp.get("duration_seconds")
+        layer_count = comp.get("layer_count")
+        if not width or not height or not duration_seconds or not layer_count:
+            return (
+                False,
+                f"Generated project composition {requested!r} is still an empty or unverified workspace shell "
+                f"(width={width}, height={height}, duration_seconds={duration_seconds}, layer_count={layer_count}). "
+                "Do not render yet. First run run_after_effects_jsx against this same project_id to create the real comp, "
+                "add the requested layers, save the AEP, and verify inspect_workspace reports dimensions and a nonzero layer_count.",
+            )
+        return True, ""
+
     async def render_after_effects_project(invocation: ToolInvocation) -> ToolResult:
         args = invocation.arguments or {}
         session_col = get_session_collection()
@@ -1921,6 +2472,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             return _tool_failure(f"Project {project_id} not found.")
 
         await pm.set_active_project(app_session_id, project_id)
+        composition_name = str(args.get("composition") or "Main").strip() or "Main"
+        renderable, renderable_error = _generated_project_looks_renderable(project, composition_name)
+        if not renderable:
+            return _tool_failure(renderable_error)
 
         try:
             render = await nr.render_project(
@@ -1928,7 +2483,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                 project_id=project_id,
                 container_db_id=session_doc["container_id"],
                 aep_relative_path=args.get("aep_file"),
-                composition=args.get("composition") or "Main",
+                composition=composition_name,
                 output_name=args.get("output_name"),
                 patch_script=args.get("patch_script"),
             )
@@ -1939,10 +2494,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             failure_payload = {
                 **render,
                 "project_id": project_id,
-                "requested_composition": args.get("composition") or "Main",
+                "requested_composition": composition_name,
                 "failure_details": nr.format_render_failure_details(
                     render,
-                    composition=args.get("composition") or "Main",
+                    composition=composition_name,
                 ),
             }
             return ToolResult(
@@ -1958,7 +2513,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             session_id=app_session_id,
             project_id=project_id,
             output_path=render["output_path"],
-            composition=args.get("composition") or "Main",
+            composition=composition_name,
             aep_path=render["aep_path"],
             work_dir=render.get("work_dir"),
             stdout_path=render.get("stdout_path"),
@@ -1984,7 +2539,7 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             app_session_id,
             "render.completed",
             project_id=project_id,
-            composition=args.get("composition") or "Main",
+            composition=composition_name,
             render_path=render["output_path"],
             render_id=render_output["id"],
         )
@@ -2116,7 +2671,10 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
         ),
         Tool(
             name="create_empty_after_effects_project",
-            description="Create a blank managed Shotwright .aep, or reuse the current empty generated workspace after a failed bootstrap, without requiring handwritten JSX boilerplate.",
+            description=(
+                "Create a blank managed Shotwright .aep/workspace shell, or reuse the current empty generated workspace after a failed bootstrap. "
+                "This does not create the user's requested render-ready composition; follow it with run_after_effects_jsx before rendering."
+            ),
             handler=create_empty_after_effects_project,
             parameters={
                 "type": "object",
@@ -2434,6 +2992,87 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
             skip_permission=True,
         ),
         Tool(
+            name="create_lyrics_mv_project",
+            description=(
+                "Reliable backend path for lyric MV, dense CJK text animation, subtitle-heavy, or text-measurement-sensitive "
+                "After Effects scenes. It builds a render-ready vertical composition with paragraph text via addBoxText, "
+                "uses sourceRectAtTime to center actual rendered text, writes a measurement report, saves the managed AEP, "
+                "and avoids forcing the model to inline a large JSX script. Use this before render_after_effects_project "
+                "when lyrics_lrc or assets/data/lyric_mapping.json is available."
+            ),
+            handler=create_lyrics_mv_project,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project identifier; defaults to the active project or creates a new managed workspace.",
+                    },
+                    "project_name": {
+                        "type": "string",
+                        "description": "Project name when creating a new workspace.",
+                    },
+                    "aep_filename": {
+                        "type": "string",
+                        "description": "AEP filename when creating a new workspace.",
+                    },
+                    "lyrics_lrc": {
+                        "type": "string",
+                        "description": "Optional LRC text using [mm:ss.xx] time tags. If omitted, the tool searches recent user messages or an existing mapping file.",
+                    },
+                    "mapping_path": {
+                        "type": "string",
+                        "description": "Optional project-relative lyric mapping JSON path. Defaults to assets/data/lyric_mapping.json.",
+                    },
+                    "source_start_timecode": {
+                        "type": "string",
+                        "description": "Source song timecode corresponding to comp time 0. Defaults to 02:07.00.",
+                    },
+                    "composition_name": {
+                        "type": "string",
+                        "description": "Composition name to create or replace. Defaults to Main.",
+                    },
+                    "width": {
+                        "type": "integer",
+                        "description": "Composition width in pixels. Defaults to 1080.",
+                    },
+                    "height": {
+                        "type": "integer",
+                        "description": "Composition height in pixels. Defaults to 1920.",
+                    },
+                    "duration_seconds": {
+                        "type": "number",
+                        "description": "Preview duration in seconds, clamped to 40-55. Defaults to 45.",
+                    },
+                    "frame_rate": {
+                        "type": "number",
+                        "description": "Composition frame rate. Defaults to 30.",
+                    },
+                    "audio_path": {
+                        "type": "string",
+                        "description": "Optional project-relative audio path. If missing, an original placeholder atmosphere WAV is generated.",
+                    },
+                    "script_path": {
+                        "type": "string",
+                        "description": "Optional project-relative path for the generated JSX. Defaults to scripts/qinghua_mv_preview.jsx.",
+                    },
+                    "measurement_report_path": {
+                        "type": "string",
+                        "description": "Optional project-relative path for text measurement JSON. Defaults to reports/qinghua_mv_measurements.json.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Short human-readable description of the operation.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Optional timeout for AfterFX.jsx execution.",
+                    },
+                },
+            },
+            skip_permission=True,
+        ),
+        Tool(
             name="run_after_effects_jsx",
             description=(
                 "Execute a JSX script inside the active After Effects container. When a project_id or active project exists, "
@@ -2460,7 +3099,18 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                     },
                     "script_content": {
                         "type": "string",
-                        "description": "Complete JSX script source",
+                        "description": (
+                            "Complete JSX script source. Use this only for short scripts. For complex scenes, "
+                            "many lyric/text layers, or scripts over roughly 8 KB, first use run_python_code to "
+                            "write a .jsx file inside the project workspace, then pass script_path instead."
+                        ),
+                    },
+                    "script_path": {
+                        "type": "string",
+                        "description": (
+                            "Path to a .jsx/.jsxinc/.js file inside this session or active project workspace. "
+                            "Relative paths resolve from the active project workspace. Prefer this for complex AE scripts."
+                        ),
                     },
                     "description": {
                         "type": "string",
@@ -2471,7 +3121,6 @@ def build_shotwright_tools(app_session_id: str) -> list[Tool]:
                         "description": "Optional timeout for AfterFX.jsx execution",
                     },
                 },
-                "required": ["script_content"],
             },
             skip_permission=True,
         ),

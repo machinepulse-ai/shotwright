@@ -3024,13 +3024,39 @@ function ChatResultInlineVideo({
   poster?: string | null;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [visibleSrc, setVisibleSrc] = useState<string | null>(null);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return undefined;
 
+    setVisibleSrc((previous) => (previous === src ? previous : null));
+
+    if (typeof IntersectionObserver === "undefined") {
+      setVisibleSrc(src);
+      return undefined;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0)) {
+          setVisibleSrc(src);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "480px 0px" },
+    );
+
+    observer.observe(video);
+    return () => observer.disconnect();
+  }, [src]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !src || visibleSrc !== src) return undefined;
+
     return bindVideoSource(video, src, format);
-  }, [format, src]);
+  }, [format, src, visibleSrc]);
 
   return (
     <video
@@ -6122,14 +6148,13 @@ export default function AgentPanel({
                               <span className="reference-media-gallery-chip-action">{copy.video.preview}</span>
                             </span>
 
-                            <video
-                              className="reference-media-gallery-thumb"
-                              src={item.src}
-                              poster={item.thumbnailSrc || undefined}
-                              muted
-                              playsInline
-                              preload="metadata"
-                            />
+                            {item.thumbnailSrc ? (
+                              <img className="reference-media-gallery-thumb" src={item.thumbnailSrc} alt="" loading="lazy" />
+                            ) : (
+                              <span className="reference-media-gallery-thumb reference-media-gallery-thumb-placeholder" aria-hidden="true">
+                                {item.label}
+                              </span>
+                            )}
 
                             <span className="reference-media-gallery-chip-title" title={item.title}>{item.title}</span>
                             {item.meta ? <span className="reference-media-gallery-chip-meta">{item.meta}</span> : null}
@@ -6283,14 +6308,13 @@ export default function AgentPanel({
                                   </span>
 
                                   {item.kind === "video" ? (
-                                    <video
-                                      className="reference-media-gallery-thumb"
-                                      src={item.src}
-                                      poster={item.thumbnailSrc || undefined}
-                                      muted
-                                      playsInline
-                                      preload="metadata"
-                                    />
+                                    item.thumbnailSrc ? (
+                                      <img className="reference-media-gallery-thumb" src={item.thumbnailSrc} alt="" loading="lazy" />
+                                    ) : (
+                                      <span className="reference-media-gallery-thumb reference-media-gallery-thumb-placeholder" aria-hidden="true">
+                                        {item.label}
+                                      </span>
+                                    )
                                   ) : (
                                     <img className="reference-media-gallery-thumb" src={item.src} alt={item.title} loading="lazy" />
                                   )}

@@ -381,6 +381,212 @@ async def test_run_python_code_rejects_work_dir_outside_session(
 
 
 @pytest.mark.asyncio
+async def test_run_after_effects_jsx_accepts_project_script_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / 'project'
+    script_path = project_root / 'scripts' / 'build.jsx'
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text('app.project.items.addComp("Main", 720, 1280, 1, 5, 30);', encoding='utf-8')
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'container_id': 'container-1',
+            'active_project_id': 'project-1',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'scene.aep',
+        'workspace_dir': str(project_root),
+        'entry_aep_file': 'scene.aep',
+        'aep_files': ['scene.aep'],
+        'compositions': [],
+    }
+    captured: dict[str, object] = {}
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_refresh_project_files(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        refreshed = dict(project)
+        refreshed['compositions'] = [{'name': 'Main', 'width': 720, 'height': 1280, 'duration_seconds': 5, 'layer_count': 1}]
+        return refreshed
+
+    async def fake_run_jsx_script(container_id: str, script_content: str, *, project=None, timeout_seconds=None) -> dict:
+        captured['container_id'] = container_id
+        captured['script_content'] = script_content
+        captured['project'] = project
+        captured['timeout_seconds'] = timeout_seconds
+        return {'success': True, 'exit_code': 0, 'output': 'ok'}
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+    monkeypatch.setattr(module.pm, 'refresh_project_files', fake_refresh_project_files)
+    monkeypatch.setattr(module.nr, 'run_jsx_script', fake_run_jsx_script)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['run_after_effects_jsx'].handler(
+        SimpleNamespace(arguments={'project_id': 'project-1', 'script_path': 'scripts/build.jsx', 'timeout_seconds': 10})
+    )
+
+    assert result.result_type == 'success'
+    assert captured['container_id'] == 'container-1'
+    assert captured['script_content'] == script_path.read_text(encoding='utf-8')
+    assert captured['timeout_seconds'] == 30
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['script_source'] == 'script_path'
+    assert payload['script_path'] == str(script_path.resolve())
+    assert payload['compositions'][0]['name'] == 'Main'
+
+
+@pytest.mark.asyncio
+async def test_run_after_effects_jsx_rejects_script_path_outside_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / 'project'
+    project_root.mkdir(parents=True, exist_ok=True)
+    outside_script = tmp_path / 'outside.jsx'
+    outside_script.write_text('alert("nope");', encoding='utf-8')
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'container_id': 'container-1',
+            'active_project_id': 'project-1',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'scene.aep',
+        'workspace_dir': str(project_root),
+        'entry_aep_file': 'scene.aep',
+        'aep_files': ['scene.aep'],
+    }
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        return dict(project)
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['run_after_effects_jsx'].handler(
+        SimpleNamespace(arguments={'project_id': 'project-1', 'script_path': str(outside_script)})
+    )
+
+    assert result.result_type == 'failure'
+    assert 'script_path must stay inside this session workspace' in result.error
+
+
+@pytest.mark.asyncio
+async def test_create_lyrics_mv_project_uses_lrc_mapping_and_runs_jsx(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / 'project'
+    (project_root / 'assets' / 'audio').mkdir(parents=True, exist_ok=True)
+    (project_root / 'scene.aep').write_bytes(b'aep')
+    (project_root / 'assets' / 'audio' / 'user.wav').write_bytes(b'wav')
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'container_id': 'container-1',
+            'active_project_id': 'project-1',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'scene.aep',
+        'workspace_dir': str(project_root),
+        'entry_aep_file': 'scene.aep',
+        'aep_files': ['scene.aep'],
+        'compositions': [],
+    }
+    captured: dict[str, object] = {}
+    active_projects: list[str] = []
+
+    async def fake_get_container(container_id: str) -> dict:
+        assert container_id == 'container-1'
+        return {'_id': container_id, 'status': 'running'}
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_set_active_project(session_id: str, project_id: str) -> None:
+        assert session_id == 'session-1'
+        active_projects.append(project_id)
+
+    async def fake_refresh_project_files(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        refreshed = dict(project)
+        refreshed['compositions'] = [
+            {'name': 'Main', 'width': 1080, 'height': 1920, 'duration_seconds': 45, 'layer_count': 14}
+        ]
+        return refreshed
+
+    async def fake_run_jsx_script(container_id: str, script_content: str, *, project=None, timeout_seconds=None) -> dict:
+        captured['container_id'] = container_id
+        captured['script_content'] = script_content
+        captured['project'] = project
+        captured['timeout_seconds'] = timeout_seconds
+        return {'success': True, 'exit_code': 0, 'output': 'ok'}
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.cm, 'get_container', fake_get_container)
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+    monkeypatch.setattr(module.pm, 'set_active_project', fake_set_active_project)
+    monkeypatch.setattr(module.pm, 'refresh_project_files', fake_refresh_project_files)
+    monkeypatch.setattr(module.nr, 'run_jsx_script', fake_run_jsx_script)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['create_lyrics_mv_project'].handler(
+        SimpleNamespace(
+            arguments={
+                'project_id': 'project-1',
+                'lyrics_lrc': '[02:09.60]遗憾无法说 惊觉心一缩\n[02:21.98]紧紧握着 青花信物',
+                'audio_path': 'assets/audio/user.wav',
+                'duration_seconds': 45,
+            }
+        )
+    )
+
+    assert result.result_type == 'success'
+    assert captured['container_id'] == 'container-1'
+    assert captured['project']['_id'] == 'project-1'
+    assert captured['timeout_seconds'] == 240
+    assert active_projects == ['project-1']
+    script = str(captured['script_content'])
+    assert 'comp.layers.addBoxText' in script
+    assert 'sourceRectAtTime' in script
+    assert 'motionBlur' in script
+    assert 'JSON.stringify' not in script
+    assert (project_root / 'scripts' / 'qinghua_mv_preview.jsx').read_text(encoding='utf-8') == script
+    assert (project_root / 'assets' / 'data' / 'lyric_mapping.json').is_file()
+
+    payload = json.loads(result.text_result_for_llm)
+    assert payload['script_source'] == 'generated_backend_template'
+    assert payload['script_relative_path'] == 'scripts/qinghua_mv_preview.jsx'
+    assert payload['mapping_created_from_lrc'] is True
+    assert payload['selected_lyric_count'] == 4
+    assert payload['measurement_report_path'].endswith('reports\\qinghua_mv_measurements.json') or payload[
+        'measurement_report_path'
+    ].endswith('reports/qinghua_mv_measurements.json')
+    assert payload['compositions'][0]['name'] == 'Main'
+
+
+@pytest.mark.asyncio
 async def test_python_tool_runtime_syncs_requirements_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -767,3 +973,67 @@ async def test_render_tool_returns_detailed_failure_diagnostics(
     payload = json.loads(result.text_result_for_llm)
     assert payload['requested_composition'] == 'Main'
     assert 'failure_details' in payload
+
+
+@pytest.mark.asyncio
+async def test_render_tool_rejects_empty_generated_workspace_before_nexrender(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_collection = FakeSessionCollection(
+        {
+            '_id': 'session-1',
+            'container_id': 'container-1',
+            'active_project_id': 'project-1',
+        }
+    )
+    project = {
+        '_id': 'project-1',
+        'session_id': 'session-1',
+        'filename': 'empty.aep',
+        'origin': 'generated',
+        'workspace_dir': 'C:/data/uploads/session-1/project-1',
+        'entry_aep_file': 'empty.aep',
+        'aep_files': ['empty.aep'],
+        'compositions': [
+            {
+                'name': 'Main',
+                'width': None,
+                'height': None,
+                'duration_seconds': None,
+                'frame_rate': None,
+                'layer_count': None,
+            }
+        ],
+        'composition_catalog_updated_at': '2026-04-22T12:00:00Z',
+    }
+    render_called = False
+
+    async def fake_get_project(session_id: str, project_id: str) -> dict | None:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return dict(project)
+
+    async def fake_set_active_project(session_id: str, project_id: str) -> dict:
+        assert session_id == 'session-1'
+        assert project_id == 'project-1'
+        return {'_id': project_id}
+
+    async def fake_render_project(**_kwargs) -> dict:
+        nonlocal render_called
+        render_called = True
+        return {'success': True}
+
+    monkeypatch.setattr(module, 'get_session_collection', lambda: session_collection)
+    monkeypatch.setattr(module.pm, 'get_project', fake_get_project)
+    monkeypatch.setattr(module.pm, 'set_active_project', fake_set_active_project)
+    monkeypatch.setattr(module.nr, 'render_project', fake_render_project)
+
+    tools = {tool.name: tool for tool in module.build_shotwright_tools('session-1')}
+    result = await tools['render_after_effects_project'].handler(
+        SimpleNamespace(arguments={'project_id': 'project-1', 'composition': 'Main'})
+    )
+
+    assert result.result_type == 'failure'
+    assert render_called is False
+    assert 'empty or unverified workspace shell' in result.error
+    assert 'run_after_effects_jsx' in result.error

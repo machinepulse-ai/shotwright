@@ -64,7 +64,16 @@ _CODEX_TOOL_COMMAND_RE = re.compile(
 )
 _SHELL_ARG_RE_TEMPLATE = r"--{name}(?:=|\s+)(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))"
 _DIRECT_TOOL_MAX_STEPS = 26
-_DIRECT_TOOL_THREAD_RECOVERY_RETRIES = 2
+_DIRECT_TOOL_THREAD_RECOVERY_RETRIES = 6
+_DIRECT_TOOL_TRANSIENT_BRIDGE_RETRIES = 6
+_DIRECT_TOOL_TRANSIENT_BRIDGE_RETRY_BASE_DELAY_SECONDS = 2.0
+_DIRECT_TOOL_TRANSIENT_BRIDGE_RETRY_MAX_DELAY_SECONDS = 12.0
+_DIRECT_TOOL_TIMEOUT_RECOVERY_RETRIES = 2
+_DIRECT_TOOL_MODEL_CALL_TIMEOUT_CAP_SECONDS = 180.0
+_DIRECT_TOOL_THREAD_RESET_STEP_INTERVAL = 8
+_DIRECT_TOOL_THREAD_RESET_INPUT_TOKEN_THRESHOLD = 120_000
+_RECENT_CONTEXT_MESSAGE_LIMIT = 6
+_RECENT_CONTEXT_MESSAGE_CHAR_LIMIT = 700
 _MANGLED_CJK_RANGE_TEXT_RE = re.compile(r"\\x04e00-\\x09fff")
 _MANGLED_CJK_RANGE_RE = re.compile(r"\x04e00-\x09fff")
 _JSON_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f]")
@@ -90,6 +99,57 @@ _DIRECT_TOOL_PLAN_SCHEMA: dict = {
         },
     },
     "required": ["action", "tool_name", "arguments_json", "response"],
+    "additionalProperties": False,
+}
+
+_DIRECT_TOOL_FOLLOWUP_STRING_LIMIT = 1800
+_DIRECT_TOOL_FOLLOWUP_JSON_LIMIT = 12000
+
+_INDEPENDENT_RENDER_REVIEW_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["pass", "fail"],
+            "description": "pass only when the rendered storyboard is acceptable to show to the user.",
+        },
+        "blocking": {
+            "type": "boolean",
+            "description": "true when the maker agent must revise and render again before finalizing.",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence in the visual review verdict.",
+        },
+        "summary": {
+            "type": "string",
+            "description": "One concise sentence explaining the verdict.",
+        },
+        "weakest_frame": {
+            "type": "string",
+            "description": "The weakest visible frame or region, or an empty string if none stands out.",
+        },
+        "issues": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Concrete visual issues found in the attached storyboard images.",
+        },
+        "revision_brief": {
+            "type": "string",
+            "description": "Actionable revision instruction for the maker agent when blocking is true.",
+        },
+    },
+    "required": [
+        "verdict",
+        "blocking",
+        "confidence",
+        "summary",
+        "weakest_frame",
+        "issues",
+        "revision_brief",
+    ],
     "additionalProperties": False,
 }
 
@@ -542,6 +602,56 @@ class ShotwrightCodexRuntimeManager:
                 excerpts.append(f"  - {entry.name} ({skill_path}):\n{excerpt}")
         return excerpts
 
+    def _truncate_recent_context_text(self, content: object) -> str:
+        text = re.sub(r"\s+", " ", str(content or "")).strip()
+        if len(text) <= _RECENT_CONTEXT_MESSAGE_CHAR_LIMIT:
+            return text
+        omitted = len(text) - _RECENT_CONTEXT_MESSAGE_CHAR_LIMIT
+        return f"{text[:_RECENT_CONTEXT_MESSAGE_CHAR_LIMIT]}...[truncated {omitted} chars]"
+
+    async def _build_recent_message_context(self, app_session_id: str, current_content: str) -> list[str]:
+        try:
+            message_collection = get_message_collection()
+        except AssertionError:
+            return []
+
+        try:
+            docs = (
+                await message_collection.find({"session_id": app_session_id})
+                .sort("created_at", -1)
+                .limit(_RECENT_CONTEXT_MESSAGE_LIMIT + 2)
+                .to_list(length=_RECENT_CONTEXT_MESSAGE_LIMIT + 2)
+            )
+        except Exception as exc:
+            logger.debug("Failed to load recent Shotwright messages for %s: %s", app_session_id, exc)
+            return []
+
+        entries: list[tuple[str, str]] = []
+        for doc in reversed(docs):
+            if not isinstance(doc, dict):
+                continue
+            role = str(doc.get("role") or "").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            text = str(doc.get("content") or "").strip()
+            if not text:
+                continue
+            entries.append((role, text))
+
+        if entries and entries[-1][0] == "user" and entries[-1][1].strip() == current_content.strip():
+            entries = entries[:-1]
+        entries = entries[-_RECENT_CONTEXT_MESSAGE_LIMIT:]
+        if not entries:
+            return []
+
+        lines = [
+            "Recent conversation context:",
+            "- This is a compact reminder because Shotwright starts fresh Codex tool threads to avoid long-context stalls.",
+        ]
+        for role, text in entries:
+            lines.append(f"- {role}: {self._truncate_recent_context_text(text)}")
+        return lines
+
     def _build_tool_bridge_instructions(self, app_session_id: str, tool_manifest: list[dict]) -> str:
         python_path = str(Path(sys.executable).resolve())
         runner_path = str(_TOOL_RUNNER_PATH)
@@ -582,13 +692,16 @@ class ShotwrightCodexRuntimeManager:
         if not session_doc:
             return content
 
+        recent_context = await self._build_recent_message_context(app_session_id, content)
         active_project_id = str(session_doc.get("active_project_id") or "").strip()
         if not active_project_id:
-            return f"User request:\n{content}"
+            lines = [*recent_context, "User request:", content] if recent_context else ["User request:", content]
+            return "\n".join(lines)
 
         project_doc = await project_collection.find_one({"_id": active_project_id, "session_id": app_session_id})
         if not project_doc:
-            return f"User request:\n{content}"
+            lines = [*recent_context, "User request:", content] if recent_context else ["User request:", content]
+            return "\n".join(lines)
 
         project_name = _first_non_empty(
             str(project_doc.get("entry_aep_file") or ""),
@@ -620,11 +733,11 @@ class ShotwrightCodexRuntimeManager:
                 "Default behavior for this turn:",
                 "- Reuse the active project and its current compositions unless the user explicitly asks to create or switch projects.",
                 "- Treat follow-up requests like change, add, remove, tweak, update, or render again as edits to this active project.",
-                "",
-                "User request:",
-                content,
             ]
         )
+        if recent_context:
+            preamble_lines.extend(["", *recent_context])
+        preamble_lines.extend(["", "User request:", content])
         return "\n".join(preamble_lines)
 
     def _build_client(
@@ -660,8 +773,12 @@ class ShotwrightCodexRuntimeManager:
                 "- Use action=tool_call when a Shotwright backend operation is needed.",
                 "- Use action=final only after the requested creative work is complete or no tool is needed.",
                 "- If render_after_effects_project succeeded during this turn, action=final is allowed only after generate_storyboard_from_reference_video has also succeeded for that rendered output and you have reviewed whether to revise for correctness and creative quality.",
+                "- Do not render a freshly created empty project until run_after_effects_jsx or create_after_effects_project has created the requested composition and inspect_workspace reports real dimensions and a nonzero layer_count. A project whose composition metadata is null is only a workspace shell, not a finished AEP.",
                 "- Never call shell_command, never ask to run codex_tool_runner.py, and never claim a render/export exists until a tool result confirms it.",
                 "- For tool_call, set tool_name to exactly one available Shotwright tool and arguments_json to a JSON object string for that tool.",
+                "- For lyric MV, dense CJK text animation, subtitle-heavy, or text-measurement-sensitive AE work, prefer create_lyrics_mv_project once lyrics_lrc or assets/data/lyric_mapping.json is available; then render, storyboard, and review.",
+                "- Do not inline large After Effects JSX in arguments_json. For complex scenes, lyric/MV layouts, many text layers, or scripts over roughly 8 KB, first call run_python_code to write a .jsx file inside the active project workspace, then call run_after_effects_jsx with script_path.",
+                "- When recovering from a timeout, choose one small concrete tool action. Do not spend another long model turn writing a full scene inline; create or reuse a script_path and execute it.",
                 "- For final, set tool_name to an empty string, arguments_json to {}, and response to the user-facing answer.",
             ]
         )
@@ -782,16 +899,183 @@ class ShotwrightCodexRuntimeManager:
         )
 
     def _build_tool_result_followup(self, tool_name: str, payload: dict[str, object]) -> str:
-        return "\n".join(
-            [
-                "Shotwright backend executed your requested tool call.",
-                f"Tool: {tool_name}",
-                "Result JSON:",
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                "",
-                "Continue using the Direct Shotwright tool protocol. Return the next tool_call if more work is required; otherwise return final.",
-            ]
-        )
+        compact_payload = self._compact_tool_result_for_followup(tool_name, payload)
+        lines = [
+            "Shotwright backend executed your requested tool call.",
+            f"Tool: {tool_name}",
+            "Compact result JSON:",
+            json.dumps(compact_payload, ensure_ascii=False, indent=2),
+            "",
+            "Continue using the Direct Shotwright tool protocol. Return the next tool_call if more work is required; otherwise return final.",
+        ]
+        if tool_name in {"run_python_code", "create_empty_after_effects_project", "inspect_workspace", "create_lyrics_mv_project"}:
+            lines.extend(
+                [
+                    "",
+                    "Complex After Effects script handoff rule:",
+                    "- For lyric MV, dense CJK text animation, subtitle-heavy, or text-measurement-sensitive work, prefer create_lyrics_mv_project once lyrics_lrc or assets/data/lyric_mapping.json exists.",
+                    "- If the next operation needs substantial JSX, many lyric/text layers, or detailed animation logic, do not inline that JSX in arguments_json.",
+                    "- Use run_python_code to write a compact generated .jsx file under the active project workspace, then call run_after_effects_jsx with script_path.",
+                    "- Keep the next model decision small: either write/reuse the script file or execute an existing script_path.",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _truncate_tool_followup_text(
+        self,
+        value: object,
+        *,
+        limit: int = _DIRECT_TOOL_FOLLOWUP_STRING_LIMIT,
+    ) -> str | None:
+        if value is None:
+            return None
+        text = str(value)
+        if len(text) <= limit:
+            return text
+        omitted = len(text) - limit
+        return f"{text[:limit]}\n...[truncated {omitted} chars; full result is stored in session events]"
+
+    def _select_tool_result_fields(self, value: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
+        return {field: value[field] for field in fields if field in value and value[field] is not None}
+
+    def _compact_workspace_result(self, parsed: dict[str, object]) -> dict[str, object]:
+        raw_projects = parsed.get("projects") if isinstance(parsed.get("projects"), list) else []
+        raw_reference_videos = parsed.get("reference_videos") if isinstance(parsed.get("reference_videos"), list) else []
+        raw_storyboards = parsed.get("storyboards") if isinstance(parsed.get("storyboards"), list) else []
+        raw_render_outputs = parsed.get("render_outputs") if isinstance(parsed.get("render_outputs"), list) else []
+        projects = [
+            self._select_tool_result_fields(
+                project,
+                ("_id", "filename", "entry_aep_file", "status", "compositions"),
+            )
+            for project in raw_projects
+            if isinstance(project, dict)
+        ]
+        reference_videos = [
+            self._select_tool_result_fields(
+                item,
+                ("filename", "shared_relative_path", "duration_seconds", "width", "height", "size_bytes"),
+            )
+            for item in raw_reference_videos
+            if isinstance(item, dict)
+        ]
+        storyboards = [
+            self._select_tool_result_fields(
+                item,
+                ("filename", "shared_relative_path", "source_video_filename", "interval_seconds", "estimated_frames"),
+            )
+            for item in raw_storyboards[-6:]
+            if isinstance(item, dict)
+        ]
+        render_outputs = [
+            self._select_tool_result_fields(
+                item,
+                ("filename", "shared_relative_path", "playlist_url", "composition", "size_bytes"),
+            )
+            for item in raw_render_outputs[:6]
+            if isinstance(item, dict)
+        ]
+        return {
+            "session_id": parsed.get("session_id"),
+            "status": parsed.get("status"),
+            "container": self._select_tool_result_fields(parsed.get("container") or {}, ("status", "image", "docker_id"))
+            if isinstance(parsed.get("container"), dict)
+            else parsed.get("container"),
+            "active_project_id": parsed.get("active_project_id"),
+            "projects": projects,
+            "reference_videos": reference_videos,
+            "storyboards": storyboards,
+            "render_outputs": render_outputs,
+            "latest_render_path": parsed.get("latest_render_path"),
+            "latest_stream_url": parsed.get("latest_stream_url"),
+            "font_guidance": parsed.get("recommended_fonts"),
+        }
+
+    def _compact_render_result(self, parsed: dict[str, object]) -> dict[str, object]:
+        render_output = parsed.get("render_output") if isinstance(parsed.get("render_output"), dict) else {}
+        project = parsed.get("project") if isinstance(parsed.get("project"), dict) else {}
+        return {
+            "success": parsed.get("success"),
+            "output_exists": parsed.get("output_exists"),
+            "render_completed": parsed.get("render_completed"),
+            "timed_out": parsed.get("timed_out"),
+            "project_id": parsed.get("project_id"),
+            "composition": render_output.get("composition") or parsed.get("composition"),
+            "output_path": parsed.get("output_path"),
+            "playlist_url": parsed.get("playlist_url"),
+            "stream_ready": parsed.get("stream_ready"),
+            "render_output": self._select_tool_result_fields(
+                render_output,
+                ("id", "filename", "file_path", "shared_relative_path", "playlist_url", "thumbnail_path", "size_bytes"),
+            ),
+            "project": self._select_tool_result_fields(project, ("_id", "filename", "entry_aep_file", "compositions")),
+            "stderr_excerpt": self._truncate_tool_followup_text(parsed.get("stderr_excerpt"), limit=900),
+        }
+
+    def _compact_jsx_result(self, parsed: dict[str, object]) -> dict[str, object]:
+        project = parsed.get("project") if isinstance(parsed.get("project"), dict) else {}
+        return {
+            "success": parsed.get("success"),
+            "timed_out": parsed.get("timed_out"),
+            "project_id": parsed.get("project_id"),
+            "entry_aep_file": parsed.get("entry_aep_file"),
+            "entry_aep_path": parsed.get("entry_aep_path"),
+            "compositions": parsed.get("compositions") or project.get("compositions"),
+            "jsx_compatibility_rewrites": parsed.get("jsx_compatibility_rewrites"),
+            "after_effects_ready": parsed.get("after_effects_ready"),
+            "error": parsed.get("error"),
+            "output_excerpt": self._truncate_tool_followup_text(parsed.get("output"), limit=1200),
+        }
+
+    def _compact_generic_tool_result_value(self, value: object, *, depth: int = 0) -> object:
+        if isinstance(value, str):
+            return self._truncate_tool_followup_text(value)
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if depth >= 4:
+            return self._truncate_tool_followup_text(value, limit=900)
+        if isinstance(value, list):
+            return [self._compact_generic_tool_result_value(item, depth=depth + 1) for item in value[:12]]
+        if isinstance(value, dict):
+            noisy_fields = {"stdout", "stderr", "output", "stdout_excerpt", "stderr_excerpt"}
+            compact: dict[str, object] = {}
+            for key, item in value.items():
+                if key in noisy_fields:
+                    compact[key] = self._truncate_tool_followup_text(item, limit=900)
+                else:
+                    compact[key] = self._compact_generic_tool_result_value(item, depth=depth + 1)
+            return compact
+        return self._truncate_tool_followup_text(value)
+
+    def _compact_tool_text_result(self, tool_name: str, parsed: dict[str, object]) -> dict[str, object]:
+        if tool_name == "inspect_workspace":
+            return self._compact_workspace_result(parsed)
+        if tool_name == "render_after_effects_project":
+            return self._compact_render_result(parsed)
+        if tool_name == "run_after_effects_jsx":
+            return self._compact_jsx_result(parsed)
+        return self._compact_generic_tool_result_value(parsed)  # type: ignore[return-value]
+
+    def _compact_tool_result_for_followup(self, tool_name: str, payload: dict[str, object]) -> dict[str, object]:
+        compact: dict[str, object] = {
+            "success": payload.get("success"),
+            "result_type": payload.get("result_type"),
+            "error": self._truncate_tool_followup_text(payload.get("error"), limit=1200),
+            "session_log": self._truncate_tool_followup_text(payload.get("session_log"), limit=1200),
+            "tool_telemetry": self._compact_generic_tool_result_value(payload.get("tool_telemetry")),
+        }
+        parsed = self._parse_tool_text_payload(payload)
+        if parsed:
+            compact["result"] = self._compact_tool_text_result(tool_name, parsed)
+        else:
+            compact["text_result_for_llm"] = self._truncate_tool_followup_text(payload.get("text_result_for_llm"))
+
+        encoded = json.dumps(compact, ensure_ascii=False)
+        if len(encoded) <= _DIRECT_TOOL_FOLLOWUP_JSON_LIMIT:
+            return compact
+
+        compact["result"] = self._truncate_tool_followup_text(compact.get("result"), limit=_DIRECT_TOOL_FOLLOWUP_JSON_LIMIT)
+        return compact
 
     def _parse_tool_text_payload(self, payload: dict[str, object]) -> dict[str, object]:
         text_result = payload.get("text_result_for_llm")
@@ -855,11 +1139,185 @@ class ShotwrightCodexRuntimeManager:
             ]
         )
 
-    def _review_render_storyboard_quality(
+    def _parse_independent_render_review_response(self, raw_response: str) -> dict[str, object]:
+        text = raw_response.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+            text = re.sub(r"\s*```$", "", text).strip()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Independent render reviewer returned invalid JSON: {raw_response[:500]}") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("Independent render reviewer JSON must be an object.")
+        issues = parsed.get("issues")
+        if not isinstance(issues, list):
+            issues = []
+        parsed["issues"] = [str(item).strip() for item in issues if str(item).strip()]
+        verdict = str(parsed.get("verdict") or "").strip().lower()
+        parsed["verdict"] = "pass" if verdict == "pass" else "fail"
+        parsed["blocking"] = bool(parsed.get("blocking")) or parsed["verdict"] == "fail"
+        try:
+            confidence = float(parsed.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        parsed["confidence"] = max(0.0, min(1.0, confidence))
+        parsed["summary"] = str(parsed.get("summary") or "").strip()
+        parsed["weakest_frame"] = str(parsed.get("weakest_frame") or "").strip()
+        parsed["revision_brief"] = str(parsed.get("revision_brief") or "").strip()
+        return parsed
+
+    def _build_independent_render_review_input(
         self,
-        app_session_id: str,
+        *,
+        user_goal: str,
         pending_render_review: dict[str, object],
         storyboard_payload: dict[str, object],
+        subtitle_storyboard: dict[str, object],
+        analysis: dict[str, object],
+    ) -> str | list[dict[str, str]]:
+        text = "\n".join(
+            [
+                "You are Shotwright's independent render review agent.",
+                "You did not create this video. Do not protect the maker agent's choices.",
+                "Your only job is to inspect the attached storyboard images and decide whether the result is acceptable before the maker agent may finalize.",
+                "",
+                "Return JSON only. Use verdict=fail and blocking=true when the maker must revise and render again.",
+                "Fail obvious quality issues even if the render technically succeeded: black-slab subtitles, heavy dark strokes swallowing glyphs, missing glyphs, low-contrast text, clipped or unsafe text, muddy hierarchy, generic template filler, visual choices that contradict the user's requested tone, or a storyboard that only proves nothing crashed.",
+                "Do not fail just because a design uses some dark contrast; fail when the dark treatment becomes the visible style, hides text, or feels disconnected from the footage.",
+                "",
+                "Original user goal:",
+                user_goal.strip()[:3000] or "(not available)",
+                "",
+                "Render under review:",
+                json.dumps(pending_render_review, ensure_ascii=False, indent=2),
+                "",
+                "Backend subtitle-zone metrics. Treat these as risk signals, not as a replacement for looking at the images:",
+                json.dumps(analysis, ensure_ascii=False, indent=2),
+                "",
+                "Attached images:",
+                "- Full-frame storyboard from the completed render.",
+                "- Focused subtitle-zone storyboard cropped from the same render.",
+                "",
+                "Review expectations:",
+                "- Judge phone-sized readability, caption style fit, and whether the creative direction is visible.",
+                "- Name the weakest frame or region.",
+                "- If blocking, give a compact revision brief that the maker can execute in After Effects.",
+            ]
+        )
+        return self._build_visual_review_input(
+            text,
+            storyboard_payload.get("storyboard_image_path"),
+            subtitle_storyboard.get("storyboard_image_path"),
+        )
+
+    async def _run_independent_render_review(
+        self,
+        *,
+        app_session_id: str,
+        runtime: _CodexRuntimeHandle,
+        turn_state: _CodexTurnState,
+        client: CodexBridgeClient,
+        runtime_settings: dict[str, str | bool | float],
+        codex_sdk_config: dict[str, object],
+        model: str,
+        reasoning_effort: str,
+        user_goal: str,
+        pending_render_review: dict[str, object],
+        storyboard_payload: dict[str, object],
+        subtitle_storyboard: dict[str, object],
+        analysis: dict[str, object],
+    ) -> dict[str, object]:
+        review_input = self._build_independent_render_review_input(
+            user_goal=user_goal,
+            pending_render_review=pending_render_review,
+            storyboard_payload=storyboard_payload,
+            subtitle_storyboard=subtitle_storyboard,
+            analysis=analysis,
+        )
+        await self._persist_event(
+            app_session_id,
+            "quality.review_start",
+            {
+                "provider": "codex",
+                "reviewer": "independent_render_reviewer",
+                "render": pending_render_review,
+                "analysis": analysis,
+            },
+            turn_id=turn_state.turn_id,
+            sequence=runtime.next_event_sequence(),
+        )
+        started_at = monotonic()
+        try:
+            result = await client.run_turn(
+                input=review_input,
+                thread_id=None,
+                working_directory=str(runtime_settings.get("codex_workspace_root") or ""),
+                model=model,
+                model_reasoning_effort=reasoning_effort,
+                approval_policy="never",
+                sandbox_mode="read-only",
+                network_access_enabled=False,
+                skip_git_repo_check=True,
+                web_search_mode="",
+                config=codex_sdk_config or None,
+                output_schema=_INDEPENDENT_RENDER_REVIEW_SCHEMA,
+                on_event=None,
+            )
+            review = self._parse_independent_render_review_response(result.final_response)
+        except Exception as exc:
+            review = {
+                "verdict": "fail",
+                "blocking": True,
+                "confidence": 0.0,
+                "summary": "Independent render review could not complete, so finalization is blocked.",
+                "weakest_frame": "",
+                "issues": [str(exc).strip() or exc.__class__.__name__],
+                "revision_brief": "Retry the independent review after checking the storyboard images; do not finalize from maker self-review.",
+                "error": str(exc),
+            }
+        duration_seconds = round(monotonic() - started_at, 3)
+        await self._persist_event(
+            app_session_id,
+            "quality.review_complete",
+            {
+                "provider": "codex",
+                "reviewer": "independent_render_reviewer",
+                "duration_seconds": duration_seconds,
+                "verdict": review.get("verdict"),
+                "blocking": review.get("blocking"),
+                "confidence": review.get("confidence"),
+                "summary": review.get("summary"),
+                "weakest_frame": review.get("weakest_frame"),
+                "issues": review.get("issues"),
+                "revision_brief": review.get("revision_brief"),
+                "error": review.get("error"),
+            },
+            turn_id=turn_state.turn_id,
+            sequence=runtime.next_event_sequence(),
+        )
+        return review
+
+    def _extract_review_user_goal(self, runtime_content: str) -> str:
+        marker = "User request:"
+        if marker in runtime_content:
+            return runtime_content.rsplit(marker, 1)[-1].strip()
+        return runtime_content.strip()
+
+    async def _review_render_storyboard_quality(
+        self,
+        app_session_id: str,
+        runtime: _CodexRuntimeHandle,
+        turn_state: _CodexTurnState,
+        client: CodexBridgeClient,
+        runtime_settings: dict[str, str | bool | float],
+        codex_sdk_config: dict[str, object],
+        pending_render_review: dict[str, object],
+        storyboard_payload: dict[str, object],
+        *,
+        model: str,
+        reasoning_effort: str,
+        user_goal: str,
     ) -> dict[str, object]:
         render_path = str(pending_render_review.get("output_path") or "").strip()
         if not render_path:
@@ -885,12 +1343,32 @@ class ShotwrightCodexRuntimeManager:
             logger.warning("Render storyboard quality review failed for %s: %s", app_session_id, exc)
             return {"success": False, "blocking": False, "error": str(exc)}
 
+        reviewer = await self._run_independent_render_review(
+            app_session_id=app_session_id,
+            runtime=runtime,
+            turn_state=turn_state,
+            client=client,
+            runtime_settings=runtime_settings,
+            codex_sdk_config=codex_sdk_config,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            user_goal=user_goal,
+            pending_render_review=pending_render_review,
+            storyboard_payload=storyboard_payload,
+            subtitle_storyboard=subtitle_storyboard,
+            analysis=analysis,
+        )
+        metric_blocking = bool(analysis.get("caption_quality_risk") or analysis.get("black_caption_risk"))
+        reviewer_blocking = bool(reviewer.get("blocking")) or str(reviewer.get("verdict") or "") == "fail"
         return {
             "success": True,
-            "blocking": bool(analysis.get("caption_quality_risk") or analysis.get("black_caption_risk")),
+            "blocking": metric_blocking or reviewer_blocking,
             "subtitle_zone_storyboard": subtitle_storyboard,
             "full_storyboard": storyboard_payload,
             "analysis": analysis,
+            "reviewer": reviewer,
+            "metric_blocking": metric_blocking,
+            "reviewer_blocking": reviewer_blocking,
         }
 
     def _build_render_quality_block_followup(
@@ -907,11 +1385,13 @@ class ShotwrightCodexRuntimeManager:
         full_storyboard = (
             quality_review.get("full_storyboard") if isinstance(quality_review.get("full_storyboard"), dict) else {}
         )
+        reviewer = quality_review.get("reviewer") if isinstance(quality_review.get("reviewer"), dict) else {}
         text = "\n".join(
             [
                 "Shotwright quality gate blocked finalization.",
-                "The subtitle-zone storyboard suggests a caption readability/design risk such as a black-dominant plate or low-contrast pale backing.",
-                "This is a backend visual metric gate, not a style recipe: inspect the attached storyboard images, then revise the actual design so the captions fit the creative direction and remain readable without turning into a black slab or a pale low-contrast strip.",
+                "The render failed independent review or subtitle-zone metric checks.",
+                "This decision is not maker self-review. An independent render review agent and backend visual metrics are preventing finalization.",
+                "Inspect the attached storyboard images, then revise the actual design so the captions fit the creative direction and remain readable without turning into a black slab, muddy low-contrast strip, or generic technical fix.",
                 "",
                 "Render under review:",
                 json.dumps(pending_render_review, ensure_ascii=False, indent=2),
@@ -924,12 +1404,14 @@ class ShotwrightCodexRuntimeManager:
                         "storyboard_image_path": subtitle_storyboard.get("storyboard_image_path"),
                         "shared_relative_path": subtitle_storyboard.get("shared_relative_path"),
                         "analysis": analysis,
+                        "independent_reviewer": reviewer,
                     },
                     ensure_ascii=False,
                     indent=2,
                 ),
                 "",
                 "Return a Direct Shotwright tool_call that revises the active project, then render again. Do not final until a new render passes full-frame and subtitle-zone review.",
+                "For lyric MV, dense Chinese text, subtitle-heavy, or text-measurement-sensitive work, prefer create_lyrics_mv_project with the active project_id/mapping_path instead of inline JSX. If a custom AE script is unavoidable, write it with run_python_code to a project-local .jsx file and call run_after_effects_jsx with script_path; do not inline large script_content in this repair response.",
             ]
         )
         return self._build_visual_review_input(
@@ -950,11 +1432,12 @@ class ShotwrightCodexRuntimeManager:
             else {}
         )
         analysis = quality_review.get("analysis") if isinstance(quality_review.get("analysis"), dict) else {}
+        reviewer = quality_review.get("reviewer") if isinstance(quality_review.get("reviewer"), dict) else {}
         text = "\n".join(
             [
                 "Shotwright backend generated storyboard images for the completed render.",
-                "Inspect the attached full-frame storyboard and focused subtitle-zone storyboard before deciding the next action.",
-                "Use visual judgment here: identify the weakest frame, check subtitle readability and style fit, check text safety and missing glyphs, and decide whether to revise JSX and render again or final.",
+                "A separate independent render review agent has approved finalization. Do not repeat maker self-review as the deciding gate.",
+                "Use the independent review summary below when writing the final response. Only request another revision if the user asked for something clearly missing outside this render review.",
                 "",
                 "Render under review:",
                 json.dumps(pending_render_review, ensure_ascii=False, indent=2),
@@ -967,12 +1450,13 @@ class ShotwrightCodexRuntimeManager:
                         "subtitle_zone_storyboard_image_path": subtitle_storyboard.get("storyboard_image_path"),
                         "subtitle_zone_shared_relative_path": subtitle_storyboard.get("shared_relative_path"),
                         "analysis": analysis,
+                        "independent_reviewer": reviewer,
                     },
                     ensure_ascii=False,
                     indent=2,
                 ),
                 "",
-                "Continue using the Direct Shotwright tool protocol. Return a revision tool_call if the visual review finds a weak result; otherwise return final with the render assets.",
+                "Continue using the Direct Shotwright tool protocol. Return final with the render assets unless the independent reviewer reported a blocking problem.",
             ]
         )
         return self._build_visual_review_input(
@@ -1001,8 +1485,8 @@ class ShotwrightCodexRuntimeManager:
             items.append({"type": "local_image", "path": path})
         return items if len(items) > 1 else text
 
-    def _is_recoverable_direct_tool_bridge_error(self, exc: CodexBridgeError) -> bool:
-        message = "\n".join(
+    def _direct_tool_bridge_error_text(self, exc: CodexBridgeError) -> str:
+        return "\n".join(
             item
             for item in (
                 str(exc),
@@ -1010,16 +1494,55 @@ class ShotwrightCodexRuntimeManager:
                 json.dumps(exc.record, ensure_ascii=False) if exc.record else "",
             )
             if item
-        ).lower()
-        recoverable_markers = (
+        )
+
+    def _is_transient_direct_tool_bridge_error(self, exc: CodexBridgeError) -> bool:
+        message = self._direct_tool_bridge_error_text(exc).lower()
+        transient_markers = (
             "currently experiencing high demand",
             "reconnecting",
+            "rate limit",
+            "temporarily unavailable",
+            "temporary errors",
+            "overloaded",
+            "try again",
+            "status 429",
+            "status 500",
+            "status 502",
+            "status 503",
+            "status 504",
+        )
+        return any(marker in message for marker in transient_markers)
+
+    def _is_direct_tool_thread_unavailable_error(self, exc: CodexBridgeError) -> bool:
+        message = self._direct_tool_bridge_error_text(exc).lower()
+        thread_unavailable_markers = (
             "thread not found",
             "failed to record rollout items",
+            "stale thread",
+            "thread became unavailable",
+        )
+        return any(marker in message for marker in thread_unavailable_markers)
+
+    def _is_recoverable_direct_tool_bridge_error(self, exc: CodexBridgeError) -> bool:
+        message = self._direct_tool_bridge_error_text(exc).lower()
+        recoverable_markers = (
             "timeout",
             "temporar",
         )
-        return any(marker in message for marker in recoverable_markers)
+        return (
+            self._is_transient_direct_tool_bridge_error(exc)
+            or self._is_direct_tool_thread_unavailable_error(exc)
+            or any(marker in message for marker in recoverable_markers)
+        )
+
+    def _direct_tool_transient_bridge_retry_delay_seconds(self, attempt: int) -> float:
+        if attempt <= 0:
+            return 0.0
+        return min(
+            _DIRECT_TOOL_TRANSIENT_BRIDGE_RETRY_MAX_DELAY_SECONDS,
+            _DIRECT_TOOL_TRANSIENT_BRIDGE_RETRY_BASE_DELAY_SECONDS * attempt,
+        )
 
     def _build_direct_tool_thread_recovery_input(self, runtime_content: str, exc: CodexBridgeError) -> str:
         return "\n\n".join(
@@ -1033,6 +1556,128 @@ class ShotwrightCodexRuntimeManager:
                 "Reuse existing container, active project, generated assets, reference videos, Python analysis files, renders, and storyboards reported by inspect_workspace. Do not recreate a replacement project unless the active project is unrecoverable.",
             ]
         )
+
+    def _usage_input_tokens(self, usage: dict[str, object] | None) -> int:
+        if not isinstance(usage, dict):
+            return 0
+        candidates: list[int] = []
+
+        def collect(value: object, key_hint: str = "") -> None:
+            if isinstance(value, bool):
+                return
+            if isinstance(value, (int, float)):
+                normalized_key = key_hint.lower()
+                if "token" in normalized_key and ("input" in normalized_key or "prompt" in normalized_key):
+                    candidates.append(int(value))
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    collect(item, str(key))
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect(item, key_hint)
+
+        collect(usage)
+        for key in ("input_tokens", "prompt_tokens", "total_input_tokens"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                candidates.append(int(value))
+        return max(candidates, default=0)
+
+    def _direct_tool_thread_reset_reason(self, step_index: int, usage: dict[str, object] | None) -> tuple[bool, str, int]:
+        input_tokens = self._usage_input_tokens(usage)
+        if input_tokens >= _DIRECT_TOOL_THREAD_RESET_INPUT_TOKEN_THRESHOLD:
+            return True, f"input token count reached {input_tokens}", input_tokens
+        if step_index > 0 and step_index % _DIRECT_TOOL_THREAD_RESET_STEP_INTERVAL == 0:
+            return True, f"completed {step_index} direct tool steps", input_tokens
+        return False, "", input_tokens
+
+    def _effective_direct_tool_model_timeout(self, turn_timeout_seconds: float | None) -> float | None:
+        if not turn_timeout_seconds or turn_timeout_seconds <= 0:
+            return _DIRECT_TOOL_MODEL_CALL_TIMEOUT_CAP_SECONDS
+        return min(float(turn_timeout_seconds), _DIRECT_TOOL_MODEL_CALL_TIMEOUT_CAP_SECONDS)
+
+    def _effective_direct_tool_reasoning_effort(self, reasoning_effort: str) -> str:
+        normalized = str(reasoning_effort or "").strip().lower()
+        if normalized in {"xhigh", "high"}:
+            return "medium"
+        return reasoning_effort
+
+    def _direct_tool_reasoning_after_timeout(self, reasoning_effort: str, timeout_attempt: int) -> str:
+        effective = self._effective_direct_tool_reasoning_effort(reasoning_effort)
+        normalized = str(effective or "").strip().lower()
+        if timeout_attempt <= 0:
+            return effective
+        if timeout_attempt >= 1 and normalized == "medium":
+            return "medium"
+        return effective
+
+    def _build_direct_tool_context_reset_input(
+        self,
+        runtime_content: str,
+        *,
+        reason: str,
+        last_tool_name: str | None = None,
+        last_payload: dict[str, object] | None = None,
+        pending_render_review: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        lines = [
+            runtime_content,
+            self._build_direct_tool_protocol_instructions(),
+            "Shotwright context reset note:",
+            "The backend intentionally started a fresh Codex thread to avoid long-context stalls.",
+            f"Reset reason: {reason}",
+            "Do not rely on prior Codex thread memory. Continue the original user request from Shotwright's persisted workspace state.",
+            "Reuse existing container, active project, generated assets, reference videos, Python analysis files, renders, and storyboards reported by inspect_workspace. Do not create placeholder validation renders or replacement projects unless the active project is unrecoverable.",
+            "If inspect_workspace shows an active generated project whose compositions have null width/height/duration/layer_count, treat it as an empty managed workspace shell. Run create_lyrics_mv_project for lyric/text-heavy work, otherwise run run_after_effects_jsx or create_after_effects_project before rendering.",
+        ]
+        if timeout_seconds and timeout_seconds > 0:
+            lines.append(
+                f"The previous model call exceeded {timeout_seconds:g} seconds. Recover by inspecting workspace state and choosing the next concrete Shotwright tool action."
+            )
+            lines.extend(
+                [
+                    "Timeout recovery rule:",
+                    "- If this is lyric MV, dense CJK text animation, subtitle-heavy, or text-measurement-sensitive work, call create_lyrics_mv_project instead of writing a full custom JSX scene.",
+                    "- Do not attempt to generate a large After Effects script inline in this model response.",
+                    "- If the task still needs AE JSX, call run_python_code to write a smaller .jsx file in the active project workspace, then call run_after_effects_jsx with script_path.",
+                    "- If a suitable .jsx file already exists in the last tool result or project workspace, call run_after_effects_jsx with that script_path now.",
+                    "- Prefer a 40-55 second preview that proves the requested mechanics over a full-length render when the prior attempt stalled.",
+                ]
+            )
+        if last_tool_name and last_payload is not None:
+            lines.extend(
+                [
+                    "Last completed backend tool call before the context reset:",
+                    json.dumps(
+                        {
+                            "tool_name": last_tool_name,
+                            "compact_result": self._compact_tool_result_for_followup(last_tool_name, last_payload),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                ]
+            )
+        if pending_render_review:
+            lines.extend(
+                [
+                    "Pending render review requirement:",
+                    json.dumps(pending_render_review, ensure_ascii=False, indent=2),
+                    "If the pending render exists, generate a storyboard for that exact output and pass the quality gate before any final response.",
+                ]
+            )
+        if last_tool_name and last_payload is not None:
+            lines.append(
+                "Do not repeat inspect_workspace just because a reset happened when the compact last tool result above already gives enough state. Choose the next concrete Shotwright tool action."
+            )
+        else:
+            lines.append(
+                "Call inspect_workspace first after this reset unless the pending render review requirement above makes the next required tool unambiguous."
+            )
+        return "\n\n".join(lines)
 
     def _storyboard_matches_pending_render(self, arguments: dict[str, object], pending_render_review: dict[str, object]) -> bool:
         requested_path = str(arguments.get("reference_video_path") or "").strip()
@@ -1057,6 +1702,7 @@ class ShotwrightCodexRuntimeManager:
         session_doc: dict,
         codex_sdk_config: dict[str, object],
         on_event,
+        turn_timeout_seconds: float | None = None,
     ):
         model = str(session_doc.get("copilot_model") or runtime_settings.get("codex_model") or "")
         reasoning_effort = str(
@@ -1071,15 +1717,21 @@ class ShotwrightCodexRuntimeManager:
         )
         pending_render_review: dict[str, object] | None = None
         thread_recovery_attempts = 0
+        transient_bridge_attempts = 0
+        timeout_recovery_attempts = 0
+        model_call_timeout_seconds = self._effective_direct_tool_model_timeout(turn_timeout_seconds)
+        current_reasoning_effort = self._effective_direct_tool_reasoning_effort(reasoning_effort)
+        last_completed_tool_name: str | None = None
+        last_completed_payload: dict[str, object] | None = None
 
         for step_index in range(1, _DIRECT_TOOL_MAX_STEPS + 1):
             try:
-                result = await client.run_turn(
+                run_turn = client.run_turn(
                     input=current_input,
                     thread_id=current_thread_id,
                     working_directory=str(runtime_settings.get("codex_workspace_root") or ""),
                     model=model,
-                    model_reasoning_effort=reasoning_effort,
+                    model_reasoning_effort=current_reasoning_effort,
                     approval_policy=str(runtime_settings.get("codex_approval_policy") or ""),
                     sandbox_mode=str(runtime_settings.get("codex_sandbox_mode") or ""),
                     network_access_enabled=bool(runtime_settings.get("codex_network_access_enabled")),
@@ -1089,30 +1741,103 @@ class ShotwrightCodexRuntimeManager:
                     output_schema=_DIRECT_TOOL_PLAN_SCHEMA,
                     on_event=on_event,
                 )
-            except CodexBridgeError as exc:
-                if (
-                    thread_recovery_attempts >= _DIRECT_TOOL_THREAD_RECOVERY_RETRIES
-                    or not self._is_recoverable_direct_tool_bridge_error(exc)
-                ):
-                    raise
-                thread_recovery_attempts += 1
+                result = (
+                    await asyncio.wait_for(run_turn, timeout=model_call_timeout_seconds)
+                    if model_call_timeout_seconds and model_call_timeout_seconds > 0
+                    else await run_turn
+                )
+            except TimeoutError as exc:
+                if timeout_recovery_attempts >= _DIRECT_TOOL_TIMEOUT_RECOVERY_RETRIES:
+                    timeout_text = (
+                        f"Shotwright timed out waiting for a Codex model tool decision after "
+                        f"{model_call_timeout_seconds:g} seconds."
+                    )
+                    raise TimeoutError(timeout_text) from exc
+                timeout_recovery_attempts += 1
                 await self._persist_event(
                     app_session_id,
                     "codex.thread.recovered",
                     {
                         "provider": "codex",
-                        "attempt": thread_recovery_attempts,
+                        "attempt": timeout_recovery_attempts,
                         "previous_thread_id": current_thread_id,
-                        "message": str(exc).strip() or exc.__class__.__name__,
+                        "reason": "turn_timeout",
+                        "timeout_seconds": turn_timeout_seconds,
+                        "model_call_timeout_seconds": model_call_timeout_seconds,
+                        "previous_reasoning_effort": current_reasoning_effort,
+                        "next_reasoning_effort": self._direct_tool_reasoning_after_timeout(
+                            reasoning_effort,
+                            timeout_recovery_attempts,
+                        ),
+                        "message": str(exc).strip() or "Codex model call timed out",
                     },
                     turn_id=turn_state.turn_id,
                     sequence=runtime.next_event_sequence(),
                 )
                 current_thread_id = None
-                pending_render_review = None
-                current_input = self._build_direct_tool_thread_recovery_input(runtime_content, exc)
+                current_reasoning_effort = self._direct_tool_reasoning_after_timeout(
+                    reasoning_effort,
+                    timeout_recovery_attempts,
+                )
+                current_input = self._build_direct_tool_context_reset_input(
+                    runtime_content,
+                    reason="model call timeout",
+                    last_tool_name=last_completed_tool_name,
+                    last_payload=last_completed_payload,
+                    pending_render_review=pending_render_review,
+                    timeout_seconds=model_call_timeout_seconds,
+                )
+                continue
+            except CodexBridgeError as exc:
+                is_transient_bridge_error = self._is_transient_direct_tool_bridge_error(exc)
+                is_thread_unavailable_error = self._is_direct_tool_thread_unavailable_error(exc)
+                if not self._is_recoverable_direct_tool_bridge_error(exc):
+                    raise
+
+                if is_transient_bridge_error:
+                    if transient_bridge_attempts >= _DIRECT_TOOL_TRANSIENT_BRIDGE_RETRIES:
+                        raise
+                    transient_bridge_attempts += 1
+                    recovery_attempt = transient_bridge_attempts
+                    recovery_reason = "transient_bridge_error"
+                    retry_delay_seconds = self._direct_tool_transient_bridge_retry_delay_seconds(recovery_attempt)
+                else:
+                    if thread_recovery_attempts >= _DIRECT_TOOL_THREAD_RECOVERY_RETRIES:
+                        raise
+                    thread_recovery_attempts += 1
+                    recovery_attempt = thread_recovery_attempts
+                    recovery_reason = "thread_unavailable" if is_thread_unavailable_error else "bridge_error"
+                    retry_delay_seconds = 0.0
+
+                await self._persist_event(
+                    app_session_id,
+                    "codex.thread.recovered",
+                    {
+                        "provider": "codex",
+                        "attempt": recovery_attempt,
+                        "previous_thread_id": current_thread_id,
+                        "reason": recovery_reason,
+                        "retry_delay_seconds": retry_delay_seconds,
+                        "message": str(exc).strip() or exc.__class__.__name__,
+                    },
+                    turn_id=turn_state.turn_id,
+                    sequence=runtime.next_event_sequence(),
+                )
+                if retry_delay_seconds > 0:
+                    await asyncio.sleep(retry_delay_seconds)
+                current_thread_id = None
+                current_input = self._build_direct_tool_context_reset_input(
+                    runtime_content,
+                    reason=recovery_reason.replace("_", " "),
+                    last_tool_name=last_completed_tool_name,
+                    last_payload=last_completed_payload,
+                    pending_render_review=pending_render_review,
+                )
                 continue
             current_thread_id = result.thread_id or current_thread_id
+            thread_recovery_attempts = 0
+            transient_bridge_attempts = 0
+            timeout_recovery_attempts = 0
             plan = self._parse_direct_tool_plan(result.final_response)
             action = str(plan["action"])
             if action == "final":
@@ -1180,6 +1905,8 @@ class ShotwrightCodexRuntimeManager:
                 payload=payload,
                 duration_seconds=round(monotonic() - tool_started_at, 3),
             )
+            last_completed_tool_name = tool_name
+            last_completed_payload = payload
             if tool_name == "render_after_effects_project":
                 pending_render_review = self._extract_render_review_target(payload)
             elif (
@@ -1189,15 +1916,24 @@ class ShotwrightCodexRuntimeManager:
                 and self._storyboard_matches_pending_render(arguments, pending_render_review)
             ):
                 storyboard_payload = self._parse_tool_text_payload(payload)
-                quality_review = self._review_render_storyboard_quality(
+                quality_review = await self._review_render_storyboard_quality(
                     app_session_id,
+                    runtime,
+                    turn_state,
+                    client,
+                    runtime_settings,
+                    codex_sdk_config,
                     pending_render_review,
                     storyboard_payload,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    user_goal=self._extract_review_user_goal(runtime_content),
                 )
                 pending_render_review["quality_review"] = quality_review
                 if quality_review.get("blocking"):
                     current_input = self._build_render_quality_block_followup(pending_render_review, quality_review)
                     continue
+                current_thread_id = None
                 current_input = self._build_render_visual_review_followup(
                     pending_render_review,
                     storyboard_payload,
@@ -1205,7 +1941,35 @@ class ShotwrightCodexRuntimeManager:
                 )
                 pending_render_review = None
                 continue
-            current_input = self._build_tool_result_followup(tool_name, payload)
+            should_reset_thread, reset_reason, usage_input_tokens = self._direct_tool_thread_reset_reason(
+                step_index,
+                result.usage,
+            )
+            if should_reset_thread:
+                await self._persist_event(
+                    app_session_id,
+                    "codex.thread.compacted",
+                    {
+                        "provider": "codex",
+                        "previous_thread_id": current_thread_id,
+                        "reason": reset_reason,
+                        "step_index": step_index,
+                        "usage_input_tokens": usage_input_tokens,
+                        "last_tool_name": tool_name,
+                    },
+                    turn_id=turn_state.turn_id,
+                    sequence=runtime.next_event_sequence(),
+                )
+                current_thread_id = None
+                current_input = self._build_direct_tool_context_reset_input(
+                    runtime_content,
+                    reason=reset_reason,
+                    last_tool_name=tool_name,
+                    last_payload=payload,
+                    pending_render_review=pending_render_review,
+                )
+            else:
+                current_input = self._build_tool_result_followup(tool_name, payload)
 
         raise ValueError(
             f"Codex did not produce a final Shotwright response after {_DIRECT_TOOL_MAX_STEPS} tool steps."
@@ -1510,10 +2274,11 @@ class ShotwrightCodexRuntimeManager:
                 client = self._build_client(runtime_settings, api_key=api_key)
                 runtime_content = await self._build_runtime_turn_content(app_session_id, content)
                 session_doc = await get_session_collection().find_one({"_id": app_session_id}) or {}
-                thread_id = _first_non_empty(
+                stored_thread_id = _first_non_empty(
                     session_doc.get("agent_thread_id"),
                     session_doc.get("codex_thread_id"),
                 )
+                thread_id = None
                 local_profile = load_local_codex_profile()
                 codex_sdk_config = build_codex_sdk_config(local_profile)
 
@@ -1522,12 +2287,22 @@ class ShotwrightCodexRuntimeManager:
                     "session.turn.started",
                     {
                         "provider": "codex",
-                        "thread_id": thread_id or None,
+                        "thread_id": None,
+                        "previous_thread_id": stored_thread_id or None,
+                        "fresh_thread": True,
                         "attachment_count": len(persisted_attachments),
                         "attachment_mime_types": [
                             attachment.get("mime_type") for attachment in persisted_attachments
                         ],
                         "timeout_seconds": turn_timeout_seconds,
+                        "model_call_timeout_cap_seconds": _DIRECT_TOOL_MODEL_CALL_TIMEOUT_CAP_SECONDS,
+                        "effective_model_call_timeout_seconds": self._effective_direct_tool_model_timeout(
+                            turn_timeout_seconds
+                        ),
+                        "direct_tool_reasoning_effort": self._effective_direct_tool_reasoning_effort(
+                            str(session_doc.get("copilot_reasoning_effort") or runtime_settings.get("codex_reasoning_effort") or "")
+                        ),
+                        "context_strategy": "fresh_direct_tool_thread_with_compact_session_context",
                     },
                     turn_id=turn_id,
                     sequence=runtime.next_event_sequence(),
@@ -1546,26 +2321,24 @@ class ShotwrightCodexRuntimeManager:
                         sequence=runtime.next_event_sequence(),
                     )
 
-                result = await asyncio.wait_for(
-                    self._run_direct_tool_loop(
-                        app_session_id=app_session_id,
-                        runtime=runtime,
-                        turn_state=turn_state,
-                        client=client,
-                        runtime_content=runtime_content,
-                        persisted_attachments=persisted_attachments,
-                        thread_id=thread_id or None,
-                        runtime_settings=runtime_settings,
-                        session_doc=session_doc,
-                        codex_sdk_config=codex_sdk_config,
-                        on_event=lambda event: self._handle_codex_event(
-                            app_session_id,
-                            runtime,
-                            turn_state,
-                            event,
-                        ),
+                result = await self._run_direct_tool_loop(
+                    app_session_id=app_session_id,
+                    runtime=runtime,
+                    turn_state=turn_state,
+                    client=client,
+                    runtime_content=runtime_content,
+                    persisted_attachments=persisted_attachments,
+                    thread_id=thread_id or None,
+                    runtime_settings=runtime_settings,
+                    session_doc=session_doc,
+                    codex_sdk_config=codex_sdk_config,
+                    on_event=lambda event: self._handle_codex_event(
+                        app_session_id,
+                        runtime,
+                        turn_state,
+                        event,
                     ),
-                    timeout=turn_timeout_seconds,
+                    turn_timeout_seconds=turn_timeout_seconds,
                 )
 
                 assistant_text = result.final_response.strip() or turn_state.content.strip()
@@ -1626,8 +2399,10 @@ class ShotwrightCodexRuntimeManager:
                         "session_status": "idle",
                     }
                 raise
-            except TimeoutError:
-                timeout_message = f"Shotwright timed out waiting for this Codex turn after {turn_timeout_seconds:g} seconds."
+            except TimeoutError as exc:
+                timeout_message = str(exc).strip() or (
+                    f"Shotwright timed out waiting for this Codex turn after {turn_timeout_seconds:g} seconds."
+                )
                 if turn_state.direct_final_response:
                     assistant_text = turn_state.direct_final_response
                     logger.warning(

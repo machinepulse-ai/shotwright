@@ -379,6 +379,9 @@ class CodexBridgeClient:
                     self._dispatch_event_callback(on_event, event, loop)
                 elif record_type == "complete":
                     complete_record = record
+                    if process.poll() is None:
+                        process.kill()
+                    break
                 elif record_type == "error":
                     error_record = record
 
@@ -394,7 +397,7 @@ class CodexBridgeClient:
                     record=error_record,
                 )
 
-            if exit_code != 0:
+            if exit_code != 0 and complete_record is None:
                 raise CodexBridgeError(
                     f"Codex bridge exited with code {exit_code}.",
                     exit_code=exit_code,

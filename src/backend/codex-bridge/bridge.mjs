@@ -226,6 +226,9 @@ async function runTurn(request) {
   for await (const event of streamedTurn.events) {
     updateTurnResult(event, result);
     writeRecord({ type: "event", event });
+    if (event.type === "turn.completed") {
+      break;
+    }
   }
 
   result.threadId = thread.id || result.threadId;

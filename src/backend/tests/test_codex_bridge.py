@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -86,6 +87,50 @@ write({
         "item.completed",
         "turn.completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_codex_bridge_client_returns_after_complete_even_if_node_stays_alive(tmp_path: Path) -> None:
+    bridge_path = _write_fake_bridge(
+        tmp_path,
+        """
+import process from "node:process";
+
+let payload = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) {
+  payload += chunk;
+}
+const write = (record) => process.stdout.write(`${JSON.stringify(record)}\\n`);
+write({
+  type: "event",
+  event: {
+    type: "item.completed",
+    item: { id: "item-1", type: "agent_message", text: "done" },
+  },
+});
+write({
+  type: "event",
+  event: {
+    type: "turn.completed",
+    usage: { input_tokens: 1 },
+  },
+});
+write({
+  type: "complete",
+  thread_id: "thread-1",
+  final_response: "done",
+  usage: { input_tokens: 1 },
+});
+setInterval(() => {}, 1000);
+""",
+    )
+    client = module.CodexBridgeClient(bridge_script=bridge_path, api_key="test-key")
+
+    result = await asyncio.wait_for(client.run_turn(input="hello"), timeout=3)
+
+    assert result.thread_id == "thread-1"
+    assert result.final_response == "done"
 
 
 @pytest.mark.asyncio

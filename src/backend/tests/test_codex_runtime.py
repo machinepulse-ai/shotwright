@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -160,8 +161,93 @@ def test_render_visual_review_followup_attaches_storyboard_images(tmp_path: Path
 
     assert isinstance(followup, list)
     assert followup[0]["type"] == "text"
-    assert "weakest frame" in followup[0]["text"]
+    assert "independent render review agent has approved" in followup[0]["text"]
     assert [item["path"] for item in followup[1:]] == [str(full_storyboard), str(subtitle_storyboard)]
+
+
+@pytest.mark.asyncio
+async def test_independent_render_review_uses_fresh_thread_and_image_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+    runtime = module._CodexRuntimeHandle("session-1")
+    turn_state = module._CodexTurnState("message-1", turn_id="turn-1")
+    full_storyboard = tmp_path / "full-storyboard.jpg"
+    subtitle_storyboard = tmp_path / "subtitle-zone.jpg"
+    full_storyboard.write_bytes(b"full")
+    subtitle_storyboard.write_bytes(b"subtitle")
+    persisted_events: list[dict] = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.kwargs: dict | None = None
+
+        async def run_turn(self, **kwargs):
+            self.kwargs = kwargs
+            return CodexBridgeTurnResult(
+                thread_id="review-thread",
+                final_response=json.dumps(
+                    {
+                        "verdict": "fail",
+                        "blocking": True,
+                        "confidence": 0.91,
+                        "summary": "Subtitles read as a black slab.",
+                        "weakest_frame": "subtitle zone",
+                        "issues": ["black caption plate dominates the frame"],
+                        "revision_brief": "Use lighter caption backing and thinner strokes.",
+                    }
+                ),
+                usage=None,
+                events=[],
+            )
+
+    async def fake_persist_event(app_session_id, event_type, data, *, turn_id=None, sequence=None):
+        persisted_events.append(
+            {
+                "session_id": app_session_id,
+                "type": event_type,
+                "data": data,
+                "turn_id": turn_id,
+                "sequence": sequence,
+            }
+        )
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+
+    review = await runtime_manager._run_independent_render_review(
+        app_session_id="session-1",
+        runtime=runtime,
+        turn_state=turn_state,
+        client=fake_client,
+        runtime_settings={"codex_workspace_root": "C:/workspace"},
+        codex_sdk_config={},
+        model="gpt-5.5",
+        reasoning_effort="high",
+        user_goal="做一个萌宠短视频",
+        pending_render_review={"output_path": "C:/data/exports/session-1/demo.mp4"},
+        storyboard_payload={"storyboard_image_path": str(full_storyboard)},
+        subtitle_storyboard={"storyboard_image_path": str(subtitle_storyboard)},
+        analysis={"black_caption_risk": True},
+    )
+
+    assert review["blocking"] is True
+    assert review["verdict"] == "fail"
+    assert fake_client.kwargs is not None
+    assert fake_client.kwargs["thread_id"] is None
+    assert fake_client.kwargs["sandbox_mode"] == "read-only"
+    assert fake_client.kwargs["output_schema"] == module._INDEPENDENT_RENDER_REVIEW_SCHEMA
+    assert [item["path"] for item in fake_client.kwargs["input"][1:]] == [
+        str(full_storyboard),
+        str(subtitle_storyboard),
+    ]
+    assert [event["type"] for event in persisted_events] == [
+        "quality.review_start",
+        "quality.review_complete",
+    ]
+    assert persisted_events[-1]["data"]["reviewer"] == "independent_render_reviewer"
+    assert persisted_events[-1]["data"]["blocking"] is True
 
 
 @pytest.mark.asyncio
@@ -339,6 +425,20 @@ async def test_direct_tool_loop_requires_storyboard_after_render(monkeypatch: py
         }
 
     monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+
+    async def fake_quality_review(*_args, **_kwargs):
+        return {
+            "success": True,
+            "blocking": False,
+            "reviewer": {
+                "verdict": "pass",
+                "blocking": False,
+                "summary": "Independent review passed.",
+                "issues": [],
+            },
+        }
+
+    monkeypatch.setattr(runtime_manager, "_review_render_storyboard_quality", fake_quality_review)
     monkeypatch.setattr(module, "run_codex_tool", fake_run_codex_tool)
 
     result = await runtime_manager._run_direct_tool_loop(
@@ -497,7 +597,7 @@ async def test_direct_tool_loop_blocks_final_when_subtitle_zone_quality_fails(
             }
         return {"success": True, "result_type": "success", "text_result_for_llm": "{}"}
 
-    def fake_quality_review(*_args, **_kwargs):
+    async def fake_quality_review(*_args, **_kwargs):
         return quality_reviews.pop(0)
 
     monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
@@ -533,7 +633,7 @@ async def test_direct_tool_loop_blocks_final_when_subtitle_zone_quality_fails(
         "render_after_effects_project",
         "generate_storyboard_from_reference_video",
     ]
-    assert any("caption readability/design risk" in str(item) for item in fake_client.inputs)
+    assert any("independent review" in str(item) for item in fake_client.inputs)
 
 
 @pytest.mark.asyncio
@@ -601,6 +701,7 @@ async def test_direct_tool_loop_recovers_when_codex_thread_becomes_unavailable(
 
     monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
     monkeypatch.setattr(module, "run_codex_tool", fake_run_codex_tool)
+    monkeypatch.setattr(runtime_manager, "_direct_tool_transient_bridge_retry_delay_seconds", lambda _attempt: 0)
 
     result = await runtime_manager._run_direct_tool_loop(
         app_session_id="session-1",
@@ -630,3 +731,358 @@ async def test_direct_tool_loop_recovers_when_codex_thread_becomes_unavailable(
         "codex.thread.recovered"
     ]
     assert tool_calls == ["inspect_workspace"]
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_loop_survives_repeated_transient_bridge_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+    runtime = module._CodexRuntimeHandle("session-1")
+    turn_state = module._CodexTurnState("message-1", turn_id="turn-1")
+    persisted_events: list[dict] = []
+    tool_calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.thread_ids: list[str | None] = []
+            self.inputs: list[object] = []
+
+        async def run_turn(self, **kwargs):
+            self.calls += 1
+            self.thread_ids.append(kwargs.get("thread_id"))
+            self.inputs.append(kwargs.get("input"))
+            if self.calls <= 3:
+                raise CodexBridgeError(
+                    "We're currently experiencing high demand, which may cause temporary errors."
+                )
+            if self.calls == 4:
+                raise CodexBridgeError(
+                    "Codex Exec exited with code 1: failed to record rollout items: thread transient-thread not found"
+                )
+            if self.calls == 5:
+                response = {
+                    "action": "tool_call",
+                    "tool_name": "inspect_workspace",
+                    "arguments_json": "{}",
+                    "response": "recover state",
+                }
+            else:
+                response = {
+                    "action": "final",
+                    "tool_name": "",
+                    "arguments_json": "{}",
+                    "response": "done after transient bridge retries",
+                }
+            return CodexBridgeTurnResult(
+                thread_id=f"thread-{self.calls}",
+                final_response=json.dumps(response),
+                usage={"input_tokens": 100},
+                events=[],
+            )
+
+    fake_client = FakeClient()
+
+    async def fake_persist_event(app_session_id, event_type, data, *, turn_id=None, sequence=None):
+        persisted_events.append(
+            {
+                "session_id": app_session_id,
+                "type": event_type,
+                "data": data,
+                "turn_id": turn_id,
+                "sequence": sequence,
+            }
+        )
+
+    async def fake_run_codex_tool(app_session_id, tool_name, arguments, *, tool_call_id=""):
+        tool_calls.append(tool_name)
+        return {"success": True, "result_type": "success", "text_result_for_llm": "{}"}
+
+    monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+    monkeypatch.setattr(module, "run_codex_tool", fake_run_codex_tool)
+    monkeypatch.setattr(runtime_manager, "_direct_tool_transient_bridge_retry_delay_seconds", lambda _attempt: 0)
+
+    result = await runtime_manager._run_direct_tool_loop(
+        app_session_id="session-1",
+        runtime=runtime,
+        turn_state=turn_state,
+        client=fake_client,
+        runtime_content="make a render",
+        persisted_attachments=[],
+        thread_id=None,
+        runtime_settings={
+            "codex_workspace_root": "",
+            "codex_approval_policy": "",
+            "codex_sandbox_mode": "",
+            "codex_network_access_enabled": False,
+            "codex_skip_git_repo_check": True,
+            "codex_web_search_mode": "",
+        },
+        session_doc={},
+        codex_sdk_config={},
+        on_event=None,
+    )
+
+    assert result.final_response == "done after transient bridge retries"
+    assert fake_client.thread_ids == [None, None, None, None, None, "thread-5"]
+    recovered_reasons = [
+        event["data"].get("reason")
+        for event in persisted_events
+        if event["type"] == "codex.thread.recovered"
+    ]
+    assert recovered_reasons == [
+        "transient_bridge_error",
+        "transient_bridge_error",
+        "transient_bridge_error",
+        "thread_unavailable",
+    ]
+    assert tool_calls == ["inspect_workspace"]
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_loop_compacts_long_context_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+    runtime = module._CodexRuntimeHandle("session-1")
+    turn_state = module._CodexTurnState("message-1", turn_id="turn-1")
+    persisted_events: list[dict] = []
+    tool_calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.thread_ids: list[str | None] = []
+            self.inputs: list[object] = []
+
+        async def run_turn(self, **kwargs):
+            self.calls += 1
+            self.thread_ids.append(kwargs.get("thread_id"))
+            self.inputs.append(kwargs.get("input"))
+            if self.calls == 1:
+                response = {
+                    "action": "tool_call",
+                    "tool_name": "inspect_workspace",
+                    "arguments_json": "{}",
+                    "response": "inspect",
+                }
+                usage = {"input_tokens": module._DIRECT_TOOL_THREAD_RESET_INPUT_TOKEN_THRESHOLD + 1}
+            else:
+                response = {
+                    "action": "final",
+                    "tool_name": "",
+                    "arguments_json": "{}",
+                    "response": "done after compacted context",
+                }
+                usage = {"input_tokens": 100}
+            return CodexBridgeTurnResult(
+                thread_id="thread-1" if self.calls == 1 else "thread-2",
+                final_response=json.dumps(response),
+                usage=usage,
+                events=[],
+            )
+
+    fake_client = FakeClient()
+
+    async def fake_persist_event(app_session_id, event_type, data, *, turn_id=None, sequence=None):
+        persisted_events.append(
+            {
+                "session_id": app_session_id,
+                "type": event_type,
+                "data": data,
+                "turn_id": turn_id,
+                "sequence": sequence,
+            }
+        )
+
+    async def fake_run_codex_tool(app_session_id, tool_name, arguments, *, tool_call_id=""):
+        tool_calls.append(tool_name)
+        return {
+            "success": True,
+            "result_type": "success",
+            "text_result_for_llm": json.dumps({"session_id": app_session_id, "status": "ready"}),
+        }
+
+    monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+    monkeypatch.setattr(module, "run_codex_tool", fake_run_codex_tool)
+
+    result = await runtime_manager._run_direct_tool_loop(
+        app_session_id="session-1",
+        runtime=runtime,
+        turn_state=turn_state,
+        client=fake_client,
+        runtime_content="make a render",
+        persisted_attachments=[],
+        thread_id="old-thread",
+        runtime_settings={
+            "codex_workspace_root": "",
+            "codex_approval_policy": "",
+            "codex_sandbox_mode": "",
+            "codex_network_access_enabled": False,
+            "codex_skip_git_repo_check": True,
+            "codex_web_search_mode": "",
+        },
+        session_doc={},
+        codex_sdk_config={},
+        on_event=None,
+    )
+
+    assert result.final_response == "done after compacted context"
+    assert fake_client.thread_ids == ["old-thread", None]
+    assert "fresh Codex thread" in str(fake_client.inputs[1])
+    assert "inspect_workspace" in str(fake_client.inputs[1])
+    assert [event["type"] for event in persisted_events if event["type"] == "codex.thread.compacted"] == [
+        "codex.thread.compacted"
+    ]
+    assert persisted_events[-1]["data"]["usage_input_tokens"] == module._DIRECT_TOOL_THREAD_RESET_INPUT_TOKEN_THRESHOLD + 1
+    assert tool_calls == ["inspect_workspace"]
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_loop_recovers_once_after_model_call_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+    runtime = module._CodexRuntimeHandle("session-1")
+    turn_state = module._CodexTurnState("message-1", turn_id="turn-1")
+    persisted_events: list[dict] = []
+    tool_calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.thread_ids: list[str | None] = []
+            self.inputs: list[object] = []
+
+        async def run_turn(self, **kwargs):
+            self.calls += 1
+            self.thread_ids.append(kwargs.get("thread_id"))
+            self.inputs.append(kwargs.get("input"))
+            if self.calls == 1:
+                await asyncio.sleep(0.05)
+            if self.calls == 2:
+                response = {
+                    "action": "tool_call",
+                    "tool_name": "inspect_workspace",
+                    "arguments_json": "{}",
+                    "response": "recover state",
+                }
+            else:
+                response = {
+                    "action": "final",
+                    "tool_name": "",
+                    "arguments_json": "{}",
+                    "response": "done after timeout recovery",
+                }
+            return CodexBridgeTurnResult(
+                thread_id="new-thread",
+                final_response=json.dumps(response),
+                usage={"input_tokens": 100},
+                events=[],
+            )
+
+    fake_client = FakeClient()
+
+    async def fake_persist_event(app_session_id, event_type, data, *, turn_id=None, sequence=None):
+        persisted_events.append(
+            {
+                "session_id": app_session_id,
+                "type": event_type,
+                "data": data,
+                "turn_id": turn_id,
+                "sequence": sequence,
+            }
+        )
+
+    async def fake_run_codex_tool(app_session_id, tool_name, arguments, *, tool_call_id=""):
+        tool_calls.append(tool_name)
+        return {"success": True, "result_type": "success", "text_result_for_llm": "{}"}
+
+    monkeypatch.setattr(runtime_manager, "_persist_event", fake_persist_event)
+    monkeypatch.setattr(module, "run_codex_tool", fake_run_codex_tool)
+
+    result = await runtime_manager._run_direct_tool_loop(
+        app_session_id="session-1",
+        runtime=runtime,
+        turn_state=turn_state,
+        client=fake_client,
+        runtime_content="make a render",
+        persisted_attachments=[],
+        thread_id="slow-thread",
+        runtime_settings={
+            "codex_workspace_root": "",
+            "codex_approval_policy": "",
+            "codex_sandbox_mode": "",
+            "codex_network_access_enabled": False,
+            "codex_skip_git_repo_check": True,
+            "codex_web_search_mode": "",
+        },
+        session_doc={},
+        codex_sdk_config={},
+        on_event=None,
+        turn_timeout_seconds=0.01,
+    )
+
+    assert result.final_response == "done after timeout recovery"
+    assert fake_client.thread_ids == ["slow-thread", None, "new-thread"]
+    assert "model call timeout" in str(fake_client.inputs[1])
+    assert [event["data"]["reason"] for event in persisted_events if event["type"] == "codex.thread.recovered"] == [
+        "turn_timeout"
+    ]
+    assert tool_calls == ["inspect_workspace"]
+
+
+def test_effective_direct_tool_model_timeout_caps_long_session_timeout() -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+
+    assert runtime_manager._effective_direct_tool_model_timeout(1800) == 180.0
+    assert runtime_manager._effective_direct_tool_model_timeout(60) == 60.0
+    assert runtime_manager._effective_direct_tool_model_timeout(None) == 180.0
+
+
+def test_context_reset_uses_last_tool_result_without_repeating_inspect() -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+
+    text = runtime_manager._build_direct_tool_context_reset_input(
+        "User request:\nmake a render",
+        reason="model call timeout",
+        last_tool_name="inspect_workspace",
+        last_payload={
+            "success": True,
+            "result_type": "success",
+            "text_result_for_llm": json.dumps({"session_id": "session-1", "container": {"status": "running"}}),
+        },
+        pending_render_review=None,
+        timeout_seconds=180,
+    )
+
+    assert isinstance(text, str)
+    assert "Last completed backend tool call" in text
+    assert "Do not repeat inspect_workspace" in text
+    assert "Choose the next concrete Shotwright tool action" in text
+    assert "script_path" in text
+    assert "create_lyrics_mv_project" in text
+
+
+def test_direct_tool_protocol_pushes_large_jsx_through_script_path() -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+
+    instructions = runtime_manager._build_direct_tool_protocol_instructions()
+
+    assert "Do not inline large After Effects JSX" in instructions
+    assert "create_lyrics_mv_project" in instructions
+    assert "run_python_code" in instructions
+    assert "script_path" in instructions
+
+
+def test_direct_tool_reasoning_downgrades_after_timeout() -> None:
+    runtime_manager = module.ShotwrightCodexRuntimeManager()
+
+    assert runtime_manager._effective_direct_tool_reasoning_effort("xhigh") == "medium"
+    assert runtime_manager._effective_direct_tool_reasoning_effort("high") == "medium"
+    assert runtime_manager._direct_tool_reasoning_after_timeout("xhigh", 0) == "medium"
+    assert runtime_manager._direct_tool_reasoning_after_timeout("xhigh", 1) == "medium"
+    assert runtime_manager._direct_tool_reasoning_after_timeout("xhigh", 2) == "medium"
+    assert runtime_manager._direct_tool_reasoning_after_timeout("high", 1) == "medium"
+    assert runtime_manager._direct_tool_reasoning_after_timeout("low", 1) == "low"
