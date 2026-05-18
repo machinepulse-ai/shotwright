@@ -256,9 +256,10 @@ Shotwright is AI-native. The recommended setup path is to delegate host configur
 
 1. Provision a Windows VM meeting the [host requirements](#host-requirements) and open the SSH port.
 2. Clone this repo and open it in a Claude Code or Codex session on your local machine.
-3. Tell the agent your host IP, SSH credentials, proxy URL if needed, and your Copilot or OpenAI API key.
-4. The agent installs Docker Desktop, switches it to Windows-container mode, builds `shotwright:allinone`, configures `.env`, and starts the stack.
-5. When the agent reports done, open `http://<host-ip>:3000`.
+3. Tell the agent your host IP, SSH key path, proxy URL if needed, and which local environment variable or secret-store entry contains your Copilot or OpenAI API key.
+4. Use temporary, revocable SSH keys and least-privilege API keys for setup. Avoid password SSH and do not paste API keys or long-lived credentials into the chat transcript.
+5. The agent installs Docker Desktop, switches it to Windows-container mode, builds `shotwright:allinone`, configures `.env`, and starts the stack.
+6. When the agent reports done, open `http://<host-ip>:3000`.
 
 ### Manual setup
 
