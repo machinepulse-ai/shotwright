@@ -4,9 +4,9 @@
 
 [简体中文](README-cn.md) | English
 
-### Container-first After Effects runtime — driven by an AI agent
+### An AI agent that runs real Adobe After Effects inside a Windows container
 
-A chat-driven product where a Copilot or Codex agent operates real Adobe After Effects inside a Windows container. Drop in a reference video, narrate the intent, and watch the agent storyboard the footage, stage assets, write JSX, drive nexrender, and stream the rendered mp4 back to the browser — without asking designers to become Windows container operators.
+A chat-driven product where a Copilot or Codex agent operates real Adobe After Effects inside a Windows container. Drop in a reference video, describe what you want, and watch the agent plan the footage, prepare assets, write JSX automation scripts (After Effects' built-in scripting language), hand them off to nexrender (a headless render runner for AE), and stream the finished mp4 back to the browser — without asking designers to manage Windows containers.
 
 <p>
 	<img src="https://img.shields.io/badge/windows%20containers-ltsc2025-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows Containers LTSC 2025" />
@@ -30,10 +30,10 @@ A chat-driven product where a Copilot or Codex agent operates real Adobe After E
 </div>
 
 > [!IMPORTANT]
-> Shotwright keeps After Effects at the center. The goal is **not** generic AI video automation — it is reproducible AE runtime infrastructure plus an agent shell, so designers keep taste and control while the system handles configuration, file plumbing, JSX, render queueing, and review loops.
+> Shotwright keeps After Effects at the center. The goal is **not** generic AI video automation — it is a reproducible AE runtime with an AI agent layer on top, so designers keep creative judgment and control while the system handles configuration, file management, JSX scripting, render queueing, and review loops.
 
 > [!NOTE]
-> Shared defaults — host/container paths, runner temp directory names, base image tags, nexrender package versions — live in [shotwright-config.json](shotwright-config.json). [setup-versions.yml](setup-versions.yml) is the source of truth for the selected After Effects version. The bundled AE setup payload is published to GHCR and copied into `shotwright:allinone` at image-build time.
+> Shared defaults — host/container paths, CI runner directories, Docker image tags, and nexrender package versions — are defined in [shotwright-config.json](shotwright-config.json). The After Effects version is controlled by [setup-versions.yml](setup-versions.yml). The AE installer payload is published to GitHub Container Registry (GHCR) and baked into `shotwright:allinone` at build time.
 
 <details>
 <summary><strong>Jump to section</strong></summary>
@@ -86,7 +86,7 @@ Early-stage design sketch:
 | Aspect | Initial thinking |
 | --- | --- |
 | **Task set** | Around 500 tasks across 5 categories — *keyframe · mask · expression · comp-build · render-export*. Each task = natural-language prompt + reference video + a ground-truth `.aep`. |
-| **Scoring** | Visual similarity (LPIPS / DreamSim against a reference render) + structural match (comp, layer, and keyframe counts) + wall-time and token cost + completion rate, combined into a single 0–100 score. |
+| **Scoring** | Visual similarity (LPIPS / DreamSim — perceptual image quality metrics — against a reference render) + structural match (composition, layer, and keyframe counts) + elapsed time and token cost + completion rate, combined into a single 0–100 score. |
 | **Ground truth** | Several senior motion designers solve each task; we'd keep multiple solutions rather than picking one "correct" answer, to avoid pretending creative work has a unique right answer. |
 | **Distribution** | A GitHub Pages leaderboard. Each submission would ship the score, the `.aep`, a rendered mp4, and a repro command — so results stay inspectable. |
 
@@ -101,8 +101,8 @@ Three cooperating layers, all running on Windows Server LTSC 2025:
 
 | Layer | Stack | Responsibility |
 | --- | --- | --- |
-| **Web UI** | React 18 + TypeScript + Webpack 5 | Chat console (AgentPanel), admin (AdminPanel), HLS player (VideoPlayer), container manager |
-| **Agent runtime** | FastAPI · Motor (MongoDB) · Codex SDK bridge **or** Copilot SDK | Session/project/container state, agent tool dispatch, SSE streaming, REST API |
+| **Web UI** | React 18 + TypeScript + Webpack 5 | Chat console (AgentPanel), admin panel (AdminPanel), HLS video player (VideoPlayer — streams renders to the browser), container manager |
+| **Agent runtime** | FastAPI · Motor (async MongoDB driver) · Codex SDK bridge **or** Copilot SDK | Session/project/container state, agent tool dispatch, server-sent events (SSE) streaming, REST API |
 | **AE runtime worker** | Windows container · AE 26.2 · nexrender · ffmpeg · Python 3.13 · Node 20 | Executes JSX patches, drives `aerender.exe`, encodes mp4, returns artifacts |
 
 The default Docker image is `shotwright:allinone` — backend, frontend toolchain, AE setup payload, nexrender, and worker scripts in a single Windows image.
@@ -137,7 +137,7 @@ The agent has 16 custom tools registered in [`agent_tools.py`](src/backend/app/s
 | **Reference & asset prep** | `stage_reference_images` · `generate_storyboard_from_reference_video` · `generate_tts_audio` · `run_python_code` *(Pillow / data prep in a managed venv)* |
 | **AE composition, render & review** | `create_reference_composition` · `create_lyrics_mv_project` · `run_after_effects_jsx` · `render_after_effects_project` |
 
-`run_python_code` runs in a sandboxed venv synced from `src/backend-config/requirements-aigc.txt`, so the agent can generate PIL assets, prep numpy/scipy data, and call Pillow without ever leaving the worker container.
+`run_python_code` runs in an isolated Python environment built from `src/backend-config/requirements-aigc.txt`, so the agent can generate images and run data-processing scripts with Pillow without touching the system Python install.
 
 ## 🚀 Quick Start
 
@@ -198,7 +198,7 @@ The root [Dockerfile](Dockerfile) is multi-stage. The default `shotwright` targe
 
 | Stage | Purpose | Typical tag |
 | --- | --- | --- |
-| `base` | Shared toolchain — choco, Node 20, Python 3.13, ffmpeg, git, vcredist | — |
+| `base` | Shared toolchain — Chocolatey, Node 20, Python 3.13, ffmpeg, Git, Visual C++ runtime | — |
 | `after-effects-setup` | Reference to `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` | (pulled, not built) |
 | `shotwright` | All-in-one AE worker — installs AE during build, runs `runtime_entrypoint.ps1` at startup | `shotwright:allinone` |
 | `backend` | FastAPI + codex-bridge + uv dependencies | `shotwright:backend` |
@@ -253,7 +253,7 @@ Workflows in `.github/workflows/` target `windows-2025` runners.
 | `windows-container-validation` — `dockerfile-build` | Push or PR touching `Dockerfile` | Build verification for `shotwright:allinone` |
 | `windows-container-validation` — `validation-render` | Manual `workflow_dispatch` | Pull installer payload from GHCR and run the full validation render |
 
-`ae-setup-publish` packages everything into a `nanoserver:ltsc2025` image, which `shotwright:allinone` later pulls from at build time. No private secrets are needed beyond the default `GITHUB_TOKEN`.
+`ae-setup-publish` packages the AE installer into a minimal Windows Nano Server image (`nanoserver:ltsc2025`), which `shotwright:allinone` pulls from at build time. No private secrets are needed beyond the default `GITHUB_TOKEN`.
 
 ## 📁 Project Layout
 
@@ -308,12 +308,12 @@ python .\scripts\skills\publish_skills_release.py
 
 ## 📝 Design Notes
 
-- **Image strategy.** The default worker image is `shotwright:allinone`. Service-created worker containers and `docker-compose.dev.yml` both start from this preinstalled image; the older split between `shotwright:dev` and a separate runtime is gone.
-- **Patch-only JSX.** Validation JSX is patch-only on purpose. nexrender owns render execution and output routing — the validation script also recovers a stray `result.mp4` from the work directory when AE returns a non-zero exit code.
-- **Single predictable artifact.** Validation jobs use `outputExt: mp4` + `@nexrender/action-copy`, so each run ends with one mp4 (no `.done` markers).
-- **Agent providers.** The agent provider is pluggable. `SHOTWRIGHT_AGENT_PROVIDER=copilot` (default) uses the GitHub Copilot SDK; `=codex` routes turns through the in-container Node Codex bridge. Both keys can coexist; admins switch in the AdminPanel.
-- **Sandboxed Python tool.** `run_python_code` runs in a managed venv (`SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR`) hashed from `requirements-aigc.txt`, so the agent never installs into the system interpreter.
-- **HLS streaming.** Render outputs are sliced into HLS segments and served from the shared `hls` volume; the React `VideoPlayer` component plays them with `hls.js`.
+- **Image strategy.** The default worker image is `shotwright:allinone`. Service-created worker containers and `docker-compose.dev.yml` both start from this preinstalled image; the older split between `shotwright:dev` and a separate runtime image is gone.
+- **JSX patches modify compositions only.** Validation JSX scripts only edit composition-level properties. nexrender handles render execution and output routing — and the validation script recovers `result.mp4` from the work directory if AE exits with a non-zero code.
+- **One output file per run.** Validation jobs use `outputExt: mp4` + `@nexrender/action-copy`, so each run ends with exactly one mp4 file (no `.done` marker files).
+- **Pluggable agent backends.** `SHOTWRIGHT_AGENT_PROVIDER=copilot` (default) uses the GitHub Copilot SDK; `=codex` routes requests through the in-container Node.js Codex bridge. Both can coexist; admins switch between them in the AdminPanel.
+- **Isolated Python sandbox.** `run_python_code` runs in a managed virtual environment (`SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR`) derived from `requirements-aigc.txt`, so the agent never installs packages into the system Python.
+- **HLS video streaming.** Render outputs are sliced into HLS (HTTP Live Streaming) segments and served from the shared `hls` volume; the React `VideoPlayer` plays them with `hls.js`.
 
 ## 🗺️ Roadmap
 
