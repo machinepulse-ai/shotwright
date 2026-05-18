@@ -4,37 +4,50 @@
 
 [English](README.md) | 简体中文
 
-### 面向 AI 智能体的容器化 Adobe After Effects 运行时
+### 容器化的 After Effects 运行时 —— 由 AI 智能体驱动
 
-构建 Windows 渲染工作节点，既可以挂载真实的 After Effects 安装，也可以从 GHCR 托管或本地准备的安装缓存自动安装；同时对 nexrender 输出做端到端验证，让设计师专注创意，而不是被基础设施拖住。
+一个对话式产品：Copilot 或 Codex 智能体在 Windows 容器里操作真实的 Adobe After Effects。丢一段参考视频进去、口头描述创意，智能体就会自动出分镜、备素材、写 JSX、调 nexrender、把渲染好的 mp4 通过 HLS 流回浏览器 —— 设计师不必再去当 Windows 容器运维。
 
 <p>
 	<img src="https://img.shields.io/badge/windows%20containers-ltsc2025-0078D4?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows Containers LTSC 2025" />
 	<img src="https://img.shields.io/badge/after%20effects-2026-9999FF?style=for-the-badge&logo=adobeaftereffects&logoColor=white" alt="Adobe After Effects 2026" />
+	<img src="https://img.shields.io/badge/fastapi-0.110+-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI" />
+	<img src="https://img.shields.io/badge/react-18-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React 18" />
 	<img src="https://img.shields.io/badge/node-%E2%89%A520-5FA04E?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node 20+" />
 	<img src="https://img.shields.io/badge/nexrender-validated-0A7EA4?style=for-the-badge&logo=render&logoColor=white" alt="nexrender 已验证" />
 	<img src="https://img.shields.io/badge/license-MIT-2EA44F?style=for-the-badge" alt="MIT License" />
 </p>
 
+<p>
+	<a href="https://github.com/machinepulse-ai/shotwright/stargazers">
+		<img src="https://img.shields.io/github/stars/machinepulse-ai/shotwright?style=social" alt="GitHub stars" />
+	</a>
+	<a href="https://github.com/machinepulse-ai/shotwright/network/members">
+		<img src="https://img.shields.io/github/forks/machinepulse-ai/shotwright?style=social" alt="GitHub forks" />
+	</a>
+</p>
+
 </div>
 
 > [!IMPORTANT]
-> Shotwright 始终把 After Effects 放在工作流中心。它不是泛化的 AI 视频自动化工具，而是一套可复现、可审计的 AE 运行时基础设施：让 AI 智能体接手重复的执行动作，让设计师保留审美判断与最终控制权。
+> Shotwright 始终把 After Effects 放在工作流中心。它**不是**一个泛化的 AI 视频自动化产品，而是一套可复现的 AE 运行时基础设施加上一层智能体外壳：让系统接手配置、文件搬运、JSX、渲染队列和验收循环这些杂事，让设计师保留审美判断与最终控制权。
 
 > [!NOTE]
-> 本文约定如下：AI Agent 统一译为“AI 智能体”；proxy 统一译为“代理”；installer cache 统一称为“安装缓存”。宿主机路径、容器路径、runner 临时目录名、基础镜像标签和 nexrender 版本等共享默认值，现在统一放在 [shotwright-config.json](shotwright-config.json)；`setup-versions.yml` 仍然只负责当前选中的 AE setup 版本。
+> 本文约定：AI Agent 译为 **AI 智能体**；proxy 译为 **代理**；installer cache 译为 **安装缓存**；composition 译为 **合成**；worker container 译为 **工作容器**。宿主机和容器路径、runner 临时目录名、基础镜像标签、nexrender 包版本等共享默认值统一放在 [shotwright-config.json](shotwright-config.json)；[setup-versions.yml](setup-versions.yml) 仍然只负责当前选中的 AE 版本。AE 安装载荷会发布到 GHCR，并在镜像构建阶段烘焙进 `shotwright:allinone`。
 
 <details>
 <summary><strong>目录</strong></summary>
 
 - [验证演示](#-验证演示)
 - [为什么选择 Shotwright](#-为什么选择-shotwright)
-- [核心能力](#-核心能力)
-- [验证流程](#-验证流程)
-- [环境要求](#-环境要求)
+- [产品组成](#-产品组成)
+- [架构](#-架构)
+- [智能体工具](#-智能体工具)
 - [快速开始](#-快速开始)
+- [AE 运行时容器](#-ae-运行时容器)
 - [CI 与 GHCR 安装镜像](#-ci-与-ghcr-安装镜像)
 - [项目结构](#-项目结构)
+- [Skills Bundle](#-skills-bundle)
 - [设计说明](#-设计说明)
 - [路线图](#-路线图)
 
@@ -46,76 +59,139 @@
 	<img src="./docs/assets/validation-preview.gif" alt="Shotwright 验证渲染 GIF 预览" width="640" />
 </p>
 
-上方 GIF 截取自 validation mp4，是一个 4 秒循环的仓库内演示预览。冒烟测试本身仍会通过 Windows 容器、宿主机挂载的 After Effects 安装与 nexrender，稳定产出真实的 mp4 文件。
+GIF 是一段从真实 `validation.mp4` 截取的 4 秒循环片段。冒烟渲染会把整条链路跑一遍：启动 Windows 容器、加载 all-in-one 镜像、AE 26.2 启动、nexrender 解析 JSX 补丁、`aerender.exe` 产出 H.264 mp4，最后把文件复制到 `validation-data/output/`。
 
 | 产物 | 状态 | 说明 |
 | --- | --- | --- |
 | `validation-preview.gif` | ✅ 已提交 | 由 `validation.mp4` 导出的 4 秒循环 README 演示资源 |
 | `validation.mp4` | 🟡 本地生成 | 冒烟测试运行时产出的真实渲染结果 |
-| `validation_motion.aep` | 🟡 本地生成 | 验证时重新生成，故意不纳入 Git，以避免不必要的二进制文件波动 |
+| `validation_motion.aep` | 🟡 本地生成 | 每次验证都会重新生成；不进 Git，避免不必要的二进制波动 |
 
 ## 🎬 为什么选择 Shotwright
 
 多数 AI 视频产品都在缩小创作空间：更少的决定权、更少的控制面、更多的模板约束。Shotwright 选择相反的方向。
 
 - 让 AE 设计师获得 AI 智能体带来的执行杠杆，而不必自己扛起 Windows 容器运维。
-- 让验证渲染保持可复现、可回放、可审计。
-- 让基础设施退到背景，把判断力和品味留给人。
+- 让渲染保持可复现、可回放、可审计 —— JSX、nexrender job 定义、mp4 产物都是一等公民。
+- 把基础设施推到背景；创作判断留给人；循环是 `意图 → 智能体 → JSX → 渲染 → 复盘`。
 - 把 After Effects 当作严肃的运行时基座，而不是面板脚本的包装壳。
 
-## 🧰 核心能力
+## 🧭 产品组成
 
-| 能力 | 实际含义 |
-| --- | --- |
-| Windows 运行时镜像 | 构建包含 Node.js、Python 3.13、ffmpeg、Git 与 nexrender 依赖的容器 |
-| 宿主机挂载模式 | 直接使用与 `setup-versions.yml` 当前版本匹配的宿主机 AE 安装目录，而不是把 AE 打包进镜像 |
-| 安装缓存模式 | 从 GHCR 托管或本地准备的安装缓存中安装 `setup-versions.yml` 当前选中的版本 |
-| 验证工程生成 | 通过 JSX 生成可复现的 AEP，方便重复执行冒烟测试 |
-| 仅补丁 JSX | 验证脚本只负责合成修改，渲染过程完全交由 nexrender |
+三层在 Windows Server LTSC 2025 上协作：
 
-## 🔄 验证流程
+| 层 | 技术栈 | 职责 |
+| --- | --- | --- |
+| **Web UI** | React 18 + TypeScript + Webpack 5 | 对话面板（AgentPanel）、后台管理（AdminPanel）、HLS 视频播放（VideoPlayer）、容器管理（ContainerManager） |
+| **智能体运行时** | FastAPI · Motor（MongoDB）· Codex SDK bridge **或** Copilot SDK | 会话/工程/容器状态、智能体工具分发、SSE 流式响应、REST API |
+| **AE 工作容器** | Windows 容器 · AE 26.2 · nexrender · ffmpeg · Python 3.13 · Node 20 | 执行 JSX 补丁、调用 `aerender.exe`、编码 mp4、回传产物 |
+
+默认 Docker 镜像是 `shotwright:allinone` —— 后端、前端工具链、AE 安装载荷、nexrender、工作脚本全部装在一个 Windows 镜像里。
+
+## 🏗️ 架构
 
 ```mermaid
 flowchart LR
-		H[与 setup-versions.yml 匹配的宿主 AE 安装] -->|挂载进容器| C[Shotwright Windows 运行时]
-		C --> P[create_validation_animation_project.jsx]
-		P --> A[validation_motion.aep]
-		A --> N[nexrender-cli]
-		N --> S[validation_patch.jsx]
-		S --> R[aerender.exe]
-		R --> M[validation.mp4]
+	U[👤 设计师] --> FE[React 前端<br/>:3000]
+	FE -->|REST + SSE| BE[FastAPI<br/>:8000]
+	BE <-->|Motor| DB[(MongoDB)]
+	BE -->|JSONL stdio| CB[Codex Bridge<br/>Node @openai/codex-sdk]
+	BE -.->|或者| CP[Copilot SDK<br/>@github/copilot]
+	BE -->|docker SDK| DK[Docker Engine<br/>Windows]
+	DK -->|拉起| WK[工作容器<br/>shotwright:allinone]
+	WK --> AE[After Effects 2026<br/>aerender.exe]
+	WK --> NX[nexrender-cli]
+	WK -->|mp4 → HLS| FS[(uploads / exports / hls<br/>命名卷)]
+	FS -->|流回| FE
 ```
 
-## 🧱 环境要求
+同一个 Docker 引擎同时承载 MongoDB、后端、前端和按需拉起的 AE 工作容器。后端通过本机 Docker 命名管道（`\\.\pipe\docker_engine`）按会话启停工作容器。
 
-- Windows 宿主机
-- 已启用 Windows 容器模式的 Docker
-- 满足以下任一条件：
-	- 宿主机已安装与当前 `setup-versions.yml` 选择匹配的 Adobe After Effects
-	- 按照第 3 步的 GHCR 优先流程获取安装载荷
+## 🧰 智能体工具
 
-> [!TIP]
-> 预构建的安装载荷镜像已发布到 GHCR，Dockerfile 也已经通过 `http_proxy`、`https_proxy`、`HTTP_PROXY`、`HTTPS_PROXY` 构建参数内置代理支持。可用版本见 [setup-versions.yml](setup-versions.yml)。
+智能体注册了 16 个自定义工具，全部在 [`agent_tools.py`](src/backend/app/services/agent_tools.py) 里，对应工作流的四个阶段：
+
+| 阶段 | 工具 |
+| --- | --- |
+| **工作目录与容器生命周期** | `ensure_after_effects_container` · `inspect_workspace` · `stop_after_effects_container` |
+| **工程生命周期** | `create_after_effects_project` · `create_empty_after_effects_project` · `list_uploaded_projects` · `select_active_project` · `export_project_archive` |
+| **参考素材与资源准备** | `stage_reference_images` · `generate_storyboard_from_reference_video` · `generate_tts_audio` · `run_python_code`（在受管 venv 里跑 Pillow / 数据处理） |
+| **AE 合成、渲染与复盘** | `create_reference_composition` · `create_lyrics_mv_project` · `run_after_effects_jsx` · `render_after_effects_project` |
+
+`run_python_code` 跑在一个根据 `src/backend-config/requirements-aigc.txt` 哈希同步的 venv 里，智能体可以放心生成 PIL 素材、准备 numpy/scipy 数据、调用 Pillow，而不污染系统解释器。
 
 ## 🚀 快速开始
 
-### 第 1 步 — 构建 Docker 镜像
-
-- 做什么：生成一个 all-in-one 的 Windows 工作容器镜像，内置 Node.js、Python、ffmpeg、nexrender，以及当前选中版本的 After Effects。
-- 结果：得到一个标签为 `shotwright:runtime` 的本地 Docker 镜像。
-- 能跳过吗：不能。这是后续所有步骤的基础。
+### A. 整套平台（Docker Compose）
 
 ```powershell
-docker build -t shotwright:runtime .
+cd src
+copy .env.example .env
+# 编辑 .env —— 至少设置 SHOTWRIGHT_SECRET_KEY 和 SHOTWRIGHT_ADMIN_PASSWORD
+
+# 工作容器镜像构建一次（默认 target = shotwright:allinone）
+docker build --target shotwright -t shotwright:allinone .
+
+# 拉起平台：mongo + backend + frontend
+.\scripts\deploy.ps1 -Build -Detach
+
+# 或者开发模式（后端热重载 + webpack-dev-server）
+.\scripts\deploy.ps1 -Dev -Build
 ```
 
-Dockerfile 现在会把发布在 GHCR 的 `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` 安装载荷复制到 runtime 镜像里，并在镜像构建阶段执行 `install_after_effects_in_container.ps1`。因此服务创建工作容器时，可以直接使用预装好的 `shotwright:runtime`，不再依赖单独的 payload 挂载流程。
+| 服务 | 地址 |
+| --- | --- |
+| Frontend | http://localhost:3000 |
+| Backend API | http://localhost:8000/api |
+| Swagger | http://localhost:8000/api/docs |
 
-如需显式关闭启动时的安装检查：
+### B. 不用 Docker 的本地开发
+
+需要本地 MongoDB 跑在 `localhost:27017`；如果要走通工作容器，还需要一台能跑 AE 的 Windows 宿主机。
 
 ```powershell
-docker build --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:runtime .
+# 后端（FastAPI + Codex bridge）
+cd src/backend
+uv sync
+uv run uvicorn app.main:app --reload --port 8000
+
+# 前端（React + webpack-dev-server）
+cd src/frontend
+npm install
+npm run dev
 ```
+
+也可以用一键脚本：`.\src\scripts\dev.ps1`。
+
+### C. 只验证 AE 运行时容器
+
+适合只想确认 Windows 容器 + AE 安装 + nexrender 链路通不通的场景，不依赖整套平台。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:allinone
+```
+
+会产出 `validation-data/output/validation.mp4`。宿主机挂载和安装缓存两种变体见下面的 [AE 运行时容器](#-ae-运行时容器) 章节；安装缓存的完整流程见 [setup.md](setup.md)。
+
+## 🪟 AE 运行时容器
+
+根目录 [Dockerfile](Dockerfile) 是多阶段的。默认 `shotwright` target 会在构建期从 GHCR 拉取 AE 安装载荷并烘焙进镜像。
+
+| Stage | 用途 | 典型 tag |
+| --- | --- | --- |
+| `base` | 共享工具链 —— choco、Node 20、Python 3.13、ffmpeg、git、vcredist | — |
+| `after-effects-setup` | 引用 `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:26.2` | （拉取，非构建） |
+| `shotwright` | All-in-one AE 工作容器 —— 构建期安装 AE，启动时执行 `runtime_entrypoint.ps1` | `shotwright:allinone` |
+| `backend` | FastAPI + codex-bridge + uv 依赖 | `shotwright:backend` |
+| `frontend-build` → `frontend` | Webpack 生产构建 + 静态服务 | `shotwright:frontend` |
+
+### AE 的三种运行模式
+
+| 模式 | 适用场景 | 操作方式 |
+| --- | --- | --- |
+| **All-in-one（默认）** | 大多数人；服务按需拉起的工作容器 | `docker build --target shotwright -t shotwright:allinone .` —— 构建期 AE 已经烘焙进去 |
+| **宿主机挂载** | 宿主机已经装好 AE，希望镜像更瘦 | 给 `run_validation.ps1` 传 `-AfterEffectsPayloadRoot $null`；脚本会按 `setup-versions.yml` 解析并挂载宿主机安装目录 |
+| **安装缓存** | 离线 / 受代理环境；需要自己控制载荷来源 | 先拉取或本地构建安装载荷目录，再把 `-AfterEffectsPayloadRoot` 和 `-CreativeCloudHelperRoot` 传给 `run_validation.ps1`。完整流程在 [setup.md](setup.md) |
 
 <details>
 <summary><strong>带代理的构建示例</strong></summary>
@@ -127,121 +203,84 @@ docker build `
 	--build-arg https_proxy=$proxy `
 	--build-arg HTTP_PROXY=$proxy `
 	--build-arg HTTPS_PROXY=$proxy `
-	-t shotwright:runtime .
+	--target shotwright `
+	-t shotwright:allinone .
 ```
 
 </details>
 
-### 第 2 步 — 运行验证渲染（宿主机挂载模式）
-
-- 做什么：启动容器，将 `setup-versions.yml` 当前版本对应的宿主机 AE 安装目录挂载进去，生成测试 AEP，并通过 nexrender 完成渲染。
-- 结果：得到 `validation-data/output/validation.mp4`，一个 4 秒的 H.264 mp4 文件。
-- 能跳过吗：如果你只关心安装缓存模式，可以直接跳到第 3 步。
+<details>
+<summary><strong>显式关闭启动时的 AE 重检</strong></summary>
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -ImageTag shotwright:runtime
+docker build --target shotwright --build-arg AUTO_INSTALL_AFTER_EFFECTS=0 -t shotwright:allinone .
 ```
 
-### 第 3 步 — 运行验证渲染（安装缓存模式）
+</details>
 
-- 做什么：先从 `setup-versions.yml` 解析当前启用的 setup 版本，再按 GHCR 优先、本地脚本兜底的顺序准备安装缓存。
-- 结果：得到与仓库当前 setup 选择一致的安装缓存目录，然后生成同样的 `validation-data/output/validation.mp4`。
-- 能跳过吗：如果第 2 步已经覆盖了你的验证场景，这一步可选。
+### 环境要求
 
-先解析当前启用的 setup 信息。这个脚本会直接读取 `setup-versions.yml`，后面的命令不需要再手写版本号：
+- Windows 宿主机（Windows 11 Pro 或 Windows Server LTSC 2025）
+- Docker Desktop 处于 Windows 容器模式（`docker info --format '{{.OSType}}'` 返回 `windows`）
+- 仅"宿主机挂载"模式需要：宿主机已安装与 `setup-versions.yml` 匹配的 AE
 
-```powershell
-$setup = python .\scripts\install\setup_versions.py | ConvertFrom-Json
-```
+## 🔁 CI 与 GHCR 安装镜像
 
-同一个对象还会给出 `$setup.install_root`，也就是当前版本期望使用的 AE 安装目录。
-
-<p align="center">
-	<img src="./docs/assets/setup-source-comparison-cn.svg" alt="卡通对比图：从 GHCR 拉取 Shotwright 安装镜像，或在本地构建安装缓存" width="960" />
-</p>
-
-优先路径：从 GHCR 拉取安装载荷并提取到本地目录：
-
-```powershell
-docker pull $setup.ghcr_image
-docker create --name ae-setup $setup.ghcr_image cmd /c exit
-docker cp 'ae-setup:C:\payload' 'C:\data\payload'
-docker rm ae-setup
-```
-
-> [!IMPORTANT]
-> Windows 安装镜像体积很大。如果 `docker pull` 经常超时或卡住，优先改用 `scripts/pull_container_image.py`。它会走 `http_proxy` 或 `https_proxy` 下载镜像、保存为本地 docker 归档，并且可以直接 `docker load`：
->
-> ```powershell
-> python .\scripts\pull_container_image.py --image $setup.ghcr_image --output-dir C:\data\images --load
-> ```
-
-兜底路径：在本地构建安装缓存：
-
-```powershell
-python .\scripts\install\download_after_effects_payload.py --payload-root C:\data\payload
-$helperSetup = Join-Path (Join-Path 'C:\data\payload' $setup.helper_dir_name) 'HDBox\Setup.exe'
-python .\scripts\install\modify_setup_win.py $helperSetup
-```
-
-运行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 `
-	-ImageTag shotwright:runtime `
-	-AfterEffectsPayloadRoot (Join-Path 'C:\data\payload' $setup.payload_dir_name) `
-	-CreativeCloudHelperRoot (Join-Path 'C:\data\payload' $setup.helper_dir_name)
-```
-
-## 🧱 CI 与 GHCR 安装镜像
-
-`.github/workflows/` 下的 GitHub Actions 工作流使用 `windows-2025` 运行器。
+`.github/workflows/` 下的工作流跑在 `windows-2025` runner 上。
 
 | 工作流 | 触发条件 | 用途 |
 | --- | --- | --- |
-| `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装程序，打补丁后发布到 GHCR |
-| `windows-container-validation` — `dockerfile-build` | 推送或 PR 修改 `Dockerfile` | 确认 Shotwright 镜像构建正常 |
-| `windows-container-validation` — `validation-render` | 手动 `workflow_dispatch` | 从 GHCR 拉取安装载荷，运行完整验证 |
+| `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装包、给辅助 `Setup.exe` 打补丁、发布到 `ghcr.io/liuchangfreeman/shotwright/after-effects-setup:<version>` |
+| `windows-container-validation` — `dockerfile-build` | 推送或 PR 改动 `Dockerfile` | 确认 `shotwright:allinone` 能正常构建 |
+| `windows-container-validation` — `validation-render` | 手动 `workflow_dispatch` | 从 GHCR 拉取安装载荷并跑完整验证渲染 |
 
-`ae-setup-publish` 工作流读取 [setup-versions.yml](setup-versions.yml) 来确定要构建的 After Effects 版本。它从 Adobe 公开目录下载安装载荷、给辅助安装器 `Setup.exe` 打补丁，并将所有内容打包为 `nanoserver:ltsc2025` 容器镜像后推送到 GHCR。
-
-`validation-render` 任务会自动从 GHCR 拉取安装镜像并提取载荷。除默认的 `GITHUB_TOKEN` 外不需要额外密钥。
+`ae-setup-publish` 把所有东西打包成 `nanoserver:ltsc2025` 镜像；`shotwright:allinone` 在构建期会拉这个镜像。除默认的 `GITHUB_TOKEN` 外不需要任何额外密钥。
 
 ## 📁 项目结构
 
 ```text
-scripts/
-	install/
-		download_after_effects_payload.py       从 Adobe 目录下载 AE 安装缓存
-		download_utils.py                       Adobe 目录与下载辅助工具
-		install_after_effects_in_container.ps1  在容器内从安装缓存安装 AE
-		modify_setup_win.py                     给 Adobe 辅助安装器 Setup.exe 打补丁
-		setup_versions.py                       从 setup-versions.yml 读取当前 setup 版本和派生目录名
-	validate/
-		create_validation_animation_project.jsx  生成测试 AEP
-		run_validation.ps1                      手动冒烟测试入口
-		validation_nexrender_job.json           最小化 nexrender 任务定义
-		validation_patch.jsx                    仅做补丁的 JSX 脚本
-	runtime_entrypoint.ps1                    容器启动脚本
-	pull_container_image.py                   面向 GHCR、MCR 等 OCI 镜像源的代理下载脚本
-
-validation-data/
-	output/                                   渲染输出产物
-	templates/                                生成的验证 AEP 文件
-	work/                                     nexrender 工作目录与日志
+.
+├── src/                              全栈平台（docker compose 入口）
+│   ├── backend/                      FastAPI + MongoDB + 智能体运行时
+│   │   ├── app/
+│   │   │   ├── main.py               FastAPI 入口
+│   │   │   ├── config.py             pydantic-settings 配置
+│   │   │   ├── database.py           Motor 客户端 + cache/session 抽象层
+│   │   │   ├── models/               Pydantic 模型（session, project, container, chat, media, admin, agent）
+│   │   │   ├── routers/              sessions / projects / containers / agent / admin / streaming
+│   │   │   ├── middleware/           管理员 JWT 认证
+│   │   │   └── services/             agent_tools, codex_bridge, codex_runtime, copilot_runtime,
+│   │   │                             container_manager, nexrender, reference_media, tts,
+│   │   │                             image_attachments, video_streaming, project_manager …
+│   │   └── codex-bridge/             给 @openai/codex-sdk 的 Node JSONL 桥
+│   ├── frontend/                     React 18 + TS + Webpack 5
+│   │   └── src/components/{AgentPanel,AdminPanel,VideoPlayer,ContainerManager}
+│   ├── docker-compose.yml            生产栈（mongo + backend + frontend）
+│   ├── docker-compose.dev.yml        热重载叠加层
+│   ├── docker-compose.local-codex.yml  本地 Codex CLI 鉴权的可选覆盖
+│   └── scripts/                      deploy.ps1 · dev.ps1 · cleanup.ps1 · runtime_smoke.py
+├── scripts/                          工作容器侧的运行时和验证脚本
+│   ├── runtime_entrypoint.ps1        容器启动（AE 重检 + bridge 启动）
+│   ├── pull_container_image.py       面向 OCI 镜像源的代理友好下载器
+│   ├── install/                      AE 安装缓存、版本读取、modify_setup_win.py
+│   └── validate/                     create_validation_animation_project.jsx · validation_patch.jsx
+│                                     validation_nexrender_job.json · run_validation.ps1
+├── Dockerfile                        多阶段：base / after-effects-setup / shotwright / backend / frontend
+├── shotwright-config.json            共享的宿主/容器路径与工具默认值
+├── setup-versions.yml                当前选中的 AE 版本（驱动 ae-setup-publish 与 install_root）
+├── validation-data/                  output/、templates/、work/ —— 本地生成
+└── docs/                             README 资源（validation-preview.gif、setup-source-comparison*.svg）
 ```
 
-## 🧠 Skills Bundle 维护流程
+## 🧠 Skills Bundle
 
-Shotwright 的 Copilot skills 只放在 `.github/skills`。这个目录仍然不进 Git；当仓库启动流程或开发启动入口发现它缺失时，会从当前版本对应的 release bundle 自动补齐。
-
-如果你要手动补齐或刷新本地技能目录，可以执行：
+Shotwright 的 Copilot skills 只放在 `.github/skills`。这个目录不进 Git；仓库启动路径检测到缺失时，会自动从当前版本对应的 release bundle 补齐。手动补齐：
 
 ```powershell
 python .\scripts\skills\download_skills_bundle.py
 ```
 
-然后直接修改 `.github/skills` 下的文件，再更新 [shotwright-config.json](shotwright-config.json) 里的 `tooling.skills.artifactVersion`，重新打包并发布：
+修改后重新发布：改 `.github/skills` 下的文件，bump [shotwright-config.json](shotwright-config.json) 里的 `tooling.skills.artifactVersion`，然后：
 
 ```powershell
 python .\scripts\skills\package_skills_bundle.py
@@ -250,19 +289,21 @@ python .\scripts\skills\publish_skills_release.py
 
 ## 📝 设计说明
 
-- 默认工作镜像是 `shotwright:runtime`，它会在镜像构建阶段把 GHCR 发布的 setup payload 复制进来，并完成 `setup-versions.yml` 当前选择版本的 AE 安装。
-- 如果你要显式验证宿主机挂载模式或安装缓存模式，验证脚本仍然支持这些路径；但服务创建的工作容器默认使用预装好的 runtime 镜像。
-- 容器启动时仍然会执行 `scripts/runtime_entrypoint.ps1`。如果 `aerender.exe` 已经存在，共用安装逻辑会立即返回。
-- 验证用 JSX 只负责补丁逻辑，渲染执行与输出管理由 nexrender 统一负责。
-- 验证任务通过 `outputExt: mp4` 和 `@nexrender/action-copy` 保证最终只留下一个稳定、可预期的视频产物。
+- **镜像策略。** 默认工作镜像是 `shotwright:allinone`。服务按需拉起的工作容器、`docker-compose.dev.yml` 都基于这个预装好的镜像；老的 `shotwright:dev` 与单独 runtime 镜像的分裂已经合并。
+- **仅补丁 JSX。** 验证用 JSX 只负责合成层修改；nexrender 负责渲染执行和产物路由 —— 当 AE 异常退出但 mp4 已经写好时，验证脚本会从 work 目录里捞回 `result.mp4`。
+- **单一可预期产物。** 验证任务用 `outputExt: mp4` + `@nexrender/action-copy`，每次跑完只留下一个 mp4（不再有 `.done` 标记文件）。
+- **可切换的智能体后端。** Agent provider 可插拔：`SHOTWRIGHT_AGENT_PROVIDER=copilot`（默认）走 GitHub Copilot SDK；`=codex` 走容器内 Node Codex bridge。两边的密钥可以并存，管理员在 AdminPanel 切换。
+- **沙箱化的 Python 工具。** `run_python_code` 跑在一个受管 venv 里（`SHOTWRIGHT_PYTHON_TOOL_RUNTIME_DIR`），根据 `requirements-aigc.txt` 哈希同步，智能体永远不会污染系统 Python。
+- **HLS 流式预览。** 渲染产物会被切成 HLS 片段，从共享 `hls` 卷服务；React 端的 `VideoPlayer` 用 `hls.js` 播放。
 
 ## 🗺️ 路线图
 
-- [ ] 为验证命令构建器和异常恢复路径补充集成测试。
-- [ ] 支持远程工作节点池和分布式渲染调度。
-- [ ] 为任意用户 AEP 上传构建可复现的任务打包流程。
-- [ ] 增加产物保留与清理策略。
-- [ ] 构建更高层的任务模型，把设计师意图映射到容器化执行。
+- [ ] 远程工作节点池，支持分布式渲染
+- [ ] 多租户工程隔离与每用户配额
+- [ ] 一等公民的产物保留与清理策略
+- [ ] 更高层的任务模型，把设计师意图映射到容器化执行
+- [ ] 验证命令构建器和异常恢复路径的集成测试
+- [ ] 公开 Helm chart（compose label 已按 `app.kubernetes.io/*` 约定打好）
 
 ## 📄 许可证
 
