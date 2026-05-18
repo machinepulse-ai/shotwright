@@ -316,12 +316,12 @@ Produces `validation-data/output/validation.mp4`. See [setup.md](setup.md) for t
 
 ## 🔁 CI and GHCR Setup Images
 
-Full AE build/render jobs in `.github/workflows/` target the organization `windows-latest-8-cores` Windows larger runner label by default. PRs run a lightweight metadata check on GitHub-hosted Linux so unavailable Windows container capacity does not block documentation or configuration review.
+Full AE build/render jobs in `.github/workflows/` target the organization `windows-latest-8-cores` Windows larger runner label by default. PRs run a lightweight setup metadata check on GitHub-hosted Linux so unavailable Windows container capacity does not block documentation or configuration review.
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
 | `ae-setup-publish` | Push to `setup-versions.yml` or manual dispatch | Download AE installer from Adobe, patch helper `Setup.exe`, publish to `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:<version>` |
-| `windows-container-validation` — `build-and-validate` | Push or PR touching Docker/setup metadata | Validate setup metadata, base-image tags, and GHCR image naming |
+| `windows-container-validation` — `validate-setup-metadata` | Push or PR touching setup metadata | Validate setup metadata, base-image tags, and GHCR image naming |
 | `windows-container-validation` — `full-windows-validation` | Manual `workflow_dispatch` | Build `shotwright:allinone`, pull installer payload from GHCR, and run the full validation render |
 
 `ae-setup-publish` packages the AE installer into a minimal Windows Nano Server image (`nanoserver:ltsc2025`), which `shotwright:allinone` pulls from at build time. CI pulls the internal GHCR packages after `docker login ghcr.io` with the default `GITHUB_TOKEN`.

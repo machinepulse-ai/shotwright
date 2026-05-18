@@ -3,24 +3,22 @@ name: windows-container-validation
 on:
   push:
     paths:
-      - Dockerfile
       - setup-versions.yml
       - shotwright-config.json
-      - scripts/install/**
-      - scripts/validate/**
+      - scripts/install/setup_versions.py
+      - scripts/shotwright_config.py
       - .github/workflows/windows-container-validation.yml
   pull_request:
     paths:
-      - Dockerfile
       - setup-versions.yml
       - shotwright-config.json
-      - scripts/install/**
-      - scripts/validate/**
+      - scripts/install/setup_versions.py
+      - scripts/shotwright_config.py
       - .github/workflows/windows-container-validation.yml
   workflow_dispatch:
 
 jobs:
-  build-and-validate:
+  validate-setup-metadata:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
