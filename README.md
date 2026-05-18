@@ -17,11 +17,11 @@ Build Windows render workers, mount a real After Effects install or auto-install
 </p>
 
 <p>
-	<a href="https://github.com/LiuChangFreeman/shotwright/stargazers">
-		<img src="https://img.shields.io/github/stars/LiuChangFreeman/shotwright?style=social" alt="GitHub stars" />
+	<a href="https://github.com/machinepulse-ai/shotwright/stargazers">
+		<img src="https://img.shields.io/github/stars/machinepulse-ai/shotwright?style=social" alt="GitHub stars" />
 	</a>
-	<a href="https://github.com/LiuChangFreeman/shotwright/network/members">
-		<img src="https://img.shields.io/github/forks/LiuChangFreeman/shotwright?style=social" alt="GitHub forks" />
+	<a href="https://github.com/machinepulse-ai/shotwright/network/members">
+		<img src="https://img.shields.io/github/forks/machinepulse-ai/shotwright?style=social" alt="GitHub forks" />
 	</a>
 </p>
 

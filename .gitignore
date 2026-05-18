@@ -39,3 +39,4 @@ validation-data/work/*
 .shotwright/inline-images/
 .github/skills/
 .github/skills/after-effects-user-guide/.cache/
+.worktrees/
