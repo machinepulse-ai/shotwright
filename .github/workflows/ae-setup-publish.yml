@@ -111,3 +111,16 @@ jobs:
         run: |
           docker push $env:IMAGE_TAG
           Write-Host "Published $env:IMAGE_TAG"
+
+      - name: Make setup image public
+        if: steps.check_image.outputs.exists == 'true' || env.IMAGE_TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $packageName = [System.Uri]::EscapeDataString('shotwright/after-effects-setup')
+          gh api `
+            --method PATCH `
+            "/orgs/${{ github.repository_owner }}/packages/container/$packageName" `
+            -f visibility=public
+          Write-Host "Made GHCR package public: ghcr.io/${{ github.repository_owner }}/shotwright/after-effects-setup"
