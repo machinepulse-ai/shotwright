@@ -128,7 +128,18 @@ async def main() -> None:
         cc_target_directory=helper_dir,
     )
 
+    print(
+        "[download] "
+        f"resolving Adobe catalog for {args.product_id} {args.version} ({args.platform})...",
+        flush=True,
+    )
     plan = await manager.resolve_standard_download_plan(args.product_id, args.version)
+    print(
+        "[download] "
+        f"resolved {plan.display_name}; secure CDN: {plan.secure_cdn}",
+        flush=True,
+    )
+
     task = DownloadTask(
         product_id=args.product_id,
         product_version=args.version,
@@ -147,6 +158,7 @@ async def main() -> None:
         flush=True,
     )
 
+    print("[download] starting main After Effects payload download...", flush=True)
     stop_progress = asyncio.Event()
     progress_task = asyncio.create_task(report_download_progress(task, stop_progress))
     try:
@@ -164,8 +176,10 @@ async def main() -> None:
     )
 
     if not args.skip_helper:
+        print("[download] starting Creative Cloud helper payload download...", flush=True)
+
         async def report_helper_progress(progress: float, message: str) -> None:
-            print(f"[{progress:0.0%}] {message}")
+            print(f"[helper] {progress:0.0%} {message}", flush=True)
 
         await manager.download_creative_cloud_helper_packages(
             progress_handler=report_helper_progress,
