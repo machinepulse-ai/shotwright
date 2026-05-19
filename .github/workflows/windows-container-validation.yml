@@ -40,7 +40,7 @@ jobs:
           setup = json.loads(Path("/tmp/setup-versions.resolved.json").read_text(encoding="utf-8"))
           config = json.loads(Path("/tmp/shotwright-config.resolved.json").read_text(encoding="utf-8"))
 
-          expected_prefix = "ghcr.io/machinepulse-ai/shotwright/after-effects-setup:"
+          expected_prefix = "ghcr.io/freeman-mp/shotwright/after-effects-setup:"
           if not setup["ghcr_image"].startswith(expected_prefix):
               raise SystemExit(f"Unexpected setup image: {setup['ghcr_image']}")
           if setup["platform"] != "win64":
@@ -115,7 +115,7 @@ jobs:
         run: |
           $sourceImage = '${{ steps.config.outputs.runtime_base_image }}'
           $sourceTag = $sourceImage.Split(':')[-1]
-          $cacheImage = "ghcr.io/machinepulse-ai/shotwright/base_image:$sourceTag"
+          $cacheImage = "ghcr.io/freeman-mp/shotwright/base_image:$sourceTag"
           $resolvedImage = $sourceImage
           $cacheHit = $false
 

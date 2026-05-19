@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 
-DEFAULT_IMAGE_REPOSITORY = "ghcr.io/machinepulse-ai/shotwright/after-effects-setup"
+DEFAULT_IMAGE_REPOSITORY = "ghcr.io/freeman-mp/shotwright/after-effects-setup"
 
 
 def _strip_quotes(value: str) -> str:

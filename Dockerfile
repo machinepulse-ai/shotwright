@@ -8,7 +8,7 @@ ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
 ARG PIP_DEFAULT_TIMEOUT=120
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 ARG CHOCO_SOURCE
-ARG AE_SETUP_IMAGE=ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2
+ARG AE_SETUP_IMAGE=ghcr.io/freeman-mp/shotwright/after-effects-setup:26.2
 
 # =============================================================================
 # Stage: base — shared toolchain for all targets

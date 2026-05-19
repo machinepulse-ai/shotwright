@@ -16,7 +16,7 @@ This repository should stay:
 
 - The Docker image includes Node.js, Python 3.13, ffmpeg, Git, and the runtime dependencies required by nexrender.
 - The default worker image is `shotwright:allinone`.
-- `shotwright:allinone` copies the published `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2` payload into the image and completes the After Effects install during image build.
+- `shotwright:allinone` copies the published `ghcr.io/freeman-mp/shotwright/after-effects-setup:26.2` payload into the image and completes the After Effects install during image build.
 - Validation still supports two explicit smoke-test paths when needed:
   1. **Host mount** — mount the host-side AE install resolved from `setup-versions.yml` into the container.
   2. **Installer-cache mode** — pull a pre-built installer payload image from GHCR first, or build the cache locally with `scripts/install/download_after_effects_payload.py`, then mount it at `C:\data\payload` and let the container install AE at startup through `scripts/runtime_entrypoint.ps1`.

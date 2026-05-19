@@ -122,7 +122,7 @@ Docker Desktop 需处于 Windows 容器模式（`docker info --format '{{.OSType
 | Stage | 用途 | 典型 tag |
 | --- | --- | --- |
 | `base` | 共享工具链 —— Chocolatey（Windows 包管理器）、Node 20、Python 3.13、ffmpeg、Git、Visual C++ 运行库 | — |
-| `after-effects-setup` | 引用 `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2` | （拉取，非构建） |
+| `after-effects-setup` | 引用 `ghcr.io/freeman-mp/shotwright/after-effects-setup:26.2` | （拉取，非构建） |
 | `shotwright` | All-in-one AE 工作容器 —— 构建期安装 AE，启动时执行 `runtime_entrypoint.ps1` | `shotwright:allinone` |
 | `backend` | FastAPI + codex-bridge + uv 依赖 | `shotwright:backend` |
 | `frontend-build` → `frontend` | Webpack 生产构建 + 静态服务 | `shotwright:frontend` |
@@ -320,7 +320,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate\run_validation.ps1 -
 
 | 工作流 | 触发条件 | 用途 |
 | --- | --- | --- |
-| `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装包、给辅助 `Setup.exe` 打补丁、发布到 `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:<version>` |
+| `ae-setup-publish` | 推送更改 `setup-versions.yml` 或手动触发 | 从 Adobe 下载 AE 安装包、给辅助 `Setup.exe` 打补丁、发布到 `ghcr.io/freeman-mp/shotwright/after-effects-setup:<version>` |
 | `windows-container-validation` — `validate-setup-metadata` | 推送或 PR 改动 setup 元数据 | 校验 setup 元数据、基础镜像标签和 GHCR 镜像命名 |
 | `windows-container-validation` — `full-windows-validation` | 手动 `workflow_dispatch` | 构建 `shotwright:allinone`、从 GHCR 拉取安装载荷并跑完整验证渲染 |
 

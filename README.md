@@ -122,7 +122,7 @@ The root [Dockerfile](Dockerfile) is multi-stage. The default `shotwright` targe
 | Stage | Purpose | Typical tag |
 | --- | --- | --- |
 | `base` | Shared toolchain — Chocolatey, Node 20, Python 3.13, ffmpeg, Git, Visual C++ runtime | — |
-| `after-effects-setup` | Reference to `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:26.2` | (pulled, not built) |
+| `after-effects-setup` | Reference to `ghcr.io/freeman-mp/shotwright/after-effects-setup:26.2` | (pulled, not built) |
 | `shotwright` | All-in-one AE worker — installs AE during build, runs `runtime_entrypoint.ps1` at startup | `shotwright:allinone` |
 | `backend` | FastAPI + codex-bridge + uv dependencies | `shotwright:backend` |
 | `frontend-build` → `frontend` | Webpack production build + static server | `shotwright:frontend` |
@@ -320,7 +320,7 @@ Full AE build/render jobs in `.github/workflows/` target the organization `windo
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
-| `ae-setup-publish` | Push to `setup-versions.yml` or manual dispatch | Download AE installer from Adobe, patch helper `Setup.exe`, publish to `ghcr.io/machinepulse-ai/shotwright/after-effects-setup:<version>` |
+| `ae-setup-publish` | Push to `setup-versions.yml` or manual dispatch | Download AE installer from Adobe, patch helper `Setup.exe`, publish to `ghcr.io/freeman-mp/shotwright/after-effects-setup:<version>` |
 | `windows-container-validation` — `validate-setup-metadata` | Push or PR touching setup metadata | Validate setup metadata, base-image tags, and GHCR image naming |
 | `windows-container-validation` — `full-windows-validation` | Manual `workflow_dispatch` | Build `shotwright:allinone`, pull installer payload from GHCR, and run the full validation render |
 
