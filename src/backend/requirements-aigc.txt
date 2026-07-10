@@ -9,7 +9,7 @@ scipy==1.17.1
 soundfile==0.13.1
 librosa==0.11.0
 moviepy==2.2.1
-onnx==1.21.0
+onnx==1.22.0
 onnxruntime==1.25.1
 torch==2.11.0+cpu
 faster-whisper==1.2.1
